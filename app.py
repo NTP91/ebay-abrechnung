@@ -10,6 +10,7 @@ from core import (
     LexwareError,
     build_invoice_payload,
     calculate_overviews,
+    combine_uploaded_frames,
     create_draft,
     csv_bytes,
     detect_column,
@@ -39,17 +40,26 @@ with st.sidebar:
 
 left, right = st.columns(2)
 with left:
-    ebay_file = st.file_uploader("eBay-Auszahlung", type=("csv", "txt", "xlsx"))
+    ebay_files = st.file_uploader(
+        "eBay-Auszahlungen", type=("csv", "txt", "xlsx"), accept_multiple_files=True,
+        help="Mehrere Dateien können gemeinsam ausgewählt oder per Drag-and-drop abgelegt werden.",
+    )
 with right:
     wahan_file = st.file_uploader("Wahan-Bestellübersicht (optional)", type=("csv", "txt", "xlsx"))
 
-ebay_result = wahan_result = None
+ebay_results = []
+wahan_result = None
+ebay_frame = pd.DataFrame()
+duplicate_count = 0
 import_error = None
 try:
-    if ebay_file:
-        ebay_result = read_upload(ebay_file, ebay_file.name)
-        if ebay_result.frame.empty:
-            raise ValueError("Die eBay-Datei enthält keine Datensätze.")
+    for ebay_file in ebay_files:
+        result = read_upload(ebay_file, ebay_file.name)
+        if result.frame.empty:
+            raise ValueError(f"Die eBay-Datei „{ebay_file.name}“ enthält keine Datensätze.")
+        ebay_results.append((ebay_file.name, result))
+    if ebay_results:
+        ebay_frame, duplicate_count = combine_uploaded_frames([result.frame for _, result in ebay_results])
     if wahan_file:
         wahan_result = read_upload(wahan_file, wahan_file.name)
         if wahan_result.frame.empty:
@@ -62,16 +72,19 @@ transactions = pd.DataFrame(columns=["SKU", "Netto-Umsatz"])
 unassigned = pd.DataFrame(columns=["SKU", "Netto-Umsatz", "Grund"])
 group_a, group_b = EMPTY.copy(), EMPTY.copy()
 
-if ebay_result is not None and not import_error:
+if ebay_results and not import_error:
     with st.expander("Importdetails und Spaltenzuordnung", expanded=False):
-        source = "Excel" if ebay_result.delimiter == "Excel" else f"CSV · `{ebay_result.delimiter}` · {ebay_result.encoding}"
-        st.write(f"eBay: Headerzeile {ebay_result.header_row + 1} · {source}")
-        if ebay_result.skipped_rows:
-            st.warning(f"Bis zu {ebay_result.skipped_rows} unregelmäßige eBay-Zeilen wurden übersprungen.")
-        cols = list(ebay_result.frame.columns)
-        sku_detected = detect_column(ebay_result.frame, "sku")
-        amount_detected = detect_column(ebay_result.frame, "amount")
-        order_detected = detect_column(ebay_result.frame, "order")
+        for filename, result in ebay_results:
+            source = "Excel" if result.delimiter == "Excel" else f"CSV · `{result.delimiter}` · {result.encoding}"
+            st.write(f"**{filename}:** Headerzeile {result.header_row + 1} · {source} · {len(result.frame)} Zeilen")
+            if result.skipped_rows:
+                st.warning(f"In „{filename}“ wurden bis zu {result.skipped_rows} unregelmäßige Zeilen übersprungen.")
+        if duplicate_count:
+            st.success(f"{duplicate_count} exakte Duplikate wurden vor der Abrechnung entfernt.")
+        cols = list(ebay_frame.columns)
+        sku_detected = detect_column(ebay_frame, "sku")
+        amount_detected = detect_column(ebay_frame, "amount")
+        order_detected = detect_column(ebay_frame, "order")
         sku_col = st.selectbox("eBay: SKU-Spalte", cols, index=cols.index(sku_detected) if sku_detected in cols else 0)
         amount_col = st.selectbox("eBay: Netto-Spalte", cols, index=cols.index(amount_detected) if amount_detected in cols else 0)
         order_options = ["— nicht verwenden —", *cols]
@@ -86,7 +99,7 @@ if ebay_result is not None and not import_error:
     if not sku_detected or not amount_detected:
         st.warning("SKU- oder Netto-Spalte wurde nicht sicher erkannt. Bitte die Spaltenzuordnung prüfen.")
     transactions, unassigned = prepare_transactions_detailed(
-        ebay_result.frame, sku_col, amount_col,
+        ebay_frame, sku_col, amount_col,
         None if order_col == "— nicht verwenden —" else order_col,
         wahan_result.frame if wahan_result is not None else None, wahan_order_col, wahan_sku_col,
     )
@@ -100,7 +113,7 @@ with tab_a:
     st.subheader("Direkt-Partner")
     st.caption("PP, BA, MK und 001 · Netto-Umsatz abzüglich 0,5 % Provision · kein Lexware-Upload")
     if group_a.empty:
-        st.info("Keine Datensätze für Gruppe A vorhanden." if ebay_file else "Bitte zuerst eine eBay-Auszahlung hochladen.")
+        st.info("Keine Datensätze für Gruppe A vorhanden." if ebay_files else "Bitte zuerst eine eBay-Auszahlung hochladen.")
     else:
         view = group_a[["SKU", "Netto-Umsatz", "Provision/Rabatt 0,5 %", "Abrechnung nach 0,5 %"]]
         st.dataframe(view, use_container_width=True, hide_index=True)
@@ -116,7 +129,7 @@ with tab_b:
     st.subheader("Evelyn-Gesamtübersicht")
     st.caption("NB und alle übrigen Standard-SKUs · 0,5 % Rabatt")
     if group_b.empty:
-        st.info("Keine Datensätze für Gruppe B vorhanden." if ebay_file else "Bitte zuerst eine eBay-Auszahlung hochladen.")
+        st.info("Keine Datensätze für Gruppe B vorhanden." if ebay_files else "Bitte zuerst eine eBay-Auszahlung hochladen.")
     else:
         summary_cols = ["SKU", "Netto-Umsatz", "Provision/Rabatt 0,5 %", "Abrechnung nach 0,5 %"]
         st.dataframe(group_b[summary_cols], use_container_width=True, hide_index=True)
@@ -150,7 +163,7 @@ with tab_unassigned:
     st.subheader("Ohne Zuordnung")
     st.caption("Zeilen ohne verwertbare SKU oder gültigen Netto-Betrag")
     if unassigned.empty:
-        st.info("Keine unzugeordneten Zeilen vorhanden." if ebay_file else "Bitte zuerst eine eBay-Auszahlung hochladen.")
+        st.info("Keine unzugeordneten Zeilen vorhanden." if ebay_files else "Bitte zuerst eine eBay-Auszahlung hochladen.")
     else:
         st.warning(f"{len(unassigned)} Zeilen benötigen eine manuelle Prüfung.")
         st.dataframe(unassigned, use_container_width=True, hide_index=True)
@@ -160,7 +173,7 @@ with tab_all:
     st.subheader("Alle Daten")
     st.caption("Bereinigte, für die Abrechnung verwendete eBay-Datensätze")
     if transactions.empty:
-        st.info("Keine gültigen Datensätze vorhanden." if ebay_file else "Bitte zuerst eine eBay-Auszahlung hochladen.")
+        st.info("Keine gültigen Datensätze vorhanden." if ebay_files else "Bitte zuerst eine eBay-Auszahlung hochladen.")
     else:
         st.dataframe(transactions, use_container_width=True, hide_index=True)
         st.download_button("Alle bereinigten Daten als CSV", csv_bytes(transactions), "ebay_alle_daten.csv", "text/csv")
