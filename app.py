@@ -5,14 +5,23 @@ import io
 st.set_page_config(page_title="eBay Payout & Provision Tool", layout="wide")
 
 st.title("📦 eBay Payout & SKU-Abrechnungs Tool")
-st.write("Lade deinen eBay Auszahlungsbericht (CSV) sowie optional deine Soll-Rechnung (Excel/CSV) hoch.")
+st.write("Lade deine eBay Auszahlungsberichte (CSV) sowie optional deine Soll-Rechnung (Excel/CSV) hoch.")
 
-# 1. Zwei Upload-Felder nebeneinander
+# 1. Zwei Upload-Felder nebeneinander (Mehrfachauswahl bei CSV aktiviert)
 col1, col2 = st.columns(2)
 with col1:
-    uploaded_payout = st.file_uploader("1. eBay Auszahlungsbericht (CSV hochladen)", type=["csv"], key="payout")
+    uploaded_payout = st.file_uploader(
+        "1. eBay Auszahlungsbericht (CSV hochladen)", 
+        type=["csv"], 
+        accept_multiple_files=True, 
+        key="payout"
+    )
 with col2:
-    uploaded_invoice = st.file_uploader("2. Soll-Rechnung mit 154 Pos. (Excel/CSV - optional)", type=["xlsx", "csv"], key="invoice")
+    uploaded_invoice = st.file_uploader(
+        "2. Soll-Rechnung mit 154 Pos. (Excel/CSV - optional)", 
+        type=["xlsx", "csv"], 
+        key="invoice"
+    )
 
 def parse_german_float(val):
     if pd.isna(val) or val == '--' or str(val).strip() == '':
@@ -24,33 +33,48 @@ def get_commission_rate(sku):
         return 0.035
     sku_clean = str(sku).strip().upper()
     prefix = sku_clean.split('/')[0].strip()
+    
+    # 0,5 % Regel für Spezial-SKUs
     if prefix in ['BA', 'MK', 'PP', '001'] or prefix.startswith('001'):
         return 0.005
+    
+    # 3,5 % Standard für alle übrigen SKUs
     return 0.035
 
-if uploaded_payout is not None:
+if uploaded_payout:
     try:
-        content = uploaded_payout.getvalue().decode('utf-8', errors='ignore')
-        lines = content.splitlines()
+        all_dfs = []
         
-        header_idx = 0
-        for i, line in enumerate(lines):
-            if "Datum der Transaktionserstellung" in line:
-                header_idx = i
-                break
-                
-        df_payout = pd.read_csv(io.StringIO("\n".join(lines[header_idx:])), sep=';')
+        # Alle hochgeladenen CSV-Dateien einlesen und verbinden
+        for file in uploaded_payout:
+            content = file.getvalue().decode('utf-8', errors='ignore')
+            lines = content.splitlines()
+            
+            header_idx = 0
+            for i, line in enumerate(lines):
+                if "Datum der Transaktionserstellung" in line:
+                    header_idx = i
+                    break
+                    
+            df_temp = pd.read_csv(io.StringIO("\n".join(lines[header_idx:])), sep=';')
+            all_dfs.append(df_temp)
+        
+        # Zu einem einzigen Datensatz zusammenfügen
+        df_payout = pd.concat(all_dfs, ignore_index=True)
         
         # --- 1. DUBLETTENPRÜFUNG ---
         initial_count = len(df_payout)
-        df_payout = df_payout.drop_duplicates(subset=['Bestellnummer', 'Datum der Transaktionserstellung', 'Betrag abzügl. Kosten'])
+        df_payout = df_payout.drop_duplicates(
+            subset=['Bestellnummer', 'Datum der Transaktionserstellung', 'Betrag abzügl. Kosten']
+        )
         duplicates_removed = initial_count - len(df_payout)
         
         if duplicates_removed > 0:
-            st.warning(f"⚠️ Dublettenprüfung: Es wurden {duplicates_removed} doppelte Transaktionen automatisch entfernt!")
-        else:
-            st.success(f"✅ Auszahlungsbericht geladen: {len(df_payout)} eindeutige Transaktionen gefunden.")
+            st.warning(f"⚠️ Dublettenprüfung: Es wurden {duplicates_removed} doppelte Transaktionen automatisch herausgefiltert!")
         
+        st.success(f"✅ Auszahlungsbericht geladen: {len(df_payout)} eindeutige Transaktionen gefunden.")
+        
+        # Spalten und Beträge aufbereiten
         df_payout['Auszahlung_Netto_eBay'] = df_payout['Betrag abzügl. Kosten'].apply(parse_german_float)
         df_payout['SKU'] = df_payout['Bestandseinheit'].fillna('OHNE_SKU').astype(str).str.strip()
         df_payout['Provisionssatz'] = df_payout['SKU'].apply(get_commission_rate)
