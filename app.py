@@ -67,7 +67,7 @@ if uploaded_payout:
         
         df_payout = pd.concat(all_dfs, ignore_index=True)
         
-        # Säubern
+        # Säubern & Vorbereiten
         df_payout['Bestellnummer_Match'] = df_payout['Bestellnummer'].apply(clean_order_number)
         df_payout = df_payout.drop_duplicates(subset=['Bestellnummer_Match', 'Datum der Transaktionserstellung', 'Betrag abzügl. Kosten'])
         
@@ -75,6 +75,14 @@ if uploaded_payout:
         df_payout['SKU'] = df_payout['Bestandseinheit'].fillna('OHNE_SKU').astype(str).str.strip()
         df_payout['SKU_Prefix'] = df_payout['SKU'].apply(extract_partner_prefix)
         
+        # Menge / Stückzahl extrahieren (falls nicht im CSV, Standard 1)
+        if 'Stückzahl' in df_payout.columns:
+            df_payout['Menge'] = pd.to_numeric(df_payout['Stückzahl'], errors='coerce').fillna(1).astype(int)
+        elif 'Anzahl' in df_payout.columns:
+            df_payout['Menge'] = pd.to_numeric(df_payout['Anzahl'], errors='coerce').fillna(1).astype(int)
+        else:
+            df_payout['Menge'] = 1
+
         df_payout['Gruppe'] = df_payout['SKU_Prefix'].apply(
             lambda p: 'Gruppe A (Direkt)' if p in GROUP_A_PREFIXES else ('Ohne Zuordnung' if p == 'OHNE_SKU' else 'Gruppe B (Über Dich)')
         )
@@ -92,7 +100,7 @@ if uploaded_payout:
         ).round(2)
 
         # ---------------------------------------------------------
-        # SOLL-IST STATUS OVERVIEW & INTERNE MARGE (NUR FÜR DICH)
+        # SOLL-IST STATUS OVERVIEW & INTERNE MARGE
         # ---------------------------------------------------------
         if uploaded_invoice is not None:
             if uploaded_invoice.name.endswith('.xlsx'):
@@ -161,14 +169,14 @@ if uploaded_payout:
                 'Anzahl_Transaktionen': 'Anzahl Transaktionen',
                 'eBay_Brutto_Gesamt': 'Erlös Brutto (€)',
                 'Evelyn_Provision': 'Provision 0,5 % (€)',
-                'Auszahlungsbetrag': 'Auszahlungsbetrag (€)'
+                'Auszahlungsbetrag': 'Auszahlungsbetrag Netto (€)'
             })
 
             st.dataframe(
                 summary_a_display.style.format({
                     'Erlös Brutto (€)': '{:.2f} €',
                     'Provision 0,5 % (€)': '{:.2f} €',
-                    'Auszahlungsbetrag (€)': '{:.2f} €'
+                    'Auszahlungsbetrag Netto (€)': '{:.2f} €'
                 }),
                 use_container_width=True
             )
@@ -185,8 +193,6 @@ if uploaded_payout:
                 file_name="Direktabrechnungen_GruppeA_fuer_Evelyn.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-        else:
-            st.success("✅ Keine Positionen für Gruppe A in den hochgeladenen Payouts enthalten.")
 
         # ---------------------------------------------------------
         # BLOCK 2: GESAMTABRECHNUNG FÜR EVELYN (NUR GRUPPE B)
@@ -220,14 +226,14 @@ if uploaded_payout:
                 'Anzahl_Transaktionen': 'Anzahl Transaktionen',
                 'eBay_Brutto_Gesamt': 'Erlös Brutto (€)',
                 'Evelyn_Provision': 'Provision 0,5 % (€)',
-                'Auszahlungsbetrag': 'Auszahlungsbetrag (€)'
+                'Auszahlungsbetrag': 'Auszahlungsbetrag Netto (€)'
             })
             
             st.dataframe(
                 summary_b_display.style.format({
                     'Erlös Brutto (€)': '{:.2f} €',
                     'Provision 0,5 % (€)': '{:.2f} €',
-                    'Auszahlungsbetrag (€)': '{:.2f} €'
+                    'Auszahlungsbetrag Netto (€)': '{:.2f} €'
                 }),
                 use_container_width=True
             )
@@ -260,6 +266,7 @@ if uploaded_payout:
                 'Bestellnummer',
                 'SKU_Prefix',
                 'SKU',
+                'Menge',
                 'Angebotstitel',
                 'eBay_Brutto',
                 'Partner_Prov_EUR',
@@ -267,8 +274,9 @@ if uploaded_payout:
             ]].rename(columns={
                 'Datum der Transaktionserstellung': 'Datum',
                 'SKU_Prefix': 'Partner',
+                'Menge': 'Stück',
                 'eBay_Brutto': 'Gutschrift Brutto (€)',
-                'Partner_Prov_EUR': 'Provision (€)',
+                'Partner_Prov_EUR': 'Erstattete Provision (€)',
                 'Auszahlung_Partner_Brutto': 'Gutschrift Netto/Auszahlung (€)'
             })
 
@@ -277,9 +285,10 @@ if uploaded_payout:
                 'Bestellnummer': '',
                 'Partner': '',
                 'SKU': '',
+                'Stück': refund_display['Stück'].sum(),
                 'Angebotstitel': '',
                 'Gutschrift Brutto (€)': refund_display['Gutschrift Brutto (€)'].sum(),
-                'Provision (€)': refund_display['Provision (€)'].sum(),
+                'Erstattete Provision (€)': refund_display['Erstattete Provision (€)'].sum(),
                 'Gutschrift Netto/Auszahlung (€)': refund_display['Gutschrift Netto/Auszahlung (€)'].sum()
             }])
 
@@ -288,7 +297,7 @@ if uploaded_payout:
             st.dataframe(
                 refund_final.style.format({
                     'Gutschrift Brutto (€)': '{:.2f} €',
-                    'Provision (€)': '{:.2f} €',
+                    'Erstattete Provision (€)': '{:.2f} €',
                     'Gutschrift Netto/Auszahlung (€)': '{:.2f} €'
                 }, na_rep=''),
                 use_container_width=True
@@ -299,7 +308,7 @@ if uploaded_payout:
         # ---------------------------------------------------------
         st.markdown("---")
         st.subheader("🔍 4. Einzelabrechnungen (Verkäufe inklusive Gutschrift)")
-        st.info("ℹ️ **Verwendungszweck:** Hier wählst du deinen jeweiligen Kunden aus. Die Übersicht dient dem Kunden als Rechnungsgrundlage bzw. Abrechnungsnachweis (aufgeteilt in die Tabs 'Verkäufe' und 'Gutschriften').")
+        st.info("ℹ️ **Verwendungszweck:** Hier wählst du deinen jeweiligen Kunden aus. Die Übersicht dient dem Kunden als Rechnungsgrundlage bzw. Abrechnungsnachweis für Lexoffice.")
 
         all_partners = sorted([p for p in df_payout['SKU_Prefix'].unique() if p not in ['OHNE_SKU', 'FEHLT', '--', '']])
         
@@ -310,6 +319,10 @@ if uploaded_payout:
             if selected_partner != "-- Bitte Partner auswählen --":
                 filtered_p = df_payout[df_payout['SKU_Prefix'] == selected_partner].copy()
                 
+                # Ermittlung des konkreten Prozentsatzes für die Spaltenüberschrift
+                prov_rate_pct = "0,5 %" if selected_partner in GROUP_A_PREFIXES else "3,5 %"
+                prov_col_name = f"Provision {prov_rate_pct} (€)"
+                
                 # Aufteilung in Verkäufe und Gutschriften
                 df_sales = filtered_p[filtered_p['eBay_Brutto'] >= 0].copy()
                 df_retouren = filtered_p[filtered_p['eBay_Brutto'] < 0].copy()
@@ -318,20 +331,33 @@ if uploaded_payout:
                 st.markdown(f"#### 🛍️ Verkäufe ({len(df_sales)} Positionen)")
                 if not df_sales.empty:
                     partner_sales = df_sales[[
-                        'Datum der Transaktionserstellung', 'Bestellnummer', 'SKU_Prefix', 'SKU', 'Angebotstitel',
+                        'Datum der Transaktionserstellung', 'Bestellnummer', 'SKU_Prefix', 'SKU', 'Menge', 'Angebotstitel',
                         'eBay_Brutto', 'Partner_Prov_EUR', 'Auszahlung_Partner_Brutto'
                     ]].rename(columns={
-                        'Datum der Transaktionserstellung': 'Datum', 'SKU_Prefix': 'Partner',
-                        'eBay_Brutto': 'Erlös Brutto (€)', 'Partner_Prov_EUR': 'Provision (€)', 'Auszahlung_Partner_Brutto': 'Auszahlungsbetrag Netto (€)'
+                        'Datum der Transaktionserstellung': 'Datum', 
+                        'SKU_Prefix': 'Partner',
+                        'Menge': 'Stück',
+                        'eBay_Brutto': 'Erlös Brutto (€)', 
+                        'Partner_Prov_EUR': prov_col_name, 
+                        'Auszahlung_Partner_Brutto': 'Auszahlungsbetrag Netto (€)'
                     })
+                    
                     sum_sales = pd.DataFrame([{
-                        'Datum': 'GESAMTSUMME VERKÄUFE', 'Bestellnummer': '', 'Partner': selected_partner, 'SKU': '', 'Angebotstitel': '',
+                        'Datum': 'GESAMTSUMME VERKÄUFE', 'Bestellnummer': '', 'Partner': selected_partner, 'SKU': '', 'Stück': partner_sales['Stück'].sum(), 'Angebotstitel': '',
                         'Erlös Brutto (€)': partner_sales['Erlös Brutto (€)'].sum(),
-                        'Provision (€)': partner_sales['Provision (€)'].sum(),
+                        prov_col_name: partner_sales[prov_col_name].sum(),
                         'Auszahlungsbetrag Netto (€)': partner_sales['Auszahlungsbetrag Netto (€)'].sum()
                     }])
                     final_sales = pd.concat([partner_sales, sum_sales], ignore_index=True)
-                    st.dataframe(final_sales.style.format({'Erlös Brutto (€)': '{:.2f} €', 'Provision (€)': '{:.2f} €', 'Auszahlungsbetrag Netto (€)': '{:.2f} €'}, na_rep=''), use_container_width=True)
+                    
+                    st.dataframe(
+                        final_sales.style.format({
+                            'Erlös Brutto (€)': '{:.2f} €', 
+                            prov_col_name: '{:.2f} €', 
+                            'Auszahlungsbetrag Netto (€)': '{:.2f} €'
+                        }, na_rep=''), 
+                        use_container_width=True
+                    )
                 else:
                     st.info("Keine Verkäufe im aktuellen Zeitraum vorhanden.")
 
@@ -339,20 +365,35 @@ if uploaded_payout:
                 if not df_retouren.empty:
                     st.markdown(f"#### 🔻 Gutschriften / Erstattungen ({len(df_retouren)} Positionen)")
                     partner_retouren = df_retouren[[
-                        'Datum der Transaktionserstellung', 'Bestellnummer', 'SKU_Prefix', 'SKU', 'Angebotstitel',
+                        'Datum der Transaktionserstellung', 'Bestellnummer', 'SKU_Prefix', 'SKU', 'Menge', 'Angebotstitel',
                         'eBay_Brutto', 'Partner_Prov_EUR', 'Auszahlung_Partner_Brutto'
                     ]].rename(columns={
-                        'Datum der Transaktionserstellung': 'Datum', 'SKU_Prefix': 'Partner',
-                        'eBay_Brutto': 'Gutschrift Brutto (€)', 'Partner_Prov_EUR': 'Erstattete Provision (€)', 'Auszahlung_Partner_Brutto': 'Gutschrift Netto (€)'
+                        'Datum der Transaktionserstellung': 'Datum', 
+                        'SKU_Prefix': 'Partner',
+                        'Menge': 'Stück',
+                        'eBay_Brutto': 'Gutschrift Brutto (€)', 
+                        'Partner_Prov_EUR': f'Erstattete {prov_col_name}', 
+                        'Auszahlung_Partner_Brutto': 'Gutschrift Netto (€)'
                     })
+                    
+                    ret_prov_col = f'Erstattete {prov_col_name}'
+                    
                     sum_retouren = pd.DataFrame([{
-                        'Datum': 'GESAMTSUMME GUTSCHRIFTEN', 'Bestellnummer': '', 'Partner': selected_partner, 'SKU': '', 'Angebotstitel': '',
+                        'Datum': 'GESAMTSUMME GUTSCHRIFTEN', 'Bestellnummer': '', 'Partner': selected_partner, 'SKU': '', 'Stück': partner_retouren['Stück'].sum(), 'Angebotstitel': '',
                         'Gutschrift Brutto (€)': partner_retouren['Gutschrift Brutto (€)'].sum(),
-                        'Erstattete Provision (€)': partner_retouren['Erstattete Provision (€)'].sum(),
+                        ret_prov_col: partner_retouren[ret_prov_col].sum(),
                         'Gutschrift Netto (€)': partner_retouren['Gutschrift Netto (€)'].sum()
                     }])
                     final_retouren = pd.concat([partner_retouren, sum_retouren], ignore_index=True)
-                    st.dataframe(final_retouren.style.format({'Gutschrift Brutto (€)': '{:.2f} €', 'Erstattete Provision (€)': '{:.2f} €', 'Gutschrift Netto (€)': '{:.2f} €'}, na_rep=''), use_container_width=True)
+                    
+                    st.dataframe(
+                        final_retouren.style.format({
+                            'Gutschrift Brutto (€)': '{:.2f} €', 
+                            ret_prov_col: '{:.2f} €', 
+                            'Gutschrift Netto (€)': '{:.2f} €'
+                        }, na_rep=''), 
+                        use_container_width=True
+                    )
 
                 # EXPORT IN EXCEL MIT TAB-TRENNUNG
                 buffer_partner_excel = io.BytesIO()
