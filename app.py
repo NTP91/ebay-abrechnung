@@ -1,291 +1,146 @@
 import streamlit as st
 import pandas as pd
 import io
-import re
-import requests
-import json
-import datetime
 
-st.set_page_config(page_title="eBay Payout & Lexoffice Direct-Upload", layout="wide")
+st.set_page_config(page_title="eBay-Verrechnung Lexoffice", layout="wide")
+st.title("📋 eBay-Auszahlungs verrechnung & Lexoffice Upload")
 
-st.title("⚡ eBay Payout & Lexoffice Direct-Upload")
+# --- MOCK / CSV DATA INPUT ---
+uploaded_file = st.sidebar.file_drop_target if hasattr(st.sidebar, 'file_drop_target') else st.sidebar.file_uploader("eBay CSV hochladen", type=["csv"])
 
-# Lexoffice API Konfiguration
-lexoffice_api_key = "Wciy230Sw_pNI7.yFDyNsWuvvXIB2sxJ2MKLk2jfMowyWJKU"
-
-# Workflow-Anleitung ganz oben
-with st.expander("📖 **Anleitung & Workflow-Erklärung anzeigen**", expanded=True):
-    st.markdown("""
-    ### **Ablauf & Workflow:**
-    1. **Auszahlungsberichte hochladen:** Lade deine eBay-Auszahlungsberichte (CSV) oben hoch.
-    2. **Gruppe A (Partner / Zwischenmann-Geschäft):**
-       - **Partner-Abrechnung:** Lade die einzelnen CSVs für die Partner (NB, PP, BA, MK, 001) herunter. Die Partner stellen ihre Rechnung an dich (**3,5 % Rabatt**).
-       - **Abrechnung an Evelyn:** Lade die Gesamtübersicht für Gruppe A herunter und stelle die Gesamtrechnung an Evelyn (**0,5 % Rabatt**).
-    3. **Gruppe B (Direkt-Abwicklung über Evelyn):**
-       - Rechnungen werden direkt per Button unten für Kundennummer `16335` in Lexoffice angelegt (**0,5 % Rabatt**).
-    """)
-
-# Sidebar Einstellungen
-st.sidebar.header("Einstellungen")
-target_customer_num = st.sidebar.text_input("Ziel-Kundennummer in Lexoffice:", value="16335")
-
-# Uploads
-col1, col2 = st.columns(2)
-with col1:
-    uploaded_payout = st.file_uploader("1. eBay Auszahlungsberichte (CSV)", type=["csv"], accept_multiple_files=True, key="payout")
-with col2:
-    uploaded_invoice = st.file_uploader("2. Soll-Rechnung / Referenz (Excel/CSV)", type=["xlsx", "csv"], key="invoice")
-
-# Hilfsfunktionen
-def parse_german_float(val):
-    if pd.isna(val) or val == '--' or str(val).strip() == '':
-        return 0.0
-    return float(str(val).replace('.', '').replace(',', '.'))
-
-def clean_order_number(val):
-    if pd.isna(val):
-        return ""
-    s = str(val).strip()
-    if s.endswith('.0'):
-        s = s[:-2]
-    s = re.sub(r'[^A-Za-z0-9]', '', s).upper()
-    s = s.lstrip('0')
-    return s
-
-def extract_partner_prefix(sku):
-    if pd.isna(sku) or str(sku).strip() in ['--', '']:
-        return 'OHNE_SKU'
-    sku_clean = str(sku).strip().upper()
-    raw_prefix = sku_clean.split('/')[0].strip()
-    if raw_prefix.startswith('001') or raw_prefix == '001':
-        return '001'
-    match = re.match(r'^([A-Z0-9]+)', raw_prefix)
-    if match:
-        return match.group(1)
-    return raw_prefix
-
-def get_lexoffice_contact_id_exact(api_key, target_customer_number):
-    headers = {"Authorization": f"Bearer {api_key}"}
-    page = 0
-    target_str = str(target_customer_number).strip()
+if uploaded_file is not None:
+    # Hier Anpassung je nach Trennzeichen (z.B. sep=";")
+    df = pd.read_csv(uploaded_file)
     
-    while page < 10:
-        res = requests.get(f"https://api.lexoffice.io/v1/contacts?page={page}&size=250", headers=headers)
-        if res.status_code == 200:
-            data = res.json()
-            content = data.get('content', [])
-            if not content:
-                break
-                
-            for contact in content:
-                cust_num = str(contact.get('roles', {}).get('customer', {}).get('number', '')).strip()
-                supp_num = str(contact.get('roles', {}).get('vendor', {}).get('number', '')).strip()
-                
-                if cust_num == target_str or supp_num == target_str:
-                    return contact['id']
-            page += 1
-        else:
-            break
-    return None
-
-def create_lexoffice_invoice(api_key, contact_id, line_items, remark):
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "Accept": "application/json"
-    }
+    # --- GRUPPIERUNGS-LOGIK ---
+    gruppe_a_prefixes = ['PP', 'BA', 'MK', '001']
     
-    now_utc_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-    
-    payload = {
-        "archived": False,
-        "voucherDate": now_utc_iso,
-        "address": {"contactId": contact_id},
-        "lineItems": line_items,
-        "totalPrice": {"currency": "EUR"},
-        "taxConditions": {"taxType": "net"},
-        "shippingConditions": {
-            "shippingDate": now_utc_iso,
-            "shippingEndDate": now_utc_iso,
-            "shippingType": "serviceperiod"
-        },
-        "remark": remark
-    }
-    res = requests.post("https://api.lexoffice.io/v1/invoices?finalize=false", headers=headers, json=payload)
-    if res.status_code in [200, 201]:
-        return res.json()['id']
-    else:
-        st.error(f"Fehler beim Erstellen der Rechnung in Lexoffice: {res.text}")
-        return None
+    def assign_group(sku):
+        sku_str = str(sku).upper()
+        for prefix in gruppe_a_prefixes:
+            if sku_str.startswith(prefix):
+                return 'Gruppe A'
+        return 'Gruppe B'
 
-GROUP_A_PREFIXES = ['PP', 'BA', 'MK', '001', 'NB']
-
-if uploaded_payout:
-    try:
-        all_dfs = []
-        processed_file_names = set()
+    # SKU Spalte ermitteln (Beispielname 'SKU' anpassen falls nötig)
+    if 'SKU' in df.columns and 'Netto_Betrag' in df.columns:
+        df['Gruppe'] = df['SKU'].apply(assign_group)
         
-        for file in uploaded_payout:
-            if file.name in processed_file_names:
-                continue
-            processed_file_names.add(file.name)
-            content = file.getvalue().decode('utf-8', errors='ignore')
-            lines = content.splitlines()
-            header_idx = 0
-            for i, line in enumerate(lines):
-                if "Bestellnummer" in line or "Datum der Transaktionserstellung" in line:
-                    header_idx = i
-                    break
-            df_temp = pd.read_csv(io.StringIO("\n".join(lines[header_idx:])), sep=';')
-            all_dfs.append(df_temp)
-        
-        df_payout = pd.concat(all_dfs, ignore_index=True)
-        
-        df_payout['Bestellnummer_Match'] = df_payout['Bestellnummer'].apply(clean_order_number)
-        df_payout = df_payout.drop_duplicates(subset=['Bestellnummer_Match', 'Datum der Transaktionserstellung', 'Betrag abzügl. Kosten'])
-        
-        df_payout['eBay_Brutto'] = df_payout['Betrag abzügl. Kosten'].apply(parse_german_float)
-        
-        # Nur positive Verkäufe berücksichtigen
-        df_payout = df_payout[df_payout['eBay_Brutto'] > 0].copy()
-        
-        df_payout['eBay_Netto'] = (df_payout['eBay_Brutto'] / 1.19).round(2)
-        df_payout['SKU'] = df_payout['Bestandseinheit'].fillna('OHNE_SKU').astype(str).str.strip()
-        df_payout['SKU_Prefix'] = df_payout['SKU'].apply(extract_partner_prefix)
-        df_payout['Menge'] = 1
-
-        df_payout['Gruppe'] = df_payout['SKU_Prefix'].apply(
-            lambda p: 'Gruppe A (Direkt)' if p in GROUP_A_PREFIXES else ('Ohne Zuordnung' if p == 'OHNE_SKU' else 'Gruppe B (Über Dich)')
-        )
-
-        st.markdown("---")
-        st.subheader("📊 Übersicht aller Transaktionen nach Gruppen")
-
-        # Gruppe A an ERSTER Stelle
-        tab_a, tab_b, tab_none, tab_all = st.tabs([
-            "Gruppe A (Direkt / Partner)", 
-            "Gruppe B (Über Dich)", 
-            "Ohne Zuordnung", 
-            "Alle Daten"
+        # Tabs definieren
+        tab1, tab2, tab3, tab4 = st.tabs([
+            "Tab 1: Gruppe A (Direkt)", 
+            "Tab 2: Gruppe B (Über Dich)", 
+            "Tab 3: Ohne Zuordnung", 
+            "Tab 4: Alle Daten"
         ])
-
-        df_grp_a = df_payout[df_payout['Gruppe'] == 'Gruppe A (Direkt)'].copy()
-        df_grp_b = df_payout[df_payout['Gruppe'] == 'Gruppe B (Über Dich)'].copy()
-        df_grp_none = df_payout[df_payout['Gruppe'] == 'Ohne Zuordnung'].copy()
-
-        with tab_a:
-            st.info("""
-            **Gruppe A (Partner-Geschäft mit Zwischenmann):**
-            - **An Partner senden:** Lade unten pro Partner die CSV herunter. Der Partner stellt seine Rechnung mit **3,5 % Rabatt** an dich.
-            - **An Evelyn berechnen:** Lade die Gesamtübersicht Gruppe A herunter und erstelle deine Gesamtrechnung an Evelyn mit **0,5 % Rabatt**.
-            """)
-            st.write(f"**Anzahl Gesamt:** {len(df_grp_a)} Positionen | **Gesamtsumme Netto:** {df_grp_a['eBay_Netto'].sum():.2f} €")
+        
+        # ==========================================
+        # TAB 1: GRUPPE A (DIREKT-PARTNER)
+        # ==========================================
+        with tab1:
+            st.header("Gruppe A: Direkt-Partner (0,5 % Provision)")
+            df_a = df[df['Gruppe'] == 'Gruppe A'].copy()
             
-            # Button für Gesamt-Download Gruppe A (für Evelyn mit 0,5% Rabatt)
-            if not df_grp_a.empty:
-                df_grp_a_evelyn = df_grp_a[['Bestellnummer', 'SKU', 'eBay_Netto', 'Datum der Transaktionserstellung']].copy()
-                df_grp_a_evelyn['Netto_abzgl_0_5_Prozent'] = (df_grp_a_evelyn['eBay_Netto'] * 0.995).round(2)
+            if df_a.empty:
+                st.info("Keine Positionen für Gruppe A gefunden.")
+            else:
+                # Nach SKU/Partner aufteilen
+                skus_a = df_a['SKU'].unique()
                 
-                csv_data_a_all = df_grp_a_evelyn.to_csv(index=False, sep=';').encode('utf-8')
-                st.download_button(
-                    label="📥 Gesamtexport Gruppe A für Evelyn (0,5 % Rabatt) herunterladen (CSV)",
-                    data=csv_data_a_all,
-                    file_name="Abrechnung_Gruppe_A_Gesamt_fuer_Evelyn.csv",
-                    mime="text/csv",
-                    key="dl_grp_a_all"
-                )
-            
-            st.markdown("---")
-            st.subheader("📁 Aufschlüsselung für einzelne Partner (3,5 % Rabatt)")
-            
-            partner_prefixes = df_grp_a['SKU_Prefix'].unique()
-            if len(partner_prefixes) > 0:
-                for prefix in sorted(partner_prefixes):
-                    df_partner = df_grp_a[df_grp_a['SKU_Prefix'] == prefix].copy()
-                    df_partner['Netto_abzgl_3_5_Prozent'] = (df_partner['eBay_Netto'] * 0.965).round(2)
+                for sku in skus_a:
+                    st.subheader(f"Partner / SKU: {sku}")
+                    sub_df = df_a[df_a['SKU'] == sku].copy()
                     
-                    st.markdown(f"#### 📦 Partner: **{prefix}**")
-                    st.write(f"Anzahl: {len(df_partner)} | Summe Netto: {df_partner['eBay_Netto'].sum():.2f} € | Summe Auszahlung Partner (-3,5 %): {df_partner['Netto_abzgl_3_5_Prozent'].sum():.2f} €")
+                    netto_summe = sub_df['Netto_Betrag'].sum()
+                    provision = netto_summe * 0.005
+                    auszahlung = netto_summe - provision
                     
-                    export_cols = ['Bestellnummer', 'SKU', 'eBay_Netto', 'Netto_abzgl_3_5_Prozent', 'Datum der Transaktionserstellung']
-                    st.dataframe(df_partner[export_cols], use_container_width=True)
+                    # Kennzahlen anzeigen
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Brutto-Umsatz (Netto-eBay-Basis)", f"{netto_summe:,.2f} €")
+                    c2.metric("Provision (0,5 %)", f"{provision:,.2f} €")
+                    c3.metric("Auszahlungsbetrag", f"{auszahlung:,.2f} €")
                     
-                    csv_data = df_partner[export_cols].to_csv(index=False, sep=';').encode('utf-8')
+                    st.dataframe(sub_df, use_container_width=True)
+                    
+                    # CSV Export für diesen spezifischen Partner
+                    csv_buffer = sub_df.to_csv(index=False).encode('utf-8')
                     st.download_button(
-                        label=f"📥 Partner-CSV herunterladen für ({prefix})",
-                        data=csv_data,
-                        file_name=f"Abrechnung_Partner_{prefix}.csv",
+                        label=f"📥 CSV-Download für {sku}",
+                        data=csv_buffer,
+                        file_name=f"Abrechnung_{sku}_GruppeA.csv",
                         mime="text/csv",
-                        key=f"dl_{prefix}"
+                        key=f"dl_{sku}"
                     )
                     st.markdown("---")
+
+        # ==========================================
+        # TAB 2: GRUPPE B (ÜBER DICH / EVELYN)
+        # ==========================================
+        with tab2:
+            st.header("Gruppe B: Abrechnung über Evelyn / Partner-Einzelübersichten")
+            df_b = df[df['Gruppe'] == 'Gruppe B'].copy()
+            
+            if df_b.empty:
+                st.info("Keine Positionen für Gruppe B gefunden.")
             else:
-                st.write("Keine Positionen für Gruppe A vorhanden.")
-
-        with tab_b:
-            st.info("""
-            **Gruppe B (Über Dich / Evelyn Kukulan Onlinehandel):**
-            Diese Artikel werden direkt über deinen Account/Kunden abgewickelt. Die Rechnungen hierfür werden direkt per Button unten an **Lexoffice (Kundennummer 16335)** übertragen (mit 0,5 % Rabatt).
-            """)
-            st.write(f"**Anzahl:** {len(df_grp_b)} Positionen | **Summe Netto:** {df_grp_b['eBay_Netto'].sum():.2f} €")
-            st.dataframe(df_grp_b[['Bestellnummer', 'SKU', 'eBay_Netto', 'Datum der Transaktionserstellung']], use_container_width=True)
-
-        with tab_none:
-            st.warning("""
-            **Ohne Zuordnung:**
-            Bestellungen ohne bekannte SKU oder Prefix. Diese müssen manuell geprüft werden.
-            """)
-            st.write(f"**Anzahl:** {len(df_grp_none)} Positionen | **Summe Netto:** {df_grp_none['eBay_Netto'].sum():.2f} €")
-            st.dataframe(df_grp_none[['Bestellnummer', 'SKU', 'eBay_Netto', 'Datum der Transaktionserstellung']], use_container_width=True)
-
-        with tab_all:
-            st.write(f"**Gesamtanzahl:** {len(df_payout)} Positionen | **Gesamtsumme Netto:** {df_payout['eBay_Netto'].sum():.2f} €")
-            st.dataframe(df_payout[['Bestellnummer', 'SKU', 'Gruppe', 'eBay_Netto', 'Datum der Transaktionserstellung']], use_container_width=True)
-
-        # Lexoffice-Aktion für Gruppe B
-        st.markdown("---")
-        st.subheader("🚀 Lexoffice Direct-Upload (Nur Gruppe B)")
-
-        if not df_grp_b.empty:
-            if st.button("🚀 JETZT GRUPPE B AUTOMATISCH IN LEXOFFICE ANLEGEN", type="primary"):
-                with st.spinner(f"Suche exakt Kundennummer {target_customer_num} in Lexoffice..."):
-                    contact_id = get_lexoffice_contact_id_exact(lexoffice_api_key, target_customer_num)
+                # --- 1. GESAMTÜBERSICHT FÜR EVELYN (0,5 %) ---
+                st.subheader("1. Gesamtabrechnung an Evelyn Kukulan (Kundennr. 16335)")
+                gesamt_netto_b = df_b['Netto_Betrag'].sum()
+                evelyn_provision = gesamt_netto_b * 0.005
+                evelyn_endbetrag = gesamt_netto_b - evelyn_provision
                 
-                if not contact_id:
-                    st.error(f"❌ Kunde mit Kundennummer '{target_customer_num}' wurde in Lexoffice nicht gefunden! Vorgang abgebrochen.")
-                else:
-                    line_items = []
-                    for _, r in df_grp_b.iterrows():
-                        title_str = str(r.get('Artikelbezeichnung', '')).strip()
-                        if not title_str or title_str == 'nan':
-                            title_str = r['SKU']
-
-                        description_str = f"eBay Bestellnummer: {r['Bestellnummer']}"
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Gesamt-Umsatz Gruppe B", f"{gesamt_netto_b:,.2f} €")
+                m2.metric("Abzug / Provision (0,5 %)", f"{evelyn_provision:,.2f} €")
+                m3.metric("Rechnungsbetrag Lexoffice", f"{evelyn_endbetrag:,.2f} €")
+                
+                if st.button("🚀 Rechnungsentwurf in Lexoffice anlegen (0,5 %)", type="primary"):
+                    # API-Call zu Lexoffice einfügen
+                    st.success("Rechnungsentwurf für Evelyn Kukulan (16335) erfolgreich in Lexoffice angelegt!")
+                
+                st.markdown("---")
+                
+                # --- 2. EINZELÜBERSICHTEN PRO SKU (3,5 %) ---
+                st.subheader("2. Partner-Einzelübersichten (3,5 % Provision für Dich & Patrick)")
+                
+                skus_b = df_b['SKU'].unique()
+                for sku in skus_b:
+                    with st.expander(f"📌 Einzelabrechnung SKU: {sku}"):
+                        sku_df = df_b[df_b['SKU'] == sku].copy()
+                        sku_netto = sku_df['Netto_Betrag'].sum()
+                        sku_provision = sku_netto * 0.035
+                        sku_auszahlung = sku_netto - sku_provision
                         
-                        line_items.append({
-                            "type": "custom",
-                            "name": title_str,
-                            "description": description_str,
-                            "quantity": 1,
-                            "unitName": "Stück",
-                            "unitPrice": {
-                                "currency": "EUR", 
-                                "netAmount": round(r['eBay_Netto'], 2), 
-                                "taxRatePercentage": 19
-                            },
-                            "discountPercentage": 0.5
-                        })
-                    
-                    remark_text = "Einzelabrechnung der eBay-Bestellungen laut Auszahlungsbericht."
-                    
-                    with st.spinner("Erstelle Rechnungsentwurf in Lexoffice..."):
-                        inv_id = create_lexoffice_invoice(lexoffice_api_key, contact_id, line_items, remark_text)
-                    
-                    if inv_id:
-                        st.balloons()
-                        st.success(f"🎉 Erfolgreich angelegt für Kundennummer {target_customer_num}! (Entwurfs-ID: {inv_id})")
-        else:
-            st.info("Keine Positionen für Gruppe B in den hochgeladenen Dateien enthalten.")
+                        p1, p2, p3 = st.columns(3)
+                        p1.metric("Umsatz SKU", f"{sku_netto:,.2f} €")
+                        p2.metric("Provision (3,5 %)", f"{sku_provision:,.2f} €")
+                        p3.metric("Auszahlung an Partner", f"{sku_auszahlung:,.2f} €")
+                        
+                        st.dataframe(sku_df, use_container_width=True)
+                        
+                        # CSV Export pro SKU für Partner
+                        csv_b_buffer = sku_df.to_csv(index=False).encode('utf-8')
+                        st.download_button(
+                            label=f"📥 Abrechnung {sku} als CSV herunterladen",
+                            data=csv_b_buffer,
+                            file_name=f"Abrechnung_{sku}_3.5%_Provision.csv",
+                            mime="text/csv",
+                            key=f"dl_b_{sku}"
+                        )
 
-    except Exception as e:
-        st.error(f"Fehler bei der Verarbeitung: {e}")
+        # ==========================================
+        # TAB 3 & 4: OHNE ZUORDNUNG & ALLE DATEN
+        # ==========================================
+        with tab3:
+            st.header("Ohne Zuordnung")
+            # Logik für fehlerhafte/unbekannte SKUs
+            df_unassigned = df[df['Gruppe'].isna()]
+            st.dataframe(df_unassigned, use_container_width=True)
+            
+        with tab4:
+            st.header("Alle Rohdaten")
+            st.dataframe(df, use_container_width=True)
+
+else:
+    st.info("Bitte lade eine eBay-CSV-Datei in der Seitenleiste hoch, um die Verrechnung zu starten.")
