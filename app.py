@@ -1,8 +1,3 @@
-Der Fehler `IndentationError` entsteht, wenn nur ein Ausschnitt kopiert wird und die Einrückungen (Leerzeichen/Tabs) nicht mehr zum restlichen Code passen.
-
-Hier ist der **vollständige, komplette Code** für deine `app.py`. Du kannst einfach den gesamten Inhalt deiner Datei durch diesen ersetzen:
-
-```python
 import streamlit as st
 import pandas as pd
 import io
@@ -310,5 +305,3 @@ if uploaded_payout:
 
     except Exception as e:
         st.error(f"Fehler bei der Verarbeitung: {e}")
-
-```
