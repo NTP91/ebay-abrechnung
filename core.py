@@ -1,59 +1,50 @@
 import os
+import glob
 import pandas as pd
+import io
 
 ORDERS_DB_PATH = "Master_Orders.csv"
 PAYOUTS_DB_PATH = "Master_Payouts.csv"
 
-def categorize_sku(sku):
-    if not sku or pd.isna(sku) or str(sku).strip() in ['', 'NB /', 'nan', 'None']:
-        return "Kundengruppe B"
-    
-    s = str(sku).strip().upper()
-    prefixes_a = ["PP", "BA", "MK", "001"]
-    if any(s.startswith(p) for p in prefixes_a):
-        return "Kundengruppe A (Evelyn)"
-    
-    return "Kundengruppe B"
-
-
-def build_transaction_overview(master_payout_path=PAYOUTS_DB_PATH, master_orders_path=ORDERS_DB_PATH):
-    if not os.path.exists(master_payout_path):
-        return pd.DataFrame(), 0, 0.0
+def load_master_data():
+    """Lädt Payouts und Orders und verknüpft sie über die Bestellnummer."""
+    if not os.path.exists(PAYOUTS_DB_PATH):
+        return pd.DataFrame()
 
     try:
-        payouts = pd.read_csv(master_payout_path, sep=';', dtype=str)
+        payouts = pd.read_csv(PAYOUTS_DB_PATH, sep=';', dtype=str)
     except Exception:
-        return pd.DataFrame(), 0, 0.0
+        return pd.DataFrame()
 
     if payouts.empty:
-        return pd.DataFrame(), 0, 0.0
+        return pd.DataFrame()
 
     orders = pd.DataFrame()
-    if os.path.exists(master_orders_path):
+    if os.path.exists(ORDERS_DB_PATH):
         try:
-            orders = pd.read_csv(master_orders_path, sep=';', dtype=str)
+            orders = pd.read_csv(ORDERS_DB_PATH, sep=';', dtype=str)
         except Exception:
             orders = pd.DataFrame()
 
-    # Mapping aus den Bestellberichten
+    # Mapping aus Orders
     order_map = {}
     if not orders.empty:
         cols_norm = {str(c).lower().replace('-', '').replace('_', '').replace(' ', ''): c for c in orders.columns}
         
         oid_col = next((cols_norm[k] for k in ['bestellnummer', 'orderid', 'ordernumber', 'verkaufsnummer', 'verkaufsprotokollnr', 'transaktionsid'] if k in cols_norm), None)
         sku_col = next((cols_norm[k] for k in ['sku', 'customlabel', 'eigenesku', 'bestandseinheit', 'angebotsnummer', 'artikelnummer'] if k in cols_norm), None)
-        title_col = next((cols_norm[k] for k in ['artikelname', 'artikeltitel', 'itemtitle', 'artikelbezeichnung', 'title'] if k in cols_norm), None)
+        title_col = next((cols_norm[k] for k in ['artikelname', 'artikeltitel', 'itemtitle', 'artikelbezeichnung', 'title', 'angebotstitel'] if k in cols_norm), None)
 
         if oid_col:
             for _, row in orders.iterrows():
                 oid = str(row[oid_col]).strip()
                 if oid and oid not in ['nan', 'None', '']:
                     sku_v = str(row[sku_col]).strip() if sku_col and pd.notna(row[sku_col]) else 'NB /'
-                    title_v = str(row[title_col]).strip() if title_col and pd.notna(row[title_col]) else 'NB / Kein Titel gefunden'
-                    order_map[oid] = {'SKU': sku_v, 'Artikelname': title_v}
+                    title_v = str(row[title_col]).strip() if title_col and pd.notna(row[title_col]) else '--'
+                    order_map[oid] = {'SKU': sku_v, 'Angebotstitel': title_v}
 
-    result_rows = []
-    total_netto = 0.0
+    processed = []
+    prefixes_a = ["PP", "BA", "MK", "001"]
 
     for _, row in payouts.iterrows():
         bestellnr = '--'
@@ -62,18 +53,26 @@ def build_transaction_overview(master_payout_path=PAYOUTS_DB_PATH, master_orders
                 bestellnr = str(row[col]).strip()
                 break
 
+        # Match Daten
         if bestellnr in order_map:
             sku = order_map[bestellnr]['SKU']
-            artikelname = order_map[bestellnr]['Artikelname']
+            titel = order_map[bestellnr]['Angebotstitel']
         else:
-            sku = 'NB /'
-            artikelname = 'NB / Kein Titel gefunden'
+            sku = str(row.get('SKU', 'NB /')).strip()
+            titel = str(row.get('Angebotstitel', str(row.get('Artikelname', '--')))).strip()
 
-        gruppe = categorize_sku(sku)
+        # Partner / SKU_Prefix bestimmen
+        partner = sku.split('/')[0].strip() if '/' in sku else sku.strip()
+        if not partner or partner in ['nan', 'None', '']:
+            partner = '--'
 
-        # Netto-Betrag auslesen
+        # Kundengruppe bestimmen
+        is_group_a = any(partner.upper().startswith(p) for p in prefixes_a)
+        gruppe = "Gruppe A" if is_group_a else "Gruppe B"
+
+        # Betrag / Netto
         betrag_val = 0.0
-        for col in ['Nettobetrag', 'Betrag', 'Gesamtbetrag', 'Amount']:
+        for col in ['Nettobetrag', 'Betrag', 'Gesamtbetrag', 'Amount', 'Erlös Brutto']:
             if col in row and pd.notna(row[col]):
                 raw_s = str(row[col]).strip().replace('.', '').replace(',', '.') if ',' in str(row[col]) else str(row[col]).strip()
                 try:
@@ -82,30 +81,100 @@ def build_transaction_overview(master_payout_path=PAYOUTS_DB_PATH, master_orders
                 except ValueError:
                     continue
 
-        total_netto += betrag_val
+        datum = str(row.get('Datum der Transaktionserstellung', row.get('Datum', ''))).strip()
 
-        # Berechnungen je nach Kundengruppe
-        if "Gruppe A" in gruppe:
-            # Evelyn: Direct + 0.5% Provision/Rabatt
-            evelyn_netto = betrag_val * 0.995
-            partner_netto = 0.0
-            lexoffice_netto = evelyn_netto
-        else:
-            # Gruppe B: Lexoffice 0.5% Rabatt, Partner 3.5% Rabatt
-            evelyn_netto = 0.0
-            lexoffice_netto = betrag_val * 0.995
-            partner_netto = betrag_val * 0.965
-
-        result_rows.append({
+        processed.append({
+            'Datum': datum,
             'Bestellnummer': bestellnr,
+            'Partner': partner,
             'SKU': sku,
-            'Artikelname': artikelname,
+            'Angebotstitel': titel,
             'Gruppe': gruppe,
-            'eBay_Netto': f"{betrag_val:.2f}".replace('.', ','),
-            'Evelyn_Netto (-0.5%)': f"{evelyn_netto:.2f}".replace('.', ',') if evelyn_netto > 0 else '--',
-            'Lexoffice_Netto (-0.5%)': f"{lexoffice_netto:.2f}".replace('.', ','),
-            'Partner_Netto (-3.5%)': f"{partner_netto:.2f}".replace('.', ',') if partner_netto > 0 else '--',
-            'Datum': str(row.get('Datum der Transaktionserstellung', row.get('Datum', ''))).strip()
+            'Erlös_Brutto': betrag_val,
+            'Status': row.get('Status', 'Noch Offen')
         })
 
-    return pd.DataFrame(result_rows), len(orders), total_netto
+    return pd.DataFrame(processed)
+
+
+def get_group_b_summary(df):
+    """Erstellt Tabellenübersicht für Gruppe B."""
+    if df.empty:
+        return pd.DataFrame()
+    
+    df_b = df[df['Gruppe'] == 'Gruppe B'].copy()
+    if df_b.empty:
+        return pd.DataFrame()
+
+    grouped = df_b.groupby('Partner').agg(
+        Anzahl_Transaktionen=('Bestellnummer', 'count'),
+        eBay_Brutto_Gesamt=('Erlös_Brutto', 'sum')
+    ).reset_index()
+
+    grouped['Evelyn_Provision_0_5'] = grouped['eBay_Brutto_Gesamt'] * 0.005
+    grouped['Auszahlung_von_Evelyn_an_Dich'] = grouped['eBay_Brutto_Gesamt'] - grouped['Evelyn_Provision_0_5']
+    grouped['Deine_Marge_3_0'] = grouped['eBay_Brutto_Gesamt'] * 0.030
+
+    # Gesamtsumme
+    total_row = pd.DataFrame([{
+        'Partner': 'GESAMTSUMME (Gruppe B)',
+        'Anzahl_Transaktionen': grouped['Anzahl_Transaktionen'].sum(),
+        'eBay_Brutto_Gesamt': grouped['eBay_Brutto_Gesamt'].sum(),
+        'Evelyn_Provision_0_5': grouped['Evelyn_Provision_0_5'].sum(),
+        'Auszahlung_von_Evelyn_an_Dich': grouped['Auszahlung_von_Evelyn_an_Dich'].sum(),
+        'Deine_Marge_3_0': grouped['Deine_Marge_3_0'].sum()
+    }])
+
+    return pd.concat([grouped, total_row], ignore_index=True)
+
+
+def get_group_a_summary(df):
+    """Erstellt Tabellenübersicht für Gruppe A (PP, BA, MK, 001)."""
+    if df.empty:
+        return pd.DataFrame()
+    
+    df_a = df[df['Gruppe'] == 'Gruppe A'].copy()
+    if df_a.empty:
+        return pd.DataFrame()
+
+    grouped = df_a.groupby('Partner').agg(
+        Anzahl_Transaktionen=('Bestellnummer', 'count'),
+        eBay_Brutto_Gesamt=('Erlös_Brutto', 'sum')
+    ).reset_index()
+
+    grouped['Evelyn_Provision_0_5'] = grouped['eBay_Brutto_Gesamt'] * 0.005
+    grouped['Direkt_Auszahlung_Evelyn'] = grouped['eBay_Brutto_Gesamt'] - grouped['Evelyn_Provision_0_5']
+
+    total_row = pd.DataFrame([{
+        'Partner': 'GESAMTSUMME (Gruppe A)',
+        'Anzahl_Transaktionen': grouped['Anzahl_Transaktionen'].sum(),
+        'eBay_Brutto_Gesamt': grouped['eBay_Brutto_Gesamt'].sum(),
+        'Evelyn_Provision_0_5': grouped['Evelyn_Provision_0_5'].sum(),
+        'Direkt_Auszahlung_Evelyn': grouped['Direkt_Auszahlung_Evelyn'].sum()
+    }])
+
+    return pd.concat([grouped, total_row], ignore_index=True)
+
+
+def get_refunds_summary(df):
+    """Filtert alle Erstattungen / Gutschriften (negative Beträge)."""
+    if df.empty:
+        return pd.DataFrame()
+
+    df_ref = df[df['Erlös_Brutto'] < 0].copy()
+    if df_ref.empty:
+        return pd.DataFrame()
+
+    df_ref['Gutschrift_Brutto'] = df_ref['Erlös_Brutto']
+    df_ref['Provision'] = df_ref['Gutschrift_Brutto'] * 0.035
+    df_ref['Gutschrift_Netto_Auszahlung'] = df_ref['Gutschrift_Brutto'] - df_ref['Provision']
+
+    return df_ref[['Datum', 'Bestellnummer', 'Partner', 'SKU', 'Angebotstitel', 'Gutschrift_Brutto', 'Provision', 'Gutschrift_Netto_Auszahlung']]
+
+
+def export_to_excel(df):
+    """Erzeugt Excel-Download-Stream."""
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False, sheet_name='Abrechnung')
+    return output.getvalue()
