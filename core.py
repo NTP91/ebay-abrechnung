@@ -17,8 +17,12 @@ BASE_URL = "https://api.lexware.io/v1"
 ALIASES = {
     "sku": ("sku", "artikelnummer", "artikel nr", "item id", "custom label", "bestandseinheit"),
     "amount": ("netto", "net amount", "nettobetrag", "betrag netto", "netto umsatz", "auszahlungsbetrag"),
+    "sku": ("custom label", "sku", "customlabel", "artikelnummer"),
+    "amount": ("net amount", "netto_betrag", "netto", "amount", "betrag", "auszahlung"),
     "order": ("bestellnummer", "order number", "order id", "bestell nr", "auftragsnummer"),
 }
+
+HEADER_KEYWORDS = ("custom label", "sku", "net amount", "artikelnummer")
 
 
 @dataclass(frozen=True)
@@ -65,6 +69,24 @@ def _header_score(cells: list[str]) -> int:
     )
 
 
+def _find_header_row(lines: list[str], delimiter: str) -> int:
+    """Return the first delimited row containing a known eBay column keyword."""
+    for index, line in enumerate(lines[:100]):
+        try:
+            cells = next(csv.reader([line], delimiter=delimiter))
+        except csv.Error:
+            continue
+        normalized = [_norm(cell) for cell in cells]
+        if any(keyword in cell for cell in normalized for keyword in HEADER_KEYWORDS):
+            return index
+    return 0
+
+
+def _normalize_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    frame.columns = [str(column).strip().lower() for column in frame.columns]
+    return frame
+
+
 def read_csv_robust(file: BinaryIO | bytes) -> ParseResult:
     raw = file if isinstance(file, bytes) else file.read()
     text, encoding = _decode(raw)
@@ -72,9 +94,17 @@ def read_csv_robust(file: BinaryIO | bytes) -> ParseResult:
     delimiter = _delimiter(lines)
     scored = []
     for index, line in enumerate(lines[:80]):
+    candidates = []
+    for delimiter in (";", ","):
+        header_row = _find_header_row(lines, delimiter)
         try:
             cells = next(csv.reader([line], delimiter=delimiter))
         except csv.Error:
+            frame = pd.read_csv(
+                io.StringIO(text), sep=delimiter, skiprows=header_row, header=0,
+                dtype=str, on_bad_lines="skip", engine="python", keep_default_na=False,
+            )
+        except (csv.Error, pd.errors.ParserError):
             continue
         scored.append((_header_score(cells), len(cells), index))
     header_row = max(scored, default=(0, 0, 0))[2]
@@ -84,6 +114,15 @@ def read_csv_robust(file: BinaryIO | bytes) -> ParseResult:
     )
     frame.columns = [str(column).strip() for column in frame.columns]
     frame = frame.dropna(how="all").loc[:, ~frame.columns.str.startswith("Unnamed")]
+        frame = _normalize_columns(frame)
+        frame = frame.dropna(how="all").loc[:, ~frame.columns.str.startswith("unnamed")]
+        # Prefer the parse that recognizes both business columns, then the one
+        # with more meaningful columns and data rows.
+        recognized = int(detect_column(frame, "sku") is not None) + int(detect_column(frame, "amount") is not None)
+        candidates.append(((recognized, len(frame.columns), len(frame)), frame, header_row, delimiter))
+    if not candidates:
+        raise ValueError("Die CSV-Datei konnte weder mit Semikolon noch mit Komma gelesen werden.")
+    _, frame, header_row, delimiter = max(candidates, key=lambda candidate: candidate[0])
     expected_lines = max(0, len(lines) - header_row - 1)
     return ParseResult(frame, header_row, delimiter, encoding, max(0, expected_lines - len(frame)))
 
@@ -99,9 +138,11 @@ def read_xlsx_robust(file: BinaryIO | bytes) -> ParseResult:
         candidates.append((_header_score(cells), len(cells), int(index)))
     header_row = max(candidates, default=(0, 0, 0))[2]
     header = [str(value).strip() for value in preview.iloc[header_row].tolist()]
+    header = [str(value).strip().lower() for value in preview.iloc[header_row].tolist()]
     frame = preview.iloc[header_row + 1:].copy()
     frame.columns = header
     frame = frame.dropna(how="all").loc[:, ~frame.columns.str.startswith("Unnamed")]
+    frame = frame.dropna(how="all").loc[:, ~frame.columns.str.startswith("unnamed")]
     frame = frame.loc[:, [bool(str(column).strip()) for column in frame.columns]]
     return ParseResult(frame.reset_index(drop=True), header_row, "Excel", "binary", 0)
 
@@ -122,6 +163,7 @@ def combine_uploaded_frames(frames: list[pd.DataFrame]) -> tuple[pd.DataFrame, i
 
 def detect_column(frame: pd.DataFrame, kind: str) -> str | None:
     aliases = ALIASES[kind]
+    aliases = tuple(_norm(alias) for alias in ALIASES[kind])
     normalized = {_norm(column): column for column in frame.columns}
     for alias in aliases:
         if alias in normalized:
