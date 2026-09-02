@@ -141,12 +141,12 @@ def create_lexoffice_invoice(api_key, contact_id, line_items, remark):
         "Accept": "application/json"
     }
     
-    # Exaktes ISO-Format ohne Mikrossekunden für Lexoffice: YYYY-MM-DDTHH:MM:SS+02:00
-    now_iso = datetime.datetime.now(datetime.timezone.utc).astimezone().replace(microsecond=0).isoformat()
+    # Striktestes Lexoffice-Rechnungsdatum: Nur YYYY-MM-DD
+    today_date = datetime.date.today().strftime("%Y-%m-%d")
     
     payload = {
         "archived": False,
-        "voucherDate": now_iso,
+        "voucherDate": today_date,
         "address": {"contactId": contact_id},
         "lineItems": line_items,
         "totalPrice": {"currency": "EUR"},
