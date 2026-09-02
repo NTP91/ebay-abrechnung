@@ -141,7 +141,7 @@ def create_lexoffice_invoice(api_key, contact_id, line_items, remark):
     }
     payload = {
         "archived": False,
-        "voucherDate": pd.Timestamp.now().strftime("%Y-%m-%d"),
+        "voucherDate": pd.Timestamp.now(tz="Europe/Berlin").isoformat(),
         "address": {"contactId": contact_id},
         "lineItems": line_items,
         "totalPrice": {"currency": "EUR"},
