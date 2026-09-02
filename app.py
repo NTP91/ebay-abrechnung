@@ -75,7 +75,7 @@ if uploaded_payout:
         df_payout['SKU'] = df_payout['Bestandseinheit'].fillna('OHNE_SKU').astype(str).str.strip()
         df_payout['SKU_Prefix'] = df_payout['SKU'].apply(extract_partner_prefix)
         
-        # Menge / Stückzahl extrahieren (falls nicht im CSV, Standard 1)
+        # Menge / Stückzahl extrahieren
         if 'Stückzahl' in df_payout.columns:
             df_payout['Menge'] = pd.to_numeric(df_payout['Stückzahl'], errors='coerce').fillna(1).astype(int)
         elif 'Anzahl' in df_payout.columns:
@@ -169,14 +169,14 @@ if uploaded_payout:
                 'Anzahl_Transaktionen': 'Anzahl Transaktionen',
                 'eBay_Brutto_Gesamt': 'Erlös Brutto (€)',
                 'Evelyn_Provision': 'Provision 0,5 % (€)',
-                'Auszahlungsbetrag': 'Auszahlungsbetrag Netto (€)'
+                'Auszahlungsbetrag': 'Abrechnungsbetrag (€)'
             })
 
             st.dataframe(
                 summary_a_display.style.format({
                     'Erlös Brutto (€)': '{:.2f} €',
                     'Provision 0,5 % (€)': '{:.2f} €',
-                    'Auszahlungsbetrag Netto (€)': '{:.2f} €'
+                    'Abrechnungsbetrag (€)': '{:.2f} €'
                 }),
                 use_container_width=True
             )
@@ -226,14 +226,14 @@ if uploaded_payout:
                 'Anzahl_Transaktionen': 'Anzahl Transaktionen',
                 'eBay_Brutto_Gesamt': 'Erlös Brutto (€)',
                 'Evelyn_Provision': 'Provision 0,5 % (€)',
-                'Auszahlungsbetrag': 'Auszahlungsbetrag Netto (€)'
+                'Auszahlungsbetrag': 'Abrechnungsbetrag (€)'
             })
             
             st.dataframe(
                 summary_b_display.style.format({
                     'Erlös Brutto (€)': '{:.2f} €',
                     'Provision 0,5 % (€)': '{:.2f} €',
-                    'Auszahlungsbetrag Netto (€)': '{:.2f} €'
+                    'Abrechnungsbetrag (€)': '{:.2f} €'
                 }),
                 use_container_width=True
             )
@@ -277,7 +277,7 @@ if uploaded_payout:
                 'Menge': 'Stück',
                 'eBay_Brutto': 'Gutschrift Brutto (€)',
                 'Partner_Prov_EUR': 'Erstattete Provision (€)',
-                'Auszahlung_Partner_Brutto': 'Gutschrift Netto/Auszahlung (€)'
+                'Auszahlung_Partner_Brutto': 'Abrechnungsbetrag (€)'
             })
 
             sum_refunds = pd.DataFrame([{
@@ -289,7 +289,7 @@ if uploaded_payout:
                 'Angebotstitel': '',
                 'Gutschrift Brutto (€)': refund_display['Gutschrift Brutto (€)'].sum(),
                 'Erstattete Provision (€)': refund_display['Erstattete Provision (€)'].sum(),
-                'Gutschrift Netto/Auszahlung (€)': refund_display['Gutschrift Netto/Auszahlung (€)'].sum()
+                'Abrechnungsbetrag (€)': refund_display['Abrechnungsbetrag (€)'].sum()
             }])
 
             refund_final = pd.concat([refund_display, sum_refunds], ignore_index=True)
@@ -298,7 +298,7 @@ if uploaded_payout:
                 refund_final.style.format({
                     'Gutschrift Brutto (€)': '{:.2f} €',
                     'Erstattete Provision (€)': '{:.2f} €',
-                    'Gutschrift Netto/Auszahlung (€)': '{:.2f} €'
+                    'Abrechnungsbetrag (€)': '{:.2f} €'
                 }, na_rep=''),
                 use_container_width=True
             )
@@ -339,14 +339,14 @@ if uploaded_payout:
                         'Menge': 'Stück',
                         'eBay_Brutto': 'Erlös Brutto (€)', 
                         'Partner_Prov_EUR': prov_col_name, 
-                        'Auszahlung_Partner_Brutto': 'Auszahlungsbetrag Netto (€)'
+                        'Auszahlung_Partner_Brutto': 'Abrechnungsbetrag (€)'
                     })
                     
                     sum_sales = pd.DataFrame([{
                         'Datum': 'GESAMTSUMME VERKÄUFE', 'Bestellnummer': '', 'Partner': selected_partner, 'SKU': '', 'Stück': partner_sales['Stück'].sum(), 'Angebotstitel': '',
                         'Erlös Brutto (€)': partner_sales['Erlös Brutto (€)'].sum(),
                         prov_col_name: partner_sales[prov_col_name].sum(),
-                        'Auszahlungsbetrag Netto (€)': partner_sales['Auszahlungsbetrag Netto (€)'].sum()
+                        'Abrechnungsbetrag (€)': partner_sales['Abrechnungsbetrag (€)'].sum()
                     }])
                     final_sales = pd.concat([partner_sales, sum_sales], ignore_index=True)
                     
@@ -354,7 +354,7 @@ if uploaded_payout:
                         final_sales.style.format({
                             'Erlös Brutto (€)': '{:.2f} €', 
                             prov_col_name: '{:.2f} €', 
-                            'Auszahlungsbetrag Netto (€)': '{:.2f} €'
+                            'Abrechnungsbetrag (€)': '{:.2f} €'
                         }, na_rep=''), 
                         use_container_width=True
                     )
@@ -373,7 +373,7 @@ if uploaded_payout:
                         'Menge': 'Stück',
                         'eBay_Brutto': 'Gutschrift Brutto (€)', 
                         'Partner_Prov_EUR': f'Erstattete {prov_col_name}', 
-                        'Auszahlung_Partner_Brutto': 'Gutschrift Netto (€)'
+                        'Auszahlung_Partner_Brutto': 'Abrechnungsbetrag (€)'
                     })
                     
                     ret_prov_col = f'Erstattete {prov_col_name}'
@@ -382,7 +382,7 @@ if uploaded_payout:
                         'Datum': 'GESAMTSUMME GUTSCHRIFTEN', 'Bestellnummer': '', 'Partner': selected_partner, 'SKU': '', 'Stück': partner_retouren['Stück'].sum(), 'Angebotstitel': '',
                         'Gutschrift Brutto (€)': partner_retouren['Gutschrift Brutto (€)'].sum(),
                         ret_prov_col: partner_retouren[ret_prov_col].sum(),
-                        'Gutschrift Netto (€)': partner_retouren['Gutschrift Netto (€)'].sum()
+                        'Abrechnungsbetrag (€)': partner_retouren['Abrechnungsbetrag (€)'].sum()
                     }])
                     final_retouren = pd.concat([partner_retouren, sum_retouren], ignore_index=True)
                     
@@ -390,7 +390,7 @@ if uploaded_payout:
                         final_retouren.style.format({
                             'Gutschrift Brutto (€)': '{:.2f} €', 
                             ret_prov_col: '{:.2f} €', 
-                            'Gutschrift Netto (€)': '{:.2f} €'
+                            'Abrechnungsbetrag (€)': '{:.2f} €'
                         }, na_rep=''), 
                         use_container_width=True
                     )
