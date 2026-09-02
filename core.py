@@ -110,6 +110,16 @@ def read_upload(file: BinaryIO | bytes, filename: str) -> ParseResult:
     return read_xlsx_robust(file) if filename.lower().endswith((".xlsx", ".xlsm")) else read_csv_robust(file)
 
 
+def combine_uploaded_frames(frames: list[pd.DataFrame]) -> tuple[pd.DataFrame, int]:
+    """Combine payout exports and remove exact duplicate transaction rows."""
+    if not frames:
+        return pd.DataFrame(), 0
+    combined = pd.concat(frames, ignore_index=True, sort=False)
+    before = len(combined)
+    combined = combined.drop_duplicates(ignore_index=True)
+    return combined, before - len(combined)
+
+
 def detect_column(frame: pd.DataFrame, kind: str) -> str | None:
     aliases = ALIASES[kind]
     normalized = {_norm(column): column for column in frame.columns}
