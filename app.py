@@ -10,9 +10,10 @@ st.set_page_config(
     layout="wide"
 )
 
-# Custom Styling für Buttons
+# Custom Styling (Exakt nach deinen Screenshots)
 st.markdown("""
 <style>
+    /* Roter Button */
     div.stButton > button[kind="primary"] {
         background-color: #FF4B4B !important;
         color: white !important;
@@ -20,10 +21,36 @@ st.markdown("""
         border-radius: 6px !important;
         font-weight: 500 !important;
     }
+    
+    /* Hauptüberschriften Styling */
     h2 {
         font-size: 1.5rem !important;
         font-weight: 600 !important;
         color: #1E293B !important;
+    }
+
+    /* Grüne Box für Verkäufe */
+    .box-sales {
+        background-color: #F0FDF4;
+        border-left: 4px solid #22C55E;
+        padding: 8px 12px;
+        border-radius: 4px;
+        font-weight: 600;
+        color: #15803D;
+        margin-top: 15px;
+        margin-bottom: 8px;
+    }
+
+    /* Rote Box für Retouren / Gutschriften */
+    .box-refunds {
+        background-color: #FEF2F2;
+        border-left: 4px solid #EF4444;
+        padding: 8px 12px;
+        border-radius: 4px;
+        font-weight: 600;
+        color: #B91C1C;
+        margin-top: 15px;
+        margin-bottom: 8px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -66,7 +93,7 @@ def create_lexoffice_draft(api_key, customer_id, invoice_date, amount, tax_rate=
         return False, f"Verbindungsfehler: {str(e)}"
 
 
-# --- HILFSFUNKTIONEN FÜR VERARBEITUNG ---
+# --- DATA PARSER ---
 def parse_single_file(uploaded_file):
     try:
         if uploaded_file.name.endswith(('.xlsx', '.xls')):
@@ -96,15 +123,10 @@ def parse_single_file(uploaded_file):
 
 def clean_sku_prefix(val):
     s = str(val).strip().upper()
-    
-    # Trennung am Schrägstrich
     if '/' in s:
         s = s.split('/')[0].strip()
-        
-    # Spezifische Zusammenfassung für MH (MH, MH43, MH 44 etc. -> MH)
     if s.startswith('MH'):
         return 'MH'
-        
     return s
 
 
@@ -151,7 +173,7 @@ def process_uploaded_files(uploaded_files):
 
     df['SKU_Prefix'] = df['Custom Label'].apply(clean_sku_prefix)
 
-    # Gruppen-Logik
+    # Gruppen-Klassifizierung
     gruppe_a_prefixes = ['PP', 'BA', 'MK', '001']
     def assign_group(val):
         if not val or val in ['NAN', 'NONE', '', '—', '--', '-']:
@@ -188,7 +210,7 @@ if ebay_files:
     elif df is not None and not df.empty:
         
         # =========================================================
-        # 1. GRUPPE B – GESAMTABRECHNUNG FÜR EVELYN (ÜBER DICH)
+        # BLOCK 1: GRUPPE B – GESAMTABRECHNUNG FÜR EVELYN (ÜBER DICH)
         # =========================================================
         st.header("📊 1. Gruppe B – Gesamtabrechnung für Evelyn (Über DICH)")
         st.info("💡 **Verwendungszweck:** Diese Rechnung nutzt du für die Abrechnung gegenüber Evelyn. Sie enthält NUR die Umsätze aus Gruppe B, die über dich verteilt werden. Evelyn behält 0,5 % Provision.")
@@ -229,7 +251,6 @@ if ebay_files:
             st.dataframe(formatted_b, use_container_width=True, hide_index=False)
             
             col_btn1, col_btn2 = st.columns([1, 1])
-            
             with col_btn1:
                 buffer_b = io.BytesIO()
                 with pd.ExcelWriter(buffer_b, engine='openpyxl') as writer:
@@ -265,7 +286,7 @@ if ebay_files:
         st.markdown("<br><br>", unsafe_allow_html=True)
 
         # =========================================================
-        # 2. GRUPPE A – DIREKTABRECHNUNGEN FÜR EVELYN (PP, BA, MK, 001)
+        # BLOCK 2: GRUPPE A – DIREKTABRECHNUNGEN FÜR EVELYN
         # =========================================================
         st.header("🏷️ 2. Gruppe A – Direktabrechnungen für Evelyn (PP, BA, MK, 001)")
         st.info("💡 **Verwendungszweck:** Diese Partner rechnen mit 0,5 % Provision direkt mit Evelyn ab (laufen nicht über deine Marge).")
@@ -309,5 +330,62 @@ if ebay_files:
             )
         else:
             st.write("Keine Datensätze für Gruppe A vorhanden.")
+
+        st.markdown("<br><br>", unsafe_allow_html=True)
+
+        # =========================================================
+        # BLOCK 3: EINZELABRECHNUNGEN & RETOUREN (3,5 % PROVISION)
+        # =========================================================
+        st.header("📌 3. Einzelabrechnungen für dich & Patrick (3,5 % Provision)")
+        st.caption("Aufschlüsselung je SKU mit getrennter Darstellung von Verkäufen und Retouren/Gutschriften.")
+        
+        if not df_b.empty:
+            show_cols = [c for c in df.columns if c not in ['Gruppe', 'SKU_Prefix']]
+            
+            for sku in sorted(df_b['SKU_Prefix'].unique()):
+                sub_b = df_b[df_b['SKU_Prefix'] == sku]
+                n_b = sub_b['Net amount'].sum()
+                p_b = n_b * 0.035
+                a_b = n_b - p_b
+                
+                st.markdown(f"### SKU: **{sku}**")
+                x1, x2, x3 = st.columns(3)
+                x1.metric("Umsatz SKU", f"{n_b:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
+                x2.metric("Provision (3,5 %)", f"{p_b:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
+                x3.metric("Auszahlung", f"{a_b:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
+                
+                # Trennung Verkäufe vs. Retouren/Gutschriften
+                pos_b = sub_b[sub_b['Net amount'] >= 0]
+                neg_b = sub_b[sub_b['Net amount'] < 0]
+
+                if not pos_b.empty:
+                    st.markdown('<div class="box-sales">🟢 Verkäufe & Einnahmen</div>', unsafe_allow_html=True)
+                    st.dataframe(pos_b[show_cols], use_container_width=True, hide_index=True)
+
+                if not neg_b.empty:
+                    st.markdown('<div class="box-refunds">🔴 Gutschriften, Retouren & Gebühren</div>', unsafe_allow_html=True)
+                    st.dataframe(neg_b[show_cols], use_container_width=True, hide_index=True)
+
+                csv_b = sub_b[show_cols].to_csv(index=False).encode('utf-8')
+                st.download_button(f"📥 CSV-Export {sku}", csv_b, f"Abrechnung_3.5_{sku}.csv", "text/csv", key=f"dl_b_{sku}")
+                st.markdown("---")
+
+        st.markdown("<br><br>", unsafe_allow_html=True)
+
+        # =========================================================
+        # BLOCK 4: OHNE ZUORDNUNG & ALLE DATEN
+        # =========================================================
+        st.header("❓ 4. Ohne Zuordnung & Gesamtdaten")
+        
+        df_none = df[df['Gruppe'] == 'Ohne Zuordnung']
+        if df_none.empty:
+            st.success("Alle Transaktionen wurden erfolgreich zugeordnet!")
+        else:
+            st.warning("Folgende Positionen konnten keiner Gruppe zugeordnet werden:")
+            st.dataframe(df_none, use_container_width=True, hide_index=True)
+            
+        with st.expander("📄 Alle verarbeiteten Rohdaten anzeigen"):
+            st.dataframe(df, use_container_width=True, hide_index=True)
+
 else:
-    st.info("Bitte lade oben eine oder mehrere eBay-Auszahlungsdateien hoch.")
+    st.info("Bitte lade oben deine eBay-Auszahlungsdatei(en) hoch.")
