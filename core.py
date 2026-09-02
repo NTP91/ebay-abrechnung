@@ -2,8 +2,13 @@ import os
 import pandas as pd
 
 ORDERS_DB_PATH = "Master_Orders.csv"
+PAYOUTS_DB_PATH = "Master_Payouts.csv"
 
 def save_and_merge_order_reports(uploaded_files, upload_folder="uploads"):
+    """
+    Speichert und konsolidiert hochgeladene Bestellberichte in Master_Orders.csv
+    """
+    os.makedirs(upload_folder, exist_ok=True)
     all_order_data = []
     
     for file in uploaded_files:
@@ -12,7 +17,8 @@ def save_and_merge_order_reports(uploaded_files, upload_folder="uploads"):
             f.write(file.getbuffer())
             
         try:
-            if file.name.endswith(('.xlsx', '.xls')):
+            # Unterstützung für CSV (verschiedene Trennzeichen) und Excel
+            if file.name.lower().endswith(('.xlsx', '.xls')):
                 df = pd.read_excel(filepath, dtype=str)
             else:
                 df = pd.read_csv(filepath, sep=None, engine='python', dtype=str)
@@ -33,7 +39,29 @@ def save_and_merge_order_reports(uploaded_files, upload_folder="uploads"):
     return pd.DataFrame()
 
 
-def build_transaction_overview(master_payout_path="Master_Payouts.csv", master_orders_path="Master_Orders.csv"):
+def categorize_sku(sku):
+    """
+    Ordet eine SKU der passenden Gruppe zu (A, B oder Verkäufergruppe)
+    """
+    if not sku or pd.isna(sku) or str(sku).strip() in ['', 'NB /', 'nan']:
+        return "Unbekannt / Ohne Zuordnung"
+    
+    sku_upper = str(sku).strip().upper()
+    
+    # Beispielhafte Präfix-Logik (kann nach deinen Wünschen angepasst werden)
+    if sku_upper.startswith("A-") or sku_upper.startswith("A_") or "GRP-A" in sku_upper:
+        return "Kundengruppe A"
+    elif sku_upper.startswith("B-") or sku_upper.startswith("B_") or "GRP-B" in sku_upper:
+        return "Kundengruppe B"
+    else:
+        return "Verkäufergruppe / Standard"
+
+
+def build_transaction_overview(master_payout_path=PAYOUTS_DB_PATH, master_orders_path=ORDERS_DB_PATH):
+    """
+    Baut die vollständige Übersicht mit Bestellbericht-Verknüpfung
+    und Kundengruppen-Kategorisierung auf.
+    """
     if not os.path.exists(master_payout_path):
         return pd.DataFrame(), 0, 0.0
 
@@ -45,6 +73,7 @@ def build_transaction_overview(master_payout_path="Master_Payouts.csv", master_o
     if payouts.empty:
         return pd.DataFrame(), 0, 0.0
 
+    # Bestellberichte laden
     orders = pd.DataFrame()
     if os.path.exists(master_orders_path):
         try:
@@ -52,13 +81,14 @@ def build_transaction_overview(master_payout_path="Master_Payouts.csv", master_o
         except Exception:
             orders = pd.DataFrame()
 
+    # Mapping-Table für Artikel und SKUs aus den 188 DB-Einträgen aufbauen
     order_map = {}
     if not orders.empty:
-        # Sehr breite Spaltensuche für alle eBay-Report-Varianten
-        cols_lower = {c.lower(): c for c in orders.columns}
+        cols_lower = {str(c).lower().strip(): c for c in orders.columns}
         
+        # Flexibles Erkennen aller gängigen Spaltenbezeichnungen
         order_id_col = next((cols_lower[k] for k in cols_lower if k in [
-            'bestellnummer', 'order id', 'order number', 'verkaufsnummer', 'verkaufsprotokoll-nr.', 'transaktions-id'
+            'bestellnummer', 'order id', 'order number', 'verkaufsnummer', 'verkaufsprotokoll-nr.', 'transaktions-id', 'sales record number'
         ]), None)
         
         sku_col = next((cols_lower[k] for k in cols_lower if k in [
@@ -82,23 +112,26 @@ def build_transaction_overview(master_payout_path="Master_Payouts.csv", master_o
     total_netto = 0.0
 
     for _, row in payouts.iterrows():
-        # Flexibles Auslesen der Payout-Bestellnummer
+        # Bestellnummer aus Payout suchen
         bestellnr = None
         for col in ['Bestellnummer', 'Order ID', 'Verkaufsnummer', 'Auszahlung Nr.']:
-            if col in row and pd.notna(row[col]) and str(row[col]).strip() != '':
+            if col in row and pd.notna(row[col]) and str(row[col]).strip() not in ['', 'nan']:
                 bestellnr = str(row[col]).strip()
                 break
         
         if not bestellnr:
             bestellnr = '--'
 
-        # Zuordnung anwenden
+        # Artikel & SKU matchen
         if bestellnr in order_map:
             sku = order_map[bestellnr]['SKU']
             artikelname = order_map[bestellnr]['Artikelname']
         else:
             sku = 'NB /'
             artikelname = 'NB / Kein Titel gefunden'
+
+        # Kategorie bestimmen
+        gruppe = categorize_sku(sku)
 
         # Stückzahl
         stueck = '1'
@@ -107,7 +140,7 @@ def build_transaction_overview(master_payout_path="Master_Payouts.csv", master_o
                 stueck = str(row[col]).strip()
                 break
 
-        # Betrag / Netto
+        # Nettobetrag ermitteln
         betrag_val = 0.0
         for col in ['Nettobetrag', 'Betrag', 'Gesamtbetrag', 'Amount']:
             if col in row and pd.notna(row[col]):
@@ -125,6 +158,7 @@ def build_transaction_overview(master_payout_path="Master_Payouts.csv", master_o
             'Bestellnummer': bestellnr,
             'SKU': sku,
             'Artikelname': artikelname,
+            'Gruppe': gruppe,
             'Stück': stueck,
             'eBay_Netto': f"{betrag_val:.2f}".replace('.', ','),
             'Datum der Transaktionserstellung': datum
