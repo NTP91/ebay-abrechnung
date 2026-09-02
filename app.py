@@ -13,6 +13,18 @@ st.title("⚡ eBay Payout & Lexoffice Direct-Upload")
 # Lexoffice API Konfiguration
 lexoffice_api_key = "Wciy230Sw_pNI7.yFDyNsWuvvXIB2sxJ2MKLk2jfMowyWJKU"
 
+# Workflow-Anleitung ganz oben
+with st.expander("📖 **Anleitung & Workflow-Erklärung anzeigen**", expanded=True):
+    st.markdown("""
+    ### **Ablauf & Workflow:**
+    1. **Auszahlungsberichte hochladen:** Lade deine eBay-Auszahlungsberichte (CSV) oben hoch.
+    2. **Prüfung der Gruppen:**
+       - **Gruppe B (Über Dich):** Rechnungen werden automatisch per Button für Kundennummer `16335` in Lexoffice als Entwurf angelegt (inkl. 0,5% Rabatt & korrekten Nettobeträgen).
+       - **Gruppe A (Direkt):** Verkäufe von Direkt-Partnern (PP, BA, MK, 001). Hier kannst du pro Partner eine fertige CSV-Abrechnung herunterladen, die sie an dich stellen dürfen.
+       - **Ohne Zuordnung:** Positionen ohne erkannte Partner-SKU.
+    3. **Lexoffice-Upload:** Auf den Button unten klicken, um die Rechnungen für Gruppe B direkt in Lexoffice anzulegen.
+    """)
+
 # Sidebar Einstellungen
 st.sidebar.header("Einstellungen")
 target_customer_num = st.sidebar.text_input("Ziel-Kundennummer in Lexoffice:", value="16335")
@@ -162,10 +174,19 @@ if uploaded_payout:
         df_grp_none = df_payout[df_payout['Gruppe'] == 'Ohne Zuordnung'].copy()
 
         with tab_b:
+            st.info("""
+            **Gruppe B (Über Dich / Evelyn Kukulan Onlinehandel):**
+            Diese Artikel werden über deinen Account/Kunden abgewickelt. Die Rechnungen hierfür werden direkt per Button unten an **Lexoffice (Kundennummer 16335)** übertragen.
+            """)
             st.write(f"**Anzahl:** {len(df_grp_b)} Positionen | **Summe Netto:** {df_grp_b['eBay_Netto'].sum():.2f} €")
             st.dataframe(df_grp_b[['Bestellnummer', 'SKU', 'eBay_Netto', 'Datum der Transaktionserstellung']], use_container_width=True)
 
         with tab_a:
+            st.info("""
+            **Gruppe A (Direkt-Abrechnung mit Partnern):**
+            Diese Bestellungen gehören zu den Direkt-Partnern (**PP, BA, MK, 001**). 
+            Hier erstellst du keine Lexoffice-Rechnung, sondern lädst unten pro Partner die CSV-Datei herunter. Die Partner nutzen diese Übersicht, um ihre Rechnung an dich zu stellen.
+            """)
             st.write(f"**Anzahl Gesamt:** {len(df_grp_a)} Positionen | **Gesamtsumme Netto:** {df_grp_a['eBay_Netto'].sum():.2f} €")
             st.markdown("---")
             
@@ -191,6 +212,10 @@ if uploaded_payout:
                 st.markdown("---")
 
         with tab_none:
+            st.warning("""
+            **Ohne Zuordnung:**
+            Bestellungen ohne bekannte SKU oder Prefix. Diese müssen manuell geprüft werden.
+            """)
             st.write(f"**Anzahl:** {len(df_grp_none)} Positionen | **Summe Netto:** {df_grp_none['eBay_Netto'].sum():.2f} €")
             st.dataframe(df_grp_none[['Bestellnummer', 'SKU', 'eBay_Netto', 'Datum der Transaktionserstellung']], use_container_width=True)
 
