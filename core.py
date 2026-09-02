@@ -26,7 +26,7 @@ def load_master_data():
         except Exception:
             orders = pd.DataFrame()
 
-    # Mapping aus Orders
+    # Mapping aus Orders erstellen
     order_map = {}
     if not orders.empty:
         cols_norm = {str(c).lower().replace('-', '').replace('_', '').replace(' ', ''): c for c in orders.columns}
@@ -47,30 +47,38 @@ def load_master_data():
     prefixes_a = ["PP", "BA", "MK", "001"]
 
     for _, row in payouts.iterrows():
+        # Bestellnummer suchen
         bestellnr = '--'
-        for col in ['Bestellnummer', 'Order ID', 'Verkaufsnummer']:
-            if col in row and pd.notna(row[col]) and str(row[col]).strip() not in ['', 'nan']:
-                bestellnr = str(row[col]).strip()
-                break
+        for col in row.index:
+            c_clean = str(col).lower().replace(' ', '').replace('_', '').replace('-', '')
+            if any(k in c_clean for k in ['bestellnummer', 'orderid', 'verkaufsnummer', 'transaktionsid']):
+                val = str(row[col]).strip()
+                if val and val not in ['', 'nan', 'None']:
+                    bestellnr = val
+                    break
 
-        # Match Daten
+        # Match Daten aus Orders
         if bestellnr in order_map:
             sku = order_map[bestellnr]['SKU']
             titel = order_map[bestellnr]['Angebotstitel']
         else:
-            sku = str(row.get('SKU', 'NB /')).strip()
-            titel = str(row.get('Angebotstitel', str(row.get('Artikelname', '--')))).strip()
+            sku = 'NB /'
+            titel = '--'
+            for col in row.index:
+                c_clean = str(col).lower()
+                if 'sku' in c_clean:
+                    sku = str(row[col]).strip()
+                if 'titel' in c_clean or 'title' in c_clean or 'artikel' in c_clean:
+                    titel = str(row[col]).strip()
 
-        # Partner / SKU_Prefix bestimmen
         partner = sku.split('/')[0].strip() if '/' in sku else sku.strip()
         if not partner or partner in ['nan', 'None', '']:
-            partner = '--'
+            partner = 'NB'
 
-        # Kundengruppe bestimmen
         is_group_a = any(partner.upper().startswith(p) for p in prefixes_a)
         gruppe = "Gruppe A" if is_group_a else "Gruppe B"
 
-        # Robustere Betragskonvertierung (sucht nach Betrag, Nettobetrag, Amount, etc.)
+        # Betrag auslesen
         betrag_val = 0.0
         for col in row.index:
             c_clean = str(col).lower().replace(' ', '').replace('_', '')
@@ -99,14 +107,13 @@ def load_master_data():
             'Angebotstitel': titel,
             'Gruppe': gruppe,
             'Erlös_Brutto': betrag_val,
-            'Status': row.get('Status', 'Noch Offen')
+            'Status': str(row.get('Status', 'Noch Offen'))
         })
 
     return pd.DataFrame(processed)
 
 
 def get_group_b_summary(df):
-    """Erstellt Tabellenübersicht für Gruppe B."""
     if df.empty:
         return pd.DataFrame()
     
@@ -123,7 +130,6 @@ def get_group_b_summary(df):
     grouped['Auszahlung_von_Evelyn_an_Dich'] = grouped['eBay_Brutto_Gesamt'] - grouped['Evelyn_Provision_0_5']
     grouped['Deine_Marge_3_0'] = grouped['eBay_Brutto_Gesamt'] * 0.030
 
-    # Gesamtsumme
     total_row = pd.DataFrame([{
         'Partner': 'GESAMTSUMME (Gruppe B)',
         'Anzahl_Transaktionen': grouped['Anzahl_Transaktionen'].sum(),
@@ -137,7 +143,6 @@ def get_group_b_summary(df):
 
 
 def get_group_a_summary(df):
-    """Erstellt Tabellenübersicht für Gruppe A (PP, BA, MK, 001)."""
     if df.empty:
         return pd.DataFrame()
     
@@ -165,7 +170,6 @@ def get_group_a_summary(df):
 
 
 def get_refunds_summary(df):
-    """Filtert alle Erstattungen / Gutschriften (negative Beträge)."""
     if df.empty:
         return pd.DataFrame()
 
@@ -181,7 +185,6 @@ def get_refunds_summary(df):
 
 
 def export_to_excel(df):
-    """Erzeugt Excel-Download-Stream ohne externe xlsxwriter-Abhängigkeit."""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Abrechnung')
