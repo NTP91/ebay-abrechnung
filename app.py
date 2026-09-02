@@ -11,7 +11,7 @@ st.write("Lade deine eBay Auszahlungsberichte (CSV) sowie optional deine Soll-Re
 col1, col2 = st.columns(2)
 with col1:
     uploaded_payout = st.file_uploader(
-        "1. eBay Auszahlungsbericht (CSV hochladen)", 
+        "1. eBay Auszahlungsberichte (CSV hochladen)", 
         type=["csv"], 
         accept_multiple_files=True, 
         key="payout"
@@ -34,7 +34,7 @@ def get_commission_rate(sku):
     sku_clean = str(sku).strip().upper()
     prefix = sku_clean.split('/')[0].strip()
     
-    # 0,5 % Regel für BA, MK, PP und 001/001C
+    # 0,5 % Regel für Spezial-SKUs
     if prefix in ['BA', 'MK', 'PP', '001'] or prefix.startswith('001'):
         return 0.005
     
@@ -44,10 +44,16 @@ def get_commission_rate(sku):
 if uploaded_payout:
     try:
         all_dfs = []
-        num_files = len(uploaded_payout)
+        processed_file_names = set()
         
-        # Alle hochgeladenen CSV-Dateien einlesen und verbinden
+        # --- 1. AUTOMATISCHES FILTERN DOPPELTER DATEIEN ---
         for file in uploaded_payout:
+            # Falls Datei schon verarbeitet wurde (gleicher Dateiname), ignorieren wir sie komplett
+            if file.name in processed_file_names:
+                continue
+            
+            processed_file_names.add(file.name)
+            
             content = file.getvalue().decode('utf-8', errors='ignore')
             lines = content.splitlines()
             
@@ -63,19 +69,20 @@ if uploaded_payout:
         # Zu einem einzigen Datensatz zusammenfügen
         df_payout = pd.concat(all_dfs, ignore_index=True)
         
-        # --- 1. DUBLETTENPRÜFUNG ---
+        # --- 2. ZUSÄTZLICHE INHALTLICHE DUBLETTENPRÜFUNG ---
         initial_count = len(df_payout)
         df_payout = df_payout.drop_duplicates(
             subset=['Bestellnummer', 'Datum der Transaktionserstellung', 'Betrag abzügl. Kosten']
         )
-        duplicates_removed = initial_count - len(df_payout)
         
-        if duplicates_removed > 0:
-            st.warning(f"⚠️ Dublettenprüfung: Es wurden {duplicates_removed} doppelte Transaktionen automatisch herausgefiltert!")
+        # Klare Erfolgsmeldung für die Übersicht
+        st.success(f"✅ **{len(processed_file_names)} eindeutige Datei(en)** erfolgreich verarbeitet ({len(df_payout)} Transaktionen insgesamt).")
         
-        # ERWEITERTE ANZEIGE: Zeigt jetzt auch die Anzahl der Dateien an!
-        st.success(f"✅ Auszahlungsberichte geladen: {num_files} Datei(en) mit insgesamt {len(df_payout)} eindeutigen Transaktionen verarbeitet.")
-        
+        # Übersicht der verarbeiteten Dateien anzeigen
+        with st.expander("📁 Aufgeklappte Liste der aktiv berücksichtigten Dateien"):
+            for fname in processed_file_names:
+                st.write(f"• `{fname}`")
+
         # Spalten und Beträge aufbereiten
         df_payout['Auszahlung_Netto_eBay'] = df_payout['Betrag abzügl. Kosten'].apply(parse_german_float)
         df_payout['SKU'] = df_payout['Bestandseinheit'].fillna('OHNE_SKU').astype(str).str.strip()
@@ -84,7 +91,7 @@ if uploaded_payout:
         df_payout['Auszahlung_Partner_EUR'] = (df_payout['Auszahlung_Netto_eBay'] - df_payout['Provision_EUR']).round(2)
         df_payout['SKU_Prefix'] = df_payout['SKU'].apply(lambda x: str(x).split('/')[0].strip().upper() if pd.notna(x) else 'FEHLT')
 
-        # --- 2. SOLL-IST ABGLEICH GEGEN DIE RECHNUNG ---
+        # --- 3. SOLL-IST ABGLEICH GEGEN DIE RECHNUNG ---
         if uploaded_invoice is not None:
             if uploaded_invoice.name.endswith('.xlsx'):
                 df_inv = pd.read_excel(uploaded_invoice, header=2)
