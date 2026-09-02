@@ -1,11 +1,10 @@
 import streamlit as st
 import pandas as pd
 import io
-import zipfile
 
 st.set_page_config(page_title="eBay Payout & SKU-Abrechnung", layout="wide")
 
-st.title("📦 eBay Payout & SKU-Abrechnungs Tool (Lexoffice Ready)")
+st.title("📦 eBay Payout & SKU-Abrechnungs Tool")
 st.write("Lade deine eBay Auszahlungsberichte (CSV) sowie deine Soll-Rechnung (Excel/CSV) hoch.")
 
 col1, col2 = st.columns(2)
@@ -50,7 +49,7 @@ if uploaded_payout:
         df_payout = pd.concat(all_dfs, ignore_index=True)
         df_payout = df_payout.drop_duplicates(subset=['Bestellnummer', 'Datum der Transaktionserstellung', 'Betrag abzügl. Kosten'])
         
-        # Berechnungen
+        # Berechnungen genau wie in deinem Screenshot
         df_payout['eBay_Brutto'] = df_payout['Betrag abzügl. Kosten'].apply(parse_german_float)
         df_payout['SKU'] = df_payout['Bestandseinheit'].fillna('OHNE_SKU').astype(str).str.strip()
         df_payout['Provisionssatz'] = df_payout['SKU'].apply(get_commission_rate)
@@ -120,7 +119,7 @@ if uploaded_payout:
             use_container_width=True
         )
 
-        # Download für Evelyn
+        # Download für Evelyn (Alles in einer Excel)
         export_evelyn_details = df_payout[[
             'Datum der Transaktionserstellung',
             'Bestellnummer',
@@ -133,29 +132,29 @@ if uploaded_payout:
             'Provision_EUR',
             'Auszahlung_Partner_Brutto'
         ]].rename(columns={
-            'SKU_Prefix': 'Partner_Kürzel',
+            'SKU_Prefix': 'Partner',
             'eBay_Brutto': 'eBay Erlös Brutto (€)',
             'VK_Netto': 'VK Netto (€)',
             'Rabatt_Prozent': 'Provision (%)',
             'Provision_EUR': 'Deine Provision (€)',
-            'Auszahlung_Partner_Brutto': 'Auszahlung an Partner (€)'
+            'Auszahlung_Partner_Brutto': 'Auszahlung an Partner Brutto (€)'
         })
 
         buffer_evelyn = io.BytesIO()
         with pd.ExcelWriter(buffer_evelyn, engine='openpyxl') as writer:
-            summary_with_total.to_excel(writer, index=False, sheet_name='Übersicht_nach_Partner')
-            export_evelyn_details.to_excel(writer, index=False, sheet_name='Alle_Positionen_Details')
+            summary_with_total.to_excel(writer, index=False, sheet_name='Übersicht_Partner')
+            export_evelyn_details.to_excel(writer, index=False, sheet_name='Alle_Positionen')
             
         st.download_button(
-            label="📥 Gesamtabrechnung für Evelyn herunterladen (Excel mit allen Positionen)",
+            label="📥 Gesamtabrechnung für Evelyn herunterladen (Excel)",
             data=buffer_evelyn.getvalue(),
-            file_name="Gesamtabrechnung_Evelyn_Alle_Positionen.xlsx",
+            file_name="Gesamtabrechnung_Evelyn_Alle_Partner.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary"
         )
 
         st.markdown("---")
-        st.subheader("🔍 2. Einzelabrechnungen pro Partner (Lexoffice Konform)")
+        st.subheader("🔍 2. Einzelabrechnung pro Partner")
         
         valid_skus = [s for s in summary['SKU_Prefix'].unique() if s not in ['FEHLT', '--', '']]
         if not valid_skus:
@@ -163,114 +162,65 @@ if uploaded_payout:
             
         selected_sku = st.selectbox("Partner / Kürzel auswählen:", valid_skus)
         
-        # Funktion für saubere Lexoffice-Struktur
-        def get_lexoffice_data(sku_prefix):
-            filtered = df_payout[df_payout['SKU_Prefix'] == sku_prefix].copy()
-            filtered['Artikelbezeichnung'] = filtered['Angebotstitel'] + " (Bestellnr: " + filtered['Bestellnummer'].astype(str) + ")"
-            filtered['Menge'] = 1
-            filtered['Einheit'] = 'Stück'
-            filtered['Steuersatz'] = 19.0
-            
-            # Rohdaten für Python / API / CSV Import
-            raw_export = filtered[[
-                'Artikelbezeichnung',
-                'Menge',
-                'Einheit',
-                'VK_Netto',
-                'Rabatt_Prozent',
-                'Steuersatz',
-                'Auszahlung_Partner_Brutto'
-            ]].rename(columns={
-                'VK_Netto': 'UnitPrice_Net',
-                'Rabatt_Prozent': 'Discount_Percent',
-                'Steuersatz': 'Tax_Rate',
-                'Auszahlung_Partner_Brutto': 'Line_Total_Gross'
-            })
-            
-            # Formatiert für manuelles Abtippen (Excel)
-            manual_export = filtered[[
-                'Artikelbezeichnung',
-                'Menge',
-                'Einheit',
-                'VK_Netto',
-                'Rabatt_Prozent',
-                'Auszahlung_Partner_Brutto'
-            ]].rename(columns={
-                'VK_Netto': 'VK (Netto)',
-                'Rabatt_Prozent': 'Rabatt (%)',
-                'Auszahlung_Partner_Brutto': 'Auszahlungsbetrag Brutto (€)'
-            })
-            
-            sum_row = pd.DataFrame([{
-                'Artikelbezeichnung': 'GESAMTSUMME',
-                'Menge': '',
-                'Einheit': '',
-                'VK (Netto)': manual_export['VK (Netto)'].sum(),
-                'Rabatt (%)': '',
-                'Auszahlungsbetrag Brutto (€)': manual_export['Auszahlungsbetrag Brutto (€)'].sum()
-            }])
-            
-            manual_with_sum = pd.concat([manual_export, sum_row], ignore_index=True)
-            return raw_export, manual_with_sum
-
-        raw_df, manual_df = get_lexoffice_data(selected_sku)
+        filtered_p = df_payout[df_payout['SKU_Prefix'] == selected_sku].copy()
         
-        st.write("**Ansicht für manuelle Eingabe in Lexoffice:**")
+        # Genau der Aufbau aus deinem Screenshot
+        partner_display = filtered_p[[
+            'Datum der Transaktionserstellung',
+            'Bestellnummer',
+            'SKU_Prefix',
+            'SKU',
+            'Angebotstitel',
+            'eBay_Brutto',
+            'VK_Netto',
+            'Rabatt_Prozent',
+            'Provision_EUR',
+            'Auszahlung_Partner_Brutto'
+        ]].rename(columns={
+            'Datum der Transaktionserstellung': 'Datum',
+            'SKU_Prefix': 'Partner',
+            'eBay_Brutto': 'eBay Erlös Brutto (€)',
+            'VK_Netto': 'VK Netto (€)',
+            'Rabatt_Prozent': 'Provision (%)',
+            'Provision_EUR': 'Deine Provision (€)',
+            'Auszahlung_Partner_Brutto': 'Auszahlungsbetrag Brutto (€)'
+        })
+        
+        # Summenzeile unten drunter
+        sum_row_p = pd.DataFrame([{
+            'Datum': 'GESAMTSUMME',
+            'Bestellnummer': '',
+            'Partner': selected_sku,
+            'SKU': '',
+            'Angebotstitel': '',
+            'eBay Erlös Brutto (€)': partner_display['eBay Erlös Brutto (€)'].sum(),
+            'VK Netto (€)': partner_display['VK Netto (€)'].sum(),
+            'Provision (%)': partner_display['Provision (%)'].iloc[0] if len(partner_display) > 0 else 0,
+            'Deine Provision (€)': partner_display['Deine Provision (€)'].sum(),
+            'Auszahlungsbetrag Brutto (€)': partner_display['Auszahlungsbetrag Brutto (€)'].sum()
+        }])
+        
+        partner_final = pd.concat([partner_display, sum_row_p], ignore_index=True)
+        
         st.dataframe(
-            manual_df.style.format({
-                'VK (Netto)': '{:.2f} €',
+            partner_final.style.format({
+                'eBay Erlös Brutto (€)': '{:.2f} €',
+                'VK Netto (€)': '{:.2f} €',
+                'Deine Provision (€)': '{:.2f} €',
                 'Auszahlungsbetrag Brutto (€)': '{:.2f} €'
             }, na_rep=''),
             use_container_width=True
         )
         
-        c1, c2 = st.columns(2)
-        
-        # 1. Excel für Manuell
-        buffer_manual = io.BytesIO()
-        with pd.ExcelWriter(buffer_manual, engine='openpyxl') as writer:
-            manual_df.to_excel(writer, index=False, sheet_name=f'Lexoffice_{selected_sku}')
+        buffer_partner_excel = io.BytesIO()
+        with pd.ExcelWriter(buffer_partner_excel, engine='openpyxl') as writer:
+            partner_final.to_excel(writer, index=False, sheet_name=f'Abrechnung_{selected_sku}')
             
-        with c1:
-            st.download_button(
-                label=f"📄 Excel für manuelle Eingabe ({selected_sku})",
-                data=buffer_manual.getvalue(),
-                file_name=f"Lexoffice_Manuell_{selected_sku}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-            
-        # 2. CSV für Python / Automatischer Import
-        buffer_csv = raw_df.to_csv(index=False, sep=';', decimal=',').encode('utf-8-sig')
-        with c2:
-            st.download_button(
-                label=f"🤖 CSV für Python / Lexoffice-API ({selected_sku})",
-                data=buffer_csv,
-                file_name=f"Lexoffice_Import_{selected_sku}.csv",
-                mime="text/csv"
-            )
-
-        # 3. ZIP-Archiv für alle Partner auf einmal
-        st.write("---")
-        zip_buffer = io.BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w") as zf:
-            for sku_code in valid_skus:
-                r_df, m_df = get_lexoffice_data(sku_code)
-                
-                # Manuelle Excel
-                b_m = io.BytesIO()
-                with pd.ExcelWriter(b_m, engine='openpyxl') as writer:
-                    m_df.to_excel(writer, index=False, sheet_name=f'Lexoffice_{sku_code}')
-                zf.writestr(f"Excel_Manuell/Lexoffice_Manuell_{sku_code}.xlsx", b_m.getvalue())
-                
-                # CSV Import
-                b_c = r_df.to_csv(index=False, sep=';', decimal=',').encode('utf-8-sig')
-                zf.writestr(f"CSV_API_Import/Lexoffice_Import_{sku_code}.csv", b_c)
-
         st.download_button(
-            label="📦 ALLE Partner-Abrechnungen auf einmal (ZIP-Archiv mit Excel & CSV)",
-            data=zip_buffer.getvalue(),
-            file_name="Alle_Partner_Lexoffice_Paket.zip",
-            mime="application/zip"
+            label=f"📥 Excel-Abrechnung für Partner '{selected_sku}' herunterladen",
+            data=buffer_partner_excel.getvalue(),
+            file_name=f"Abrechnung_Partner_{selected_sku}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
     except Exception as e:
