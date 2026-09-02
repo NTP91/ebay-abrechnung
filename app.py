@@ -3,119 +3,133 @@ import pandas as pd
 import streamlit as st
 from importer import import_payout_files
 
-# --- KONFIGURATION & PFADE ---
+# --- PFAD-KONFIGURATION ---
 UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), 'uploads')
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 MASTER_CSV_PATH = os.path.join(os.path.dirname(__file__), 'Master_Payouts.csv')
 
-st.set_page_config(page_title="eBay Abrechnung & Payout Manager", layout="wide")
+st.set_page_config(page_title="eBay Abrechnung & Dashboard", layout="wide")
 
-# --- SEITENLEISTE (SIDEBAR) / UPLOAD ---
-st.sidebar.title("📁 Datei-Verwaltung")
-st.sidebar.markdown("---")
+# --- SEITENLEISTE (DATENMANAGER) ---
+st.sidebar.title("📁 Dateimanager")
 
 uploaded_files = st.sidebar.file_uploader(
-    "Neue Payout CSVs hochladen", 
+    "Payout CSVs hochladen", 
     type=["csv"], 
     accept_multiple_files=True
 )
 
 if uploaded_files:
-    if st.sidebar.button("Dateien verarbeiten & speichern"):
+    if st.sidebar.button("Speichern & Verarbeiten"):
         for uploaded_file in uploaded_files:
             filepath = os.path.join(UPLOAD_FOLDER, uploaded_file.name)
             with open(filepath, "wb") as f:
                 f.write(uploaded_file.getbuffer())
 
+        # Payouts entdoppeln & in Datenbank speichern
         import_payout_files(
             input_directory=UPLOAD_FOLDER, 
             output_master_csv=MASTER_CSV_PATH
         )
-        st.sidebar.success("Erfolgreich verarbeitet!")
+        st.sidebar.success("Payouts gespeichert & aktualisiert!")
         st.rerun()
 
-# Gespeicherte Dateien in der Seitenleiste auflisten
-st.sidebar.markdown("### 📂 Hochgeladene Dateien")
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 📄 Gespeicherte Payout-Dateien")
 if os.path.exists(UPLOAD_FOLDER):
-    files_in_dir = [f for f in os.listdir(UPLOAD_FOLDER) if f.endswith('.csv')]
-    if files_in_dir:
-        for f in sorted(files_in_dir):
-            st.sidebar.text(f"📄 {f}")
+    files = [f for f in os.listdir(UPLOAD_FOLDER) if f.endswith('.csv')]
+    if files:
+        for f in sorted(files):
+            st.sidebar.text(f"• {f}")
     else:
-        st.sidebar.caption("Noch keine Einzeldateien vorhanden.")
+        st.sidebar.caption("Keine Dateien im Speicher.")
 
-# --- HAUPTANSICHT / DASHBOARD ---
-st.title("📊 eBay Payout & Kunden-Dashboard")
+# --- HAUPTDASHBOARD ---
+st.title("📊 eBay Abrechnung & Provisionsberechnung")
 
+# Master-Datenbank laden
+payout_df = pd.DataFrame()
 if os.path.exists(MASTER_CSV_PATH):
     try:
-        master_df = pd.read_csv(MASTER_CSV_PATH, sep=';', dtype=str)
+        payout_df = pd.read_csv(MASTER_CSV_PATH, sep=';', dtype=str)
+    except Exception:
+        pass
+
+# DASHBOARD TABS
+tab_prov, tab_cust, tab_data = st.tabs([
+    "💰 Verkäuferprovisionen", 
+    "👤 Kunden & Personen", 
+    "🗃️ Payout-Datenbank"
+])
+
+# 1. TAB: VERKÄUFERPROVISIONEN & RECHNUNGSDATEN
+with tab_prov:
+    st.subheader("Verkäuferprovisions-Berechnung")
+    if not payout_df.empty:
+        # Sicherstellen, dass Betrags-Spalten numerisch sind
+        val_col = None
+        for col in ['Betrag', 'Nettobetrag', 'Gesamtbetrag']:
+            if col in payout_df.columns:
+                val_col = col
+                break
         
-        if not master_df.empty:
-            # TABS FÜR ÜBERSICHTEN
-            tab_overview, tab_customers, tab_raw = st.tabs([
-                "📈 Gesamtsicht", 
-                "👤 Kunden & Personen", 
-                "📋 Rohdaten (Master-CSV)"
-            ])
-
-            # TAB 1: Gesamtsicht & Kennzahlen
-            with tab_overview:
-                st.subheader("Übersicht")
-                col1, col2, col3 = st.columns(3)
-                col1.metric("Gesamtanzahl Zeilen", len(master_df))
-                
-                if 'Auszahlung Nr.' in master_df.columns:
-                    unique_payouts = master_df['Auszahlung Nr.'].nunique()
-                    col2.metric("Anzahl Auszahlungen", unique_payouts)
-                
-                if 'Nutzersuche / Käufername' in master_df.columns or 'Nutzername des Käufers' in master_df.columns:
-                    buyer_col = 'Nutzername des Käufers' if 'Nutzername des Käufers' in master_df.columns else 'Nutzersuche / Käufername'
-                    col3.metric("Eindeutige Kunden", master_df[buyer_col].nunique())
-
-                st.markdown("---")
-                st.write("### Letchte Transaktionen")
-                st.dataframe(master_df.head(50), use_container_width=True)
-
-            # TAB 2: Kunden & Personen
-            with tab_customers:
-                st.subheader("Kundenübersicht")
-                buyer_col = None
-                for col_name in ['Nutzername des Käufers', 'Nutzersuche / Käufername', 'Käufer Name']:
-                    if col_name in master_df.columns:
-                        buyer_col = col_name
-                        break
-
-                if buyer_col:
-                    search_term = st.text_input("🔍 Nach Kunde/Person suchen:")
-                    if search_term:
-                        filtered_df = master_df[master_df[buyer_col].str.contains(search_term, case=False, na=False)]
-                        st.write(f"Gefundene Einträge für **'{search_term}'**: {len(filtered_df)}")
-                        st.dataframe(filtered_df, use_container_width=True)
-                    else:
-                        st.write("**Top Kunden nach Transaktionen:**")
-                        customer_counts = master_df[buyer_col].value_counts().reset_index()
-                        customer_counts.columns = ['Kunde', 'Anzahl Transaktionen']
-                        st.dataframe(customer_counts, use_container_width=True)
-                else:
-                    st.info("Spalte für Kundennamen in den Daten nicht direkt erkannt.")
-
-            # TAB 3: Rohdaten & Download
-            with tab_raw:
-                st.subheader("Gesamte Master_Payouts.csv")
-                st.dataframe(master_df, use_container_width=True)
-                
-                csv_bytes = master_df.to_csv(sep=';', index=False, encoding='utf-8-sig').encode('utf-8-sig')
-                st.download_button(
-                    label="📥 Master_Payouts.csv herunterladen",
-                    data=csv_bytes,
-                    file_name="Master_Payouts.csv",
-                    mime="text/csv"
-                )
+        if val_col:
+            payout_df_calc = payout_df.copy()
+            payout_df_calc['Betrag_Num'] = payout_df_calc[val_col].str.replace(',', '.').astype(float)
+            
+            total_sum = payout_df_calc['Betrag_Num'].sum()
+            col1, col2 = st.columns(2)
+            col1.metric("Gesamter Umsatz / Payouts", f"{total_sum:,.2f} €")
+            
+            # Beispielhafte Provisionsberechnung (anpassbar)
+            prov_rate = st.slider("Provisionssatz (%)", min_value=0.0, max_value=30.0, value=10.0, step=0.5)
+            provision = total_sum * (prov_rate / 100.0)
+            col2.metric(f"Berechnete Provision ({prov_rate}%)", f"{provision:,.2f} €")
+            
+            st.markdown("---")
+            st.write("### Rechnungsrelevante Übersichten")
+            st.dataframe(payout_df_calc, use_container_width=True)
         else:
-            st.info("Die Master-Datei ist noch leer. Bitte lade links CSV-Dateien hoch.")
+            st.dataframe(payout_df, use_container_width=True)
+    else:
+        st.info("Keine Payout-Daten in der Datenbank vorhanden. Bitte lade links Dateien hoch.")
 
-    except Exception as e:
-        st.error(f"Fehler beim Laden der Master-Datei: {e}")
-else:
-    st.info("👋 Willkommen! Noch keine Daten vorhanden. Lade links in der Seitenleiste deine ersten Payout-CSVs hoch.")
+# 2. TAB: KUNDEN UND PERSONENOVERVIEW
+with tab_cust:
+    st.subheader("Personen- & Kundenübersicht")
+    if not payout_df.empty:
+        buyer_col = None
+        for col in ['Nutzername des Käufers', 'Nutzersuche / Käufername', 'Name des Käufers', 'Käufer Name']:
+            if col in payout_df.columns:
+                buyer_col = col
+                break
+                
+        if buyer_col:
+            search = st.text_input("🔍 Kunde oder Person suchen:")
+            if search:
+                res = payout_df[payout_df[buyer_col].str.contains(search, case=False, na=False)]
+                st.write(f"Gefundene Einträge: {len(res)}")
+                st.dataframe(res, use_container_width=True)
+            else:
+                st.write("### Alle erfassten Personen")
+                persons = payout_df[[buyer_col]].drop_duplicates().reset_index(drop=True)
+                st.dataframe(persons, use_container_width=True)
+        else:
+            st.warning("Keine Käufer-/Personenspalte in den Daten gefunden.")
+    else:
+        st.info("Keine Kundendaten vorhanden.")
+
+# 3. TAB: GESAMTE PAYOUT-DATENBANK
+with tab_data:
+    st.subheader("Konsolidierte Master_Payouts.csv")
+    if not payout_df.empty:
+        st.dataframe(payout_df, use_container_width=True)
+        csv_bytes = payout_df.to_csv(sep=';', index=False, encoding='utf-8-sig').encode('utf-8-sig')
+        st.download_button(
+            label="📥 Master_Payouts.csv herunterladen",
+            data=csv_bytes,
+            file_name="Master_Payouts.csv",
+            mime="text/csv"
+        )
+    else:
+        st.info("Datenbank ist noch leer.")
