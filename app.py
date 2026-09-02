@@ -20,7 +20,7 @@ with st.expander("📖 **Anleitung & Workflow-Erklärung anzeigen**", expanded=T
     1. **Auszahlungsberichte hochladen:** Lade deine eBay-Auszahlungsberichte (CSV) oben hoch.
     2. **Gruppe A (Direkt-Partner: PP, BA, MK, 001):**
        - Lade die einzelnen CSV-Dateien für die Partner herunter. Die Werte entsprechen 1:1 den reinen eBay-Netto-Werten.
-    3. **Gruppe B (Über Dich / Evelyn Kukulan inkl. NB):**
+    3. **Gruppe B (Über Dich / Evelyn Kukulan inkl. NB & MH):**
        - **Lexoffice Upload:** Rechnungsentwurf an Evelyn mit **0,5 % Rabatt**.
        - **Partner Downloads:** Aufschlüsselung je SKU-Präfix inkl. **3,5 % Rabatt**, damit dir die Partner ihre Rechnung stellen können.
     """)
@@ -57,8 +57,15 @@ def extract_partner_prefix(sku):
         return 'OHNE_SKU'
     sku_clean = str(sku).strip().upper()
     raw_prefix = sku_clean.split('/')[0].strip()
+    
+    # Spezialfall 001
     if raw_prefix.startswith('001') or raw_prefix == '001':
         return '001'
+    
+    # Alle MH-Varianten (MH, MH43, MH44, MH45 etc.) zu 'MH' zusammenfassen
+    if raw_prefix.startswith('MH'):
+        return 'MH'
+        
     match = re.match(r'^([A-Z0-9]+)', raw_prefix)
     if match:
         return match.group(1)
@@ -208,7 +215,7 @@ if uploaded_payout:
         # TAB GRUPPE B
         with tab_b:
             st.info("""
-            **Gruppe B (Über Dich / Evelyn Kukulan inkl. Partner NB):**
+            **Gruppe B (Über Dich / Evelyn Kukulan inkl. Partner NB & MH):**
             - **An Evelyn senden:** Rechnungsentwurf direkt per Button an **Lexoffice (Kundennummer 16335)** übermitteln (mit 0,5 % Rabatt).
             - **Partner-Downloads:** Unten findest du für jedes Partner-Kürzel die Aufschlüsselung inkl. **3,5 % Rabatt**, damit dir die Partner ihre Rechnung stellen können.
             """)
