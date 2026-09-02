@@ -21,48 +21,33 @@ st.sidebar.header("📁 Datei-Upload & Daten")
 uploaded_payouts = st.sidebar.file_uploader("1. Payout-Dateien hochladen (CSV)", type=['csv'], accept_multiple_files=True)
 uploaded_orders = st.sidebar.file_uploader("2. Bestellberichte hochladen (CSV/XLSX)", type=['csv', 'xlsx', 'xls'], accept_multiple_files=True)
 
+def read_file_safely(file):
+    """Liest CSVs sicher mit automatischer Trennzeichen-Erkennung."""
+    try:
+        if file.name.endswith(('.xlsx', '.xls')):
+            return pd.read_excel(file, dtype=str)
+        content = file.read().decode('utf-8-sig', errors='ignore')
+        file.seek(0)
+        sep = ';' if ';' in content.split('\n')[0] else ','
+        return pd.read_csv(file, sep=sep, dtype=str)
+    except Exception:
+        return pd.DataFrame()
+
 if uploaded_payouts:
-    payout_frames = []
-    for f in uploaded_payouts:
-        try:
-            try:
-                df_p = pd.read_csv(f, sep=';', dtype=str)
-                if len(df_p.columns) <= 1:
-                    f.seek(0)
-                    df_p = pd.read_csv(f, sep=',', dtype=str)
-            except Exception:
-                f.seek(0)
-                df_p = pd.read_csv(f, sep=None, engine='python', dtype=str)
-            payout_frames.append(df_p)
-        except Exception:
-            pass
+    payout_frames = [read_file_safely(f) for f in uploaded_payouts]
+    payout_frames = [df for df in payout_frames if not df.empty]
     if payout_frames:
         merged_p = pd.concat(payout_frames, ignore_index=True).drop_duplicates()
         merged_p.to_csv(PAYOUTS_DB_PATH, sep=';', index=False, encoding='utf-8-sig')
-        st.sidebar.success("Payouts gespeichert!")
+        st.sidebar.success("Payouts erfolgreich verarbeitet!")
 
 if uploaded_orders:
-    order_frames = []
-    for f in uploaded_orders:
-        try:
-            if f.name.endswith(('.xlsx', '.xls')):
-                df_o = pd.read_excel(f, dtype=str)
-            else:
-                try:
-                    df_o = pd.read_csv(f, sep=';', dtype=str)
-                    if len(df_o.columns) <= 1:
-                        f.seek(0)
-                        df_o = pd.read_csv(f, sep=',', dtype=str)
-                except Exception:
-                    f.seek(0)
-                    df_o = pd.read_csv(f, sep=None, engine='python', dtype=str)
-            order_frames.append(df_o)
-        except Exception:
-            pass
+    order_frames = [read_file_safely(f) for f in uploaded_orders]
+    order_frames = [df for df in order_frames if not df.empty]
     if order_frames:
         merged_o = pd.concat(order_frames, ignore_index=True).drop_duplicates()
         merged_o.to_csv(ORDERS_DB_PATH, sep=';', index=False, encoding='utf-8-sig')
-        st.sidebar.success("Bestellberichte gespeichert!")
+        st.sidebar.success("Bestellberichte erfolgreich verarbeitet!")
 
 st.sidebar.markdown("---")
 if st.sidebar.button("🗑️ Datenbank komplett leeren"):
