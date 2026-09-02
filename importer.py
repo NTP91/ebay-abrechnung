@@ -1,12 +1,12 @@
 import os
-import glob
 import io
+import glob
 import pandas as pd
 
 def parse_ebay_payout_csv(filepath):
     """
-    Liest eine eBay-Payout-CSV-Datei ein, erkennt die Header-Zeile 
-    und filtert Datenzeilen heraus.
+    Sucht nach der Header-Zeile in der eBay-Payout-CSV,
+    ignoriert den Vorspann und gibt ein sauberes DataFrame zurück.
     """
     with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
         lines = f.readlines()
@@ -18,7 +18,7 @@ def parse_ebay_payout_csv(filepath):
             break
             
     if header_idx is None:
-        raise ValueError(f"Keinen gültigen Auszahlungs-Header in '{filepath}' gefunden.")
+        return pd.DataFrame()
     
     valid_lines = [lines[header_idx]]
     for l in lines[header_idx+1:]:
@@ -33,10 +33,11 @@ def parse_ebay_payout_csv(filepath):
 
 def import_payout_files(input_directory="uploads", output_master_csv="Master_Payouts.csv"):
     """
-    Importiert alle Payout-CSV-Dateien aus input_directory, schützt vor Dubletten
-    und speichert die konsolidierten Daten in output_master_csv.
+    Liest Payout-CSVs ein, prüft anhand von 'Auszahlung Nr.' auf Dubletten
+    und speichert neue Einträge in die Master_Payouts.csv.
     """
     imported_payout_ids = set()
+    existing_master_df = pd.DataFrame()
     
     if os.path.exists(output_master_csv):
         try:
@@ -45,32 +46,31 @@ def import_payout_files(input_directory="uploads", output_master_csv="Master_Pay
                 imported_payout_ids = set(existing_master_df['Auszahlung Nr.'].dropna().unique())
         except Exception:
             existing_master_df = pd.DataFrame()
-    else:
-        existing_master_df = pd.DataFrame()
 
     csv_files = glob.glob(os.path.join(input_directory, "*.csv"))
     csv_files = [f for f in csv_files if os.path.basename(f) != os.path.basename(output_master_csv)]
 
     if not csv_files:
-        return
+        return existing_master_df, []
 
     new_dfs = []
+    logs = []
     
     for filepath in sorted(csv_files):
         filename = os.path.basename(filepath)
-        try:
-            df = parse_ebay_payout_csv(filepath)
-            if df.empty or 'Auszahlung Nr.' not in df.columns:
-                continue
+        df = parse_ebay_payout_csv(filepath)
+        
+        if df.empty or 'Auszahlung Nr.' not in df.columns:
+            continue
             
-            payout_id = df['Auszahlung Nr.'].iloc[0]
-            
-            if payout_id not in imported_payout_ids:
-                imported_payout_ids.add(payout_id)
-                new_dfs.append(df)
-                
-        except Exception:
-            pass
+        payout_id = df['Auszahlung Nr.'].iloc[0]
+        
+        if payout_id in imported_payout_ids:
+            logs.append(f"⚠️ {filename}: Wurde früher schon importiert ({payout_id}). Übersprungen.")
+        else:
+            imported_payout_ids.add(payout_id)
+            new_dfs.append(df)
+            logs.append(f"✅ {filename}: Erfogreich importiert ({payout_id}).")
 
     if new_dfs:
         all_new_data = pd.concat(new_dfs, ignore_index=True)
@@ -80,3 +80,6 @@ def import_payout_files(input_directory="uploads", output_master_csv="Master_Pay
             final_master_df = all_new_data
             
         final_master_df.to_csv(output_master_csv, sep=';', index=False, encoding='utf-8-sig')
+        return final_master_df, logs
+        
+    return existing_master_df, logs
