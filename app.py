@@ -130,67 +130,11 @@ if uploaded_payout:
                 m5.metric("🔒 Deine Marge (3,0 % Gruppe B)", f"{df_payout['Deine_Marge_EUR'].sum():,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
 
         # ---------------------------------------------------------
-        # BLOCK 1: GESAMTABRECHNUNG FÜR EVELYN (NUR GRUPPE B)
+        # BLOCK 1: GRUPPE A – DIREKTABRECHNUNG MIT EVELYN
         # ---------------------------------------------------------
         st.markdown("---")
-        st.subheader("📊 1. Gruppe B – Gesamtabrechnung für Evelyn")
-        st.info("ℹ️ **Verwendungszweck:** Abrechnung gegenüber Evelyn (0,5 % Provision). Enthält keine internen Margen.")
-
-        df_grp_b = df_payout[df_payout['Gruppe'] == 'Gruppe B (Über Dich)'].copy()
-
-        if not df_grp_b.empty:
-            summary_b = df_grp_b.groupby('SKU_Prefix').agg(
-                Anzahl_Transaktionen=('SKU', 'count'),
-                eBay_Brutto_Gesamt=('eBay_Brutto', 'sum'),
-                Evelyn_Provision=('Evelyn_Prov_EUR', 'sum'),
-                Auszahlungsbetrag=('Auszahlung_Evelyn_Brutto', 'sum')
-            ).reset_index()
-            
-            total_row_b = pd.DataFrame([{
-                'SKU_Prefix': 'GESAMTSUMME',
-                'Anzahl_Transaktionen': summary_b['Anzahl_Transaktionen'].sum(),
-                'eBay_Brutto_Gesamt': summary_b['eBay_Brutto_Gesamt'].sum(),
-                'Evelyn_Provision': summary_b['Evelyn_Provision'].sum(),
-                'Auszahlungsbetrag': summary_b['Auszahlungsbetrag'].sum()
-            }])
-            
-            summary_b_final = pd.concat([summary_b, total_row_b], ignore_index=True)
-            
-            # Schöne, neutrale Header für UI
-            summary_b_display = summary_b_final.rename(columns={
-                'SKU_Prefix': 'Partner / Kürzel',
-                'Anzahl_Transaktionen': 'Anzahl Transaktionen',
-                'eBay_Brutto_Gesamt': 'Erlös Brutto (€)',
-                'Evelyn_Provision': 'Provision 0,5 % (€)',
-                'Auszahlungsbetrag': 'Auszahlungsbetrag (€)'
-            })
-            
-            st.dataframe(
-                summary_b_display.style.format({
-                    'Erlös Brutto (€)': '{:.2f} €',
-                    'Provision 0,5 % (€)': '{:.2f} €',
-                    'Auszahlungsbetrag (€)': '{:.2f} €'
-                }),
-                use_container_width=True
-            )
-
-            buffer_evelyn_b = io.BytesIO()
-            with pd.ExcelWriter(buffer_evelyn_b, engine='openpyxl') as writer:
-                summary_b_display.to_excel(writer, index=False, sheet_name='Übersicht_Gruppe_B')
-                
-            st.download_button(
-                label="📥 Gesamtabrechnung Gruppe B für Evelyn herunterladen (Excel)",
-                data=buffer_evelyn_b.getvalue(),
-                file_name="Gesamtabrechnung_GruppeB_fuer_Evelyn.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary"
-            )
-
-        # ---------------------------------------------------------
-        # BLOCK 2: GRUPPE A – DIREKTABRECHNUNG MIT EVELYN
-        # ---------------------------------------------------------
-        st.markdown("---")
-        st.subheader("🏷️ 2. Gruppe A – Direktabrechnungen für Evelyn (PP, BA, MK, 001)")
+        st.subheader("🏷️ 1. Gruppe A – Direktabrechnungen für Evelyn (PP, BA, MK, 001)")
+        st.info("ℹ️ **Verwendungszweck:** Diese Umsätze rechnen mit 0,5 % Provision direkt mit Evelyn ab.")
 
         df_grp_a = df_payout[df_payout['Gruppe'] == 'Gruppe A (Direkt)'].copy()
 
@@ -241,6 +185,62 @@ if uploaded_payout:
             )
         else:
             st.success("✅ Keine Positionen für Gruppe A in den hochgeladenen Payouts enthalten.")
+
+        # ---------------------------------------------------------
+        # BLOCK 2: GESAMTABRECHNUNG FÜR EVELYN (NUR GRUPPE B)
+        # ---------------------------------------------------------
+        st.markdown("---")
+        st.subheader("📊 2. Gruppe B – Gesamtabrechnung für Evelyn (Über DICH)")
+        st.info("ℹ️ **Verwendungszweck:** Abrechnung gegenüber Evelyn (0,5 % Provision). Enthält keine internen Margen.")
+
+        df_grp_b = df_payout[df_payout['Gruppe'] == 'Gruppe B (Über Dich)'].copy()
+
+        if not df_grp_b.empty:
+            summary_b = df_grp_b.groupby('SKU_Prefix').agg(
+                Anzahl_Transaktionen=('SKU', 'count'),
+                eBay_Brutto_Gesamt=('eBay_Brutto', 'sum'),
+                Evelyn_Provision=('Evelyn_Prov_EUR', 'sum'),
+                Auszahlungsbetrag=('Auszahlung_Evelyn_Brutto', 'sum')
+            ).reset_index()
+            
+            total_row_b = pd.DataFrame([{
+                'SKU_Prefix': 'GESAMTSUMME',
+                'Anzahl_Transaktionen': summary_b['Anzahl_Transaktionen'].sum(),
+                'eBay_Brutto_Gesamt': summary_b['eBay_Brutto_Gesamt'].sum(),
+                'Evelyn_Provision': summary_b['Evelyn_Provision'].sum(),
+                'Auszahlungsbetrag': summary_b['Auszahlungsbetrag'].sum()
+            }])
+            
+            summary_b_final = pd.concat([summary_b, total_row_b], ignore_index=True)
+            
+            summary_b_display = summary_b_final.rename(columns={
+                'SKU_Prefix': 'Partner / Kürzel',
+                'Anzahl_Transaktionen': 'Anzahl Transaktionen',
+                'eBay_Brutto_Gesamt': 'Erlös Brutto (€)',
+                'Evelyn_Provision': 'Provision 0,5 % (€)',
+                'Auszahlungsbetrag': 'Auszahlungsbetrag (€)'
+            })
+            
+            st.dataframe(
+                summary_b_display.style.format({
+                    'Erlös Brutto (€)': '{:.2f} €',
+                    'Provision 0,5 % (€)': '{:.2f} €',
+                    'Auszahlungsbetrag (€)': '{:.2f} €'
+                }),
+                use_container_width=True
+            )
+
+            buffer_evelyn_b = io.BytesIO()
+            with pd.ExcelWriter(buffer_evelyn_b, engine='openpyxl') as writer:
+                summary_b_display.to_excel(writer, index=False, sheet_name='Übersicht_Gruppe_B')
+                
+            st.download_button(
+                label="📥 Gesamtabrechnung Gruppe B für Evelyn herunterladen (Excel)",
+                data=buffer_evelyn_b.getvalue(),
+                file_name="Gesamtabrechnung_GruppeB_fuer_Evelyn.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary"
+            )
 
         # ---------------------------------------------------------
         # BLOCK 3: GUTSCHRIFTEN & ERSTATTUNGEN
