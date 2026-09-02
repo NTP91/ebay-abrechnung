@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import hashlib
+import io
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="eBay Payout & Lexoffice Manager", layout="wide")
@@ -58,6 +59,30 @@ def calculate_file_hash(uploaded_file):
     file_bytes = uploaded_file.getvalue()
     return hashlib.md5(file_bytes).hexdigest()
 
+def read_payout_csv_safely(uploaded_file):
+    """Liest eBay Payout CSVs extrem robust ein (fängt Anführungszeichen-Syntaxfehler ab)"""
+    content = uploaded_file.getvalue()
+    
+    # Versuche verschiedene Encodings und Trennzeichen
+    for encoding in ['utf-8', 'latin1', 'cp1252']:
+        for sep in [',', ';', '\t']:
+            try:
+                uploaded_file.seek(0)
+                df = pd.read_csv(
+                    io.BytesIO(content),
+                    sep=sep,
+                    encoding=encoding,
+                    on_bad_lines='skip',
+                    quotechar='"'
+                )
+                if len(df.columns) > 1:
+                    return df
+            except Exception:
+                continue
+    # Fallback mit Standard read_csv
+    uploaded_file.seek(0)
+    return pd.read_csv(uploaded_file, on_bad_lines='skip')
+
 def normalize_dataframe(df):
     """Sucht automatisch die Kopfzeile mit 'Bestellnummer'"""
     if not any('Bestellnummer' in str(col) for col in df.columns):
@@ -79,7 +104,7 @@ def save_single_order_file(uploaded_file):
                 df = pd.read_csv(uploaded_file, sep=';', header=1)
             except:
                 uploaded_file.seek(0)
-                df = pd.read_csv(uploaded_file, sep=None, engine='python')
+                df = pd.read_csv(uploaded_file, sep=None, engine='python', on_bad_lines='skip')
 
         df = normalize_dataframe(df)
 
@@ -132,7 +157,7 @@ def process_payout_files(uploaded_files):
             
         file.seek(0)
         try:
-            df = pd.read_csv(file, sep=None, engine='python')
+            df = read_payout_csv_safely(file)
         except Exception as e:
             messages.append(f"❌ **{file.name}**: Fehler beim Einlesen ({str(e)})")
             continue
@@ -180,6 +205,8 @@ def process_payout_files(uploaded_files):
             cursor.execute("INSERT INTO processed_files (filename, file_hash) VALUES (?, ?)", (file.name, file_hash))
             conn.commit()
             messages.append(f"✅ **{file.name}**: {added_tx} neue Zeilen importiert ({skipped_tx} Duplikate geblockt).")
+        else:
+            messages.append(f"⚠️ **{file.name}**: Keinen verknüpfbaren Inhalt/Spalten gefunden.")
 
     conn.close()
     return messages
@@ -191,7 +218,6 @@ with st.sidebar:
     st.subheader("📌 Bestellberichte importieren")
     st.caption("Wähle hier beide Dateien (CSV & XLSX) gleichzeitig aus:")
     
-    # JETZT MIT accept_multiple_files=True!
     order_files = st.file_uploader("Bestellberichte (CSV & XLSX)", type=["csv", "xlsx"], accept_multiple_files=True, key="orders_up")
     
     if order_files:
