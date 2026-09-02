@@ -14,20 +14,18 @@ def parse_single_file(uploaded_file):
         content = uploaded_file.read().decode('utf-8', errors='ignore')
         lines = content.splitlines()
         
+        # Zeile suchen, in der die Spaltenüberschriften stehen
         header_idx = 0
         for idx, line in enumerate(lines):
             line_low = line.lower()
-            if any(k in line_low for k in ['custom label', 'sku', 'net amount', 'artikelnummer']):
+            if any(k in line_low for k in ['bestandseinheit', 'betrag abzügl. kosten', 'custom label', 'net amount']):
                 header_idx = idx
                 break
                 
         file_buffer = io.StringIO(content)
-        try:
-            df = pd.read_csv(file_buffer, skiprows=header_idx, sep=";", on_bad_lines="skip")
-            if len(df.columns) <= 1:
-                file_buffer.seek(0)
-                df = pd.read_csv(file_buffer, skiprows=header_idx, sep=",", on_bad_lines="skip")
-        except Exception:
+        df = pd.read_csv(file_buffer, skiprows=header_idx, sep=";", on_bad_lines="skip")
+        
+        if len(df.columns) <= 2:
             file_buffer.seek(0)
             df = pd.read_csv(file_buffer, skiprows=header_idx, sep=",", on_bad_lines="skip")
             
@@ -44,16 +42,16 @@ def process_uploaded_files(uploaded_files):
         parsed = parse_single_file(f)
         if parsed is not None and not parsed.empty:
             # Spaltenüberschriften säubern
-            parsed.columns = [str(c).strip().lower() for c in parsed.columns]
+            parsed.columns = [str(c).strip().replace('"', '').lower() for c in parsed.columns]
             
-            # Schlüsselspalten ermitteln & umbenennen
+            # Schlüsselspalten auf Standardnamen mappen
             col_map = {}
             for col in parsed.columns:
-                if any(k in col for k in ['custom label', 'sku', 'customlabel', 'artikelnummer']):
+                if col in ['bestandseinheit', 'custom label', 'sku', 'artikelnummer']:
                     col_map[col] = 'Custom Label'
-                elif any(k in col for k in ['net amount', 'netto_betrag', 'netto', 'amount', 'betrag', 'auszahlung']):
+                elif col in ['betrag abzügl. kosten', 'net amount', 'netto', 'auszahlung']:
                     col_map[col] = 'Net amount'
-                elif any(k in col for k in ['transaction id', 'transaktions-id', 'order number', 'bestellnummer']):
+                elif col in ['bestellnummer', 'transaction id', 'transaktionsnummer']:
                     col_map[col] = 'Transaction ID'
             
             parsed = parsed.rename(columns=col_map)
@@ -62,25 +60,25 @@ def process_uploaded_files(uploaded_files):
                 dfs.append(parsed)
 
     if not dfs:
-        return None, "SKU- oder Netto-Spalte wurde in den hochgeladenen Dateien nicht sicher erkannt."
+        return None, "SKU- oder Netto-Spalte wurde nicht erkannt."
         
     df_raw = pd.concat(dfs, ignore_index=True)
 
-    # Duplikate filtern
+    # Duplikate filtern (falls eine Auszahlung mehrfach hochgeladen wurde)
     if 'Transaction ID' in df_raw.columns:
         df = df_raw.drop_duplicates(subset=['Transaction ID', 'Custom Label']).copy()
     else:
         df = df_raw.drop_duplicates().copy()
 
-    # Beträge säubern
+    # Beträge säubern (Komma zu Punkt, Währungssymbole entfernen)
     df['Net amount'] = df['Net amount'].astype(str).str.replace('€', '').str.replace(' ', '').str.replace(',', '.')
     df['Net amount'] = pd.to_numeric(df['Net amount'], errors='coerce').fillna(0)
 
-    # Gruppierung
+    # Gruppierung anhand der SKU
     gruppe_a = ['PP', 'BA', 'MK', '001']
     def assign_group(val):
         sku = str(val).strip().upper()
-        if not sku or sku == 'NAN':
+        if not sku or sku in ['NAN', 'NONE', '']:
             return 'Ohne Zuordnung'
         for p in gruppe_a:
             if sku.startswith(p):
