@@ -6,13 +6,16 @@ import requests
 import json
 import datetime
 
-st.set_page_config(page_title="eBay Payout & Lexoffice Automatisierung", layout="wide")
+st.set_page_config(page_title="eBay Payout & Lexoffice Direct-Upload", layout="wide")
 
 st.title("⚡ eBay Payout & Lexoffice Direct-Upload")
 
 # Lexoffice API Konfiguration
 lexoffice_api_key = "Wciy230Sw_pNI7.yFDyNsWuvvXIB2sxJ2MKLk2jfMowyWJKU"
-TARGET_CUSTOMER_NUMBER = "16335"
+
+# Sidebar Einstellungen
+st.sidebar.header("Einstellungen")
+target_customer_num = st.sidebar.text_input("Ziel-Kundennummer in Lexoffice:", value="16335")
 
 # Uploads
 col1, col2 = st.columns(2)
@@ -49,17 +52,30 @@ def extract_partner_prefix(sku):
         return match.group(1)
     return raw_prefix
 
-# Präzise Kontaktsuche in Lexoffice
-def get_lexoffice_contact_id_exact(api_key, customer_number):
+# Sichere & strikte Kontaktsuche über Paginierung
+def get_lexoffice_contact_id_exact(api_key, target_customer_number):
     headers = {"Authorization": f"Bearer {api_key}"}
-    res = requests.get(f"https://api.lexoffice.io/v1/contacts?customerNumber={customer_number}", headers=headers)
-    if res.status_code == 200:
-        data = res.json()
-        if data.get('content'):
-            for contact in data['content']:
-                if str(contact.get('roles', {}).get('customer', {}).get('number')) == str(customer_number):
+    page = 0
+    target_str = str(target_customer_number).strip()
+    
+    while page < 10:
+        res = requests.get(f"https://api.lexoffice.io/v1/contacts?page={page}&size=250", headers=headers)
+        if res.status_code == 200:
+            data = res.json()
+            content = data.get('content', [])
+            if not content:
+                break
+                
+            for contact in content:
+                cust_num = str(contact.get('roles', {}).get('customer', {}).get('number', '')).strip()
+                supp_num = str(contact.get('roles', {}).get('vendor', {}).get('number', '')).strip()
+                
+                # Exakte Prüfung der Kundennummer
+                if cust_num == target_str or supp_num == target_str:
                     return contact['id']
-            return data['content'][0]['id']
+            page += 1
+        else:
+            break
     return None
 
 def create_lexoffice_invoice(api_key, contact_id, line_items, remark):
@@ -120,7 +136,7 @@ if uploaded_payout:
         
         df_payout['eBay_Brutto'] = df_payout['Betrag abzügl. Kosten'].apply(parse_german_float)
         
-        # 1. Gutschriften / Rückerstattungen herausfiltern
+        # Nur positive Verkäufe berücksichtigen (Gutschriften ausschließen)
         df_payout = df_payout[df_payout['eBay_Brutto'] > 0].copy()
         
         df_payout['eBay_Netto'] = (df_payout['eBay_Brutto'] / 1.19).round(2)
@@ -136,30 +152,28 @@ if uploaded_payout:
 
         if not df_grp_b.empty:
             st.markdown("---")
-            st.subheader("📊 Vorschau der Einzelpositionen (nur Verkäufe)")
-            st.dataframe(df_grp_b[['Datum der Transaktionserstellung', 'Bestellnummer', 'SKU', 'eBay_Netto']], use_container_width=True)
+            st.subheader("📊 Vorschau der Einzelpositionen (nur Gruppe B)")
+            st.dataframe(df_grp_b[['Bestellnummer', 'SKU', 'eBay_Netto']], use_container_width=True)
 
             st.markdown("---")
             if st.button("🚀 JETZT AUTOMATISCH IN LEXOFFICE ANLEGEN", type="primary"):
-                with st.spinner(f"Suche exakte Kundennummer {TARGET_CUSTOMER_NUMBER} in Lexoffice..."):
-                    contact_id = get_lexoffice_contact_id_exact(lexoffice_api_key, TARGET_CUSTOMER_NUMBER)
+                with st.spinner(f"Suche exakt Kundennummer {target_customer_num} in Lexoffice..."):
+                    contact_id = get_lexoffice_contact_id_exact(lexoffice_api_key, target_customer_num)
                 
                 if not contact_id:
-                    st.error(f"Kunde mit Kundennummer '{TARGET_CUSTOMER_NUMBER}' wurde nicht in Lexoffice gefunden!")
+                    st.error(f"❌ Kunde mit Kundennummer '{target_customer_num}' wurde in Lexoffice nicht gefunden! Vorgang abgebrochen.")
                 else:
                     line_items = []
                     for _, r in df_grp_b.iterrows():
-                        # Artikelbezeichnung ohne "Artikel"-Präfix
-                        title_str = str(r.get('Artikelbezeichnung', r['SKU']))
-                        if pd.isna(title_str) or title_str.strip() == '' or title_str == 'nan':
+                        # Artikelbezeichnung / Hauptzeile
+                        title_str = str(r.get('Artikelbezeichnung', '')).strip()
+                        if not title_str or title_str == 'nan':
                             title_str = r['SKU']
 
-                        order_date = str(r.get('Datum der Transaktionserstellung', 'n/a'))
-                        
-                        # Beschreibungstext unter dem Artikel
+                        # Beschreibungstext unter der Artikelzeile (Nur eBay Bestellnummer + SKU)
                         description_str = (
                             f"eBay Bestellnummer: {r['Bestellnummer']}\n"
-                            f"SKU: {r['SKU']} | Transaktionsdatum: {order_date}"
+                            f"SKU: {r['SKU']}"
                         )
                         
                         line_items.append({
@@ -183,7 +197,7 @@ if uploaded_payout:
                     
                     if inv_id:
                         st.balloons()
-                        st.success(f"🎉 Erfolgreich angelegt unter Kundennummer {TARGET_CUSTOMER_NUMBER}! (ID: {inv_id})")
+                        st.success(f"🎉 Erfolgreich angelegt für Kundennummer {target_customer_num}! (Entwurfs-ID: {inv_id})")
 
     except Exception as e:
-        st.error(f"Fehler: {e}")
+        st.error(f"Fehler bei der Verarbeitung: {e}")
