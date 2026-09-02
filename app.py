@@ -161,45 +161,26 @@ if uploaded_payout:
         df_payout['SKU'] = df_payout['Bestandseinheit'].fillna('OHNE_SKU').astype(str).str.strip()
         df_payout['SKU_Prefix'] = df_payout['SKU'].apply(extract_partner_prefix)
 
-        # Robuste Identifizierung des Artikelnamens
-        possible_title_cols = [
-            'Angebotsbezeichnung', 'Artikelbezeichnung', 'Angebotsüberschrift', 
-            'Artikeltitel', 'Artikelname', 'Bezeichnung', 'Title'
+        # Gezielte Suche nach Text-Titel (Artikelnummer/ID ausschließen)
+        text_title_cols = [
+            'Angebotsüberschrift', 'Angebotsbezeichnung', 'Artikelbezeichnung', 
+            'Artikeltitel', 'Titel', 'Title', 'Bezeichnung'
         ]
         
         found_title_col = None
         for col in df_payout.columns:
-            if col.strip() in possible_title_cols:
+            cleaned_col = col.strip()
+            if cleaned_col in text_title_cols and 'nummer' not in cleaned_col.lower() and 'id' not in cleaned_col.lower():
                 found_title_col = col
                 break
-        
-        # Fallback falls Groß-/Kleinschreibung abweicht
-        if not found_title_col:
-            for col in df_payout.columns:
-                if any(p.lower() in col.lower() for p in ['angebot', 'titel', 'bezeichnung', 'artikel']):
-                    found_title_col = col
-                    break
 
         if found_title_col:
             df_payout['Artikelname'] = df_payout[found_title_col].fillna('-').astype(str)
         else:
             df_payout['Artikelname'] = '-'
 
-        # Robuste Identifizierung der Menge/Stückzahl
-        possible_qty_cols = ['Stückzahl', 'Menge', 'Anzahl', 'Quantity']
-        found_qty_col = None
-        for col in df_payout.columns:
-            if col.strip() in possible_qty_cols:
-                found_qty_col = col
-                break
-
-        if found_qty_col:
-            df_payout['Stück'] = df_payout[found_qty_col].fillna(1)
-        else:
-            df_payout['Stück'] = 1
-
-        # Falls eine Referenz-/Soll-Rechnung hochgeladen wurde, Artikelbezeichnungen daraus abgleichen
-        if uploaded_invoice and (df_payout['Artikelname'] == '-').all():
+        # Falls der Name in der CSV nur eine reine Zahlen-ID ist oder fehlt, aus der Soll-Rechnung matchen
+        if uploaded_invoice:
             try:
                 if uploaded_invoice.name.endswith('.xlsx') or uploaded_invoice.name.endswith('.xls'):
                     df_ref = pd.read_excel(uploaded_invoice)
@@ -207,14 +188,27 @@ if uploaded_payout:
                     df_ref = pd.read_csv(uploaded_invoice, sep=None, engine='python')
                 
                 ref_order_col = next((c for c in df_ref.columns if 'bestell' in c.lower()), None)
-                ref_title_col = next((c for c in df_ref.columns if any(x in c.lower() for x in ['artikel', 'titel', 'bezeichnung'])), None)
+                ref_title_col = next((c for c in df_ref.columns if any(x in c.lower() for x in ['artikel', 'titel', 'bezeichnung', 'name']) and 'nummer' not in c.lower() and 'id' not in c.lower()), None)
                 
                 if ref_order_col and ref_title_col:
                     df_ref['Match_Key'] = df_ref[ref_order_col].apply(clean_order_number)
                     ref_map = df_ref.set_index('Match_Key')[ref_title_col].to_dict()
-                    df_payout['Artikelname'] = df_payout['Bestellnummer_Match'].map(ref_map).fillna('-')
+                    
+                    # Falls Artikelname noch leer oder eine reine ID (Zahlenfolge) ist, überschreiben
+                    def resolve_title(row):
+                        curr = str(row['Artikelname']).strip()
+                        if curr == '-' or curr.isdigit():
+                            return str(ref_map.get(row['Bestellnummer_Match'], curr)).strip()
+                        return curr
+                        
+                    df_payout['Artikelname'] = df_payout.apply(resolve_title, axis=1)
             except Exception:
                 pass
+
+        # Menge/Stückzahl ermitteln
+        possible_qty_cols = ['Stückzahl', 'Menge', 'Anzahl', 'Quantity']
+        found_qty_col = next((c for c in df_payout.columns if c.strip() in possible_qty_cols), None)
+        df_payout['Stück'] = df_payout[found_qty_col].fillna(1) if found_qty_col else 1
 
         df_payout['Gruppe'] = df_payout['SKU_Prefix'].apply(
             lambda p: 'Gruppe A (Direkt)' if p in GROUP_A_PREFIXES else ('Ohne Zuordnung' if p == 'OHNE_SKU' else 'Gruppe B (Über Dich)')
