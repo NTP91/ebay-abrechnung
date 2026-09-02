@@ -13,7 +13,6 @@ st.set_page_config(
 # Custom Styling
 st.markdown("""
 <style>
-    /* Roter Button */
     div.stButton > button[kind="primary"] {
         background-color: #FF4B4B !important;
         color: white !important;
@@ -28,7 +27,6 @@ st.markdown("""
         color: #1E293B !important;
     }
 
-    /* Grüne Box für Verkäufe */
     .box-sales {
         background-color: #F0FDF4;
         border-left: 4px solid #22C55E;
@@ -40,7 +38,6 @@ st.markdown("""
         margin-bottom: 8px;
     }
 
-    /* Rote Box für Retouren / Gutschriften */
     .box-refunds {
         background-color: #FEF2F2;
         border-left: 4px solid #EF4444;
@@ -288,7 +285,7 @@ if ebay_files:
         # BLOCK 2: GRUPPE A – DIREKTABRECHNUNGEN FÜR EVELYN
         # =========================================================
         st.header("🏷️ 2. Gruppe A – Direktabrechnungen für Evelyn (PP, BA, MK, 001)")
-        st.info("💡 **Verwendungszweck:** Diese Partner rechnen mit 0,5 % Provision direkt mit Evelyn ab (laufen nicht über deine Marge).")
+        st.info("💡 **Verwendungszweck:** Diese Partner rechnen mit 0,5 % Provision direkt mit Evelyn ab.")
         
         df_a = df[df['Gruppe'] == 'Gruppe A']
         
@@ -311,21 +308,33 @@ if ebay_files:
             
             display_a = pd.concat([summary_a, total_a], ignore_index=True)
             
-            formatted_a = display_a.copy()
+            # --- NEU: Partner-Auswahl für Einzelexport ---
+            partner_list = ["Alle Partner (Gesamt)"] + sorted(summary_a['SKU_Prefix'].unique().tolist())
+            selected_partner = st.selectbox("🎯 Partner auswählen für spezifische Evelyn-Abrechnung:", partner_list, key="sel_partner_a")
+            
+            if selected_partner != "Alle Partner (Gesamt)":
+                export_df_a = display_a[display_a['SKU_Prefix'] == selected_partner].copy()
+                file_label = f"Abrechnung_Evelyn_Partner_{selected_partner}.xlsx"
+            else:
+                export_df_a = display_a.copy()
+                file_label = "Uebersicht_Gruppe_A_Evelyn_Gesamt.xlsx"
+
+            formatted_a = export_df_a.copy()
             for col in ['eBay_Brutto_Gesamt', 'Evelyn_Provision_0_5', 'Direkt_Auszahlung_Evelyn']:
                 formatted_a[col] = formatted_a[col].apply(lambda x: f"{x:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
             
-            st.dataframe(formatted_a, use_container_width=True, hide_index=False)
+            st.dataframe(formatted_a, use_container_width=True, hide_index=True)
             
             buffer_a = io.BytesIO()
             with pd.ExcelWriter(buffer_a, engine='openpyxl') as writer:
-                display_a.to_excel(writer, index=False, sheet_name='Gruppe_A')
+                export_df_a.to_excel(writer, index=False, sheet_name='Gruppe_A')
             
             st.download_button(
-                label="📥 Übersicht Gruppe A für Evelyn herunterladen (Excel)",
+                label=f"📥 Excel-Abrechnung für Evelyn herunterladen ({selected_partner})",
                 data=buffer_a.getvalue(),
-                file_name="Uebersicht_Gruppe_A_Evelyn.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                file_name=file_label,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="dl_btn_a"
             )
         else:
             st.write("Keine Datensätze für Gruppe A vorhanden.")
@@ -342,7 +351,7 @@ if ebay_files:
             available_skus = sorted(df_b['SKU_Prefix'].unique())
             sku_options = ["Alle SKUs"] + available_skus
             
-            selected_sku = st.selectbox("🎯 Welches SKU möchtest du einsehen / herunterladen?", sku_options)
+            selected_sku = st.selectbox("🎯 Welches SKU möchtest du einsehen / herunterladen?", sku_options, key="sel_sku_b")
             
             show_cols = [c for c in df.columns if c not in ['Gruppe', 'SKU_Prefix']]
             
