@@ -15,7 +15,7 @@ st.title("⚡ eBay Payout & Lexoffice Direct-Upload")
 
 # Sidebar für Zugangsdaten
 st.sidebar.header("🔑 Lexoffice API Konfiguration")
-lexoffice_api_key = Wciy230Sw_pNI7.yFDyNsWuvvXIB2sxJ2MKLk2jfMowyWJKU", type="password")
+lexoffice_api_key = "Wciy230Sw_pNI7.yFDyNsWuvvXIB2sxJ2MKLk2jfMowyWJKU", type="password")
 customer_name_search = st.sidebar.text_input("2. Exakter Kundenname in Lexoffice:", value="Evelyn")
 
 # Uploads
