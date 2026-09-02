@@ -33,7 +33,7 @@ def clean_order_number(val):
 
 def extract_partner_prefix(sku):
     """Extrahiert das Kürzel und fasst z.B. MH43, MH44 -> MH zusammen"""
-    if pd.isna(sku):
+    if pd.isna(sku) or str(sku).strip() in ['--', '']:
         return 'OHNE_SKU'
     sku_clean = str(sku).strip().upper()
     raw_prefix = sku_clean.split('/')[0].strip()
@@ -79,7 +79,9 @@ if uploaded_payout:
         df_payout['SKU_Prefix'] = df_payout['SKU'].apply(extract_partner_prefix)
         
         # Zuordnung Gruppe A vs. Gruppe B
-        df_payout['Gruppe'] = df_payout['SKU_Prefix'].apply(lambda p: 'Gruppe A (Direkt)' if p in GROUP_A_PREFIXES else 'Gruppe B (Über Dich)')
+        df_payout['Gruppe'] = df_payout['SKU_Prefix'].apply(
+            lambda p: 'Gruppe A (Direkt)' if p in GROUP_A_PREFIXES else ('Ohne Zuordnung' if p == 'OHNE_SKU' else 'Gruppe B (Über Dich)')
+        )
         
         # Provisionssätze berechnen:
         # Evelyn bekommt immer 0,5%
@@ -93,7 +95,9 @@ if uploaded_payout:
         df_payout['Auszahlung_Partner_Brutto'] = (df_payout['eBay_Brutto'] - df_payout['Partner_Prov_EUR']).round(2)
         
         # Deine Marge (Nur bei Gruppe B: 3.0%)
-        df_payout['Deine_Marge_EUR'] = df_payout.apply(lambda r: (r['Partner_Prov_EUR'] - r['Evelyn_Prov_EUR']) if r['Gruppe'] == 'Gruppe B (Über Dich)' else 0.0, axis=1).round(2)
+        df_payout['Deine_Marge_EUR'] = df_payout.apply(
+            lambda r: (r['Partner_Prov_EUR'] - r['Evelyn_Prov_EUR']) if r['Gruppe'] == 'Gruppe B (Über Dich)' else 0.0, axis=1
+        ).round(2)
 
         # ---------------------------------------------------------
         # SOLL-IST STATUS OVERVIEW
@@ -186,7 +190,6 @@ if uploaded_payout:
                 use_container_width=True
             )
 
-            # Excel-Export für Evelyn
             export_evelyn_b_details = df_grp_b[[
                 'Datum der Transaktionserstellung',
                 'Bestellnummer',
@@ -219,13 +222,63 @@ if uploaded_payout:
             st.write("Keine Positionen für Gruppe B in den aktuellen Payouts gefunden.")
 
         # ---------------------------------------------------------
-        # BLOCK 2: GUTSCHRIFTEN & ERSTATTUNGEN (OPTION B)
+        # BLOCK 2: GRUPPE A – DIREKTABRECHNUNG MIT EVELYN
         # ---------------------------------------------------------
         st.markdown("---")
-        st.subheader("🔻 2. Gutschriften & Erstattungen (Für Lexoffice-Gutschriften)")
-        st.info("ℹ️ **Verwendungszweck:** Hier sind alle negativen Beträge (z. B. Retouren oder Versandgutschriften wie bei 001) aufgeführt. Nutze diese Übersicht, um in Lexoffice saubere Einzel-Gutschriften zu erstellen.")
+        st.subheader("🏷️ 2. Gruppe A – Direktabrechnungen für Evelyn (PP, BA, MK, 001)")
+        st.info("ℹ️ **Verwendungszweck:** Diese Partner rechnen mit 0,5 % Provision direkt mit Evelyn ab (laufen nicht über deine Marge).")
 
-        df_refunds = df_payout[df_payout['eBay_Brutto'] < 0].copy()
+        df_grp_a = df_payout[df_payout['Gruppe'] == 'Gruppe A (Direkt)'].copy()
+
+        if not df_grp_a.empty:
+            summary_a = df_grp_a.groupby('SKU_Prefix').agg(
+                Anzahl_Transaktionen=('SKU', 'count'),
+                eBay_Brutto_Gesamt=('eBay_Brutto', 'sum'),
+                Evelyn_Provision_0_5=('Evelyn_Prov_EUR', 'sum'),
+                Direkt_Auszahlung_Evelyn=('Auszahlung_Evelyn_Brutto', 'sum')
+            ).reset_index()
+
+            total_row_a = pd.DataFrame([{
+                'SKU_Prefix': 'GESAMTSUMME (Gruppe A)',
+                'Anzahl_Transaktionen': summary_a['Anzahl_Transaktionen'].sum(),
+                'eBay_Brutto_Gesamt': summary_a['eBay_Brutto_Gesamt'].sum(),
+                'Evelyn_Provision_0_5': summary_a['Evelyn_Provision_0_5'].sum(),
+                'Direkt_Auszahlung_Evelyn': summary_a['Direkt_Auszahlung_Evelyn'].sum()
+            }])
+
+            summary_a_final = pd.concat([summary_a, total_row_a], ignore_index=True)
+
+            st.dataframe(
+                summary_a_final.style.format({
+                    'eBay_Brutto_Gesamt': '{:.2f} €',
+                    'Evelyn_Provision_0_5': '{:.2f} €',
+                    'Direkt_Auszahlung_Evelyn': '{:.2f} €'
+                }),
+                use_container_width=True
+            )
+
+            buffer_evelyn_a = io.BytesIO()
+            with pd.ExcelWriter(buffer_evelyn_a, engine='openpyxl') as writer:
+                summary_a_final.to_excel(writer, index=False, sheet_name='Übersicht_Gruppe_A')
+                df_grp_a.to_excel(writer, index=False, sheet_name='Alle_Positionen_Gruppe_A')
+
+            st.download_button(
+                label="📥 Übersicht Gruppe A für Evelyn herunterladen (Excel)",
+                data=buffer_evelyn_a.getvalue(),
+                file_name="Direktabrechnungen_GruppeA_fuer_Evelyn.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        else:
+            st.success("✅ Keine Positionen für Gruppe A (PP, BA, MK, 001) in den hochgeladenen Payouts enthalten.")
+
+        # ---------------------------------------------------------
+        # BLOCK 3: GUTSCHRIFTEN & ERSTATTUNGEN (OPTION B + GEBÜHREN)
+        # ---------------------------------------------------------
+        st.markdown("---")
+        st.subheader("🔻 3. Gutschriften, Erstattungen & Gebühren (Für Lexoffice)")
+        st.info("ℹ️ **Verwendungszweck:** Alle negativen Beträge (Retouren/Gutschriften) sowie reine Gebühren ohne SKU. Nutze diese Übersicht für Lexoffice-Gutschriften.")
+
+        df_refunds = df_payout[(df_payout['eBay_Brutto'] < 0) | (df_payout['SKU_Prefix'] == 'OHNE_SKU')].copy()
 
         if not df_refunds.empty:
             refund_display = df_refunds[[
@@ -244,24 +297,37 @@ if uploaded_payout:
                 'Partner_Prov_EUR': 'Provision (€)',
                 'Auszahlung_Partner_Brutto': 'Gutschrift Netto/Auszahlung (€)'
             })
-            
+
+            sum_refunds = pd.DataFrame([{
+                'Datum': 'GESAMTSUMME',
+                'Bestellnummer': '',
+                'Partner': '',
+                'SKU': '',
+                'Angebotstitel': '',
+                'Gutschrift Brutto (€)': refund_display['Gutschrift Brutto (€)'].sum(),
+                'Provision (€)': refund_display['Provision (€)'].sum(),
+                'Gutschrift Netto/Auszahlung (€)': refund_display['Gutschrift Netto/Auszahlung (€)'].sum()
+            }])
+
+            refund_final = pd.concat([refund_display, sum_refunds], ignore_index=True)
+
             st.dataframe(
-                refund_display.style.format({
+                refund_final.style.format({
                     'Gutschrift Brutto (€)': '{:.2f} €',
                     'Provision (€)': '{:.2f} €',
                     'Gutschrift Netto/Auszahlung (€)': '{:.2f} €'
-                }),
+                }, na_rep=''),
                 use_container_width=True
             )
         else:
-            st.success("✅ Keine negativen Gutschriften / Erstattungen in den aktuellen Payouts enthalten.")
+            st.success("✅ Keine negativen Gutschriften oder ungeklärten Gebühren enthalten.")
 
         # ---------------------------------------------------------
-        # BLOCK 3: EINZELABRECHNUNGEN PRO PARTNER
+        # BLOCK 4: EINZELABRECHNUNGEN PRO PARTNER
         # ---------------------------------------------------------
         st.markdown("---")
-        st.subheader("🔍 3. Einzelabrechnung pro Partner")
-        st.info("ℹ️ **Hinweis:** Gruppe A Partner (PP, BA, MK, 001) rechnen mit 0,5 % direkt mit Evelyn ab. Gruppe B Partner rechnen mit 3,5 % gegenüber dir ab (deine 3,0 % Marge wird ihnen nicht angezeigt).")
+        st.subheader("🔍 4. Einzelabrechnung pro Partner")
+        st.info("ℹ️ **Hinweis:** Wähle hier einen Partner aus, um dessen spezifische Einzel-Abrechnung einzusehen und als Excel herunterzuladen.")
 
         all_partners = [p for p in df_payout['SKU_Prefix'].unique() if p not in ['OHNE_SKU', 'FEHLT', '--', '']]
         if not all_partners:
