@@ -165,16 +165,13 @@ if uploaded_payout:
                 else:
                     line_items = []
                     for _, r in df_grp_b.iterrows():
-                        # Artikelbezeichnung / Hauptzeile
+                        # Fett gedruckte Hauptzeile (SKU / Artikelbezeichnung)
                         title_str = str(r.get('Artikelbezeichnung', '')).strip()
                         if not title_str or title_str == 'nan':
                             title_str = r['SKU']
 
-                        # Beschreibungstext unter der Artikelzeile (Nur eBay Bestellnummer + SKU)
-                        description_str = (
-                            f"eBay Bestellnummer: {r['Bestellnummer']}\n"
-                            f"SKU: {r['SKU']}"
-                        )
+                        # Untertext darunter: NUR noch die eBay Bestellnummer (keine doppelte SKU)
+                        description_str = f"eBay Bestellnummer: {r['Bestellnummer']}"
                         
                         line_items.append({
                             "type": "custom",
