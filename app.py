@@ -68,21 +68,35 @@ if uploaded_payout:
             inv_orders = set(df_inv['Bestellnummer'].dropna().astype(str).str.strip())
             
             paid_count = len(inv_orders.intersection(payout_orders))
-            unpaid_count = len(inv_orders - payout_orders)
+            unpaid_orders = inv_orders - payout_orders
+            unpaid_count = len(unpaid_orders)
             
             st.markdown("---")
             st.subheader("⚖️ Soll-Ist Statusübersicht")
-            m1, m2, m3, m4 = st.columns(4)
+            m1, m2, m3, m4, m5 = st.columns(5)
             m1.metric("Rechnung Positionen", len(inv_orders))
             m2.metric("✅ Ausbezahlt", f"{paid_count} Pos.")
-            m3.metric("⏳ noch Offen", f"{unpaid_count} Pos.")
-            m4.metric("💰 Bereits Ausgezahlt", f"{df_payout['Auszahlung_Netto_eBay'].sum():,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
+            m3.metric("⏳ Noch Offen", f"{unpaid_count} Pos.")
+            m4.metric("💰 eBay Auszahlung Gesamt", f"{df_payout['Auszahlung_Netto_eBay'].sum():,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
+            m5.metric("🤝 Auszahlung an Partner", f"{df_payout['Auszahlung_Partner_EUR'].sum():,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
             
             if unpaid_count > 0:
+                missing_mask = df_inv['Bestellnummer'].astype(str).str.strip().isin(unpaid_orders)
+                df_missing = df_inv[missing_mask]
+                
                 with st.expander(f"🔴 Liste der {unpaid_count} noch nicht ausgezahlten Positionen anzeigen"):
-                    missing_mask = df_inv['Bestellnummer'].astype(str).str.strip().isin(inv_orders - payout_orders)
-                    df_missing = df_inv[missing_mask]
                     st.dataframe(df_missing, use_container_width=True)
+                    
+                    # Excel-Download für offene Posten
+                    buffer_missing = io.BytesIO()
+                    with pd.ExcelWriter(buffer_missing, engine='openpyxl') as writer:
+                        df_missing.to_excel(writer, index=False, sheet_name='Offene_Positionen')
+                    st.download_button(
+                        label="📥 Offene Positionen als Excel herunterladen",
+                        data=buffer_missing.getvalue(),
+                        file_name="eBay_Offene_Positionen.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
 
         st.markdown("---")
         st.subheader("📊 Gesamtübersicht nach SKU / Partner")
@@ -114,6 +128,20 @@ if uploaded_payout:
             use_container_width=True
         )
 
+        # DOWNLOAD BUTTON FÜR DIE ABRECHNUNG
+        buffer_summary = io.BytesIO()
+        with pd.ExcelWriter(buffer_summary, engine='openpyxl') as writer:
+            summary_with_total.to_excel(writer, index=False, sheet_name='Partner_Auszahlung')
+            df_payout.to_excel(writer, index=False, sheet_name='Einzeltraktionen_Auszahlung')
+            
+        st.download_button(
+            label="📥 Partner-Abrechnung als Excel herunterladen",
+            data=buffer_summary.getvalue(),
+            file_name="Partner_Auszahlung_Abrechnung.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+        st.markdown("---")
         # DETAILANSICHT
         st.subheader("🔍 Detailansicht pro Partner/SKU")
         selected_sku = st.selectbox("SKU / Partner auswählen", summary['SKU_Prefix'].unique())
