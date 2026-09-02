@@ -1,14 +1,132 @@
 import streamlit as st
 import pandas as pd
-from core import process_uploaded_files, create_lexoffice_draft
+import requests
+import io
 
 st.set_page_config(page_title="eBay Payment Tool", layout="wide")
 
-# --- HEADER ---
+# --- CORE LOGIC ---
+def parse_single_file(uploaded_file):
+    try:
+        if uploaded_file.name.endswith(('.xlsx', '.xls')):
+            return pd.read_excel(uploaded_file)
+        
+        content = uploaded_file.read().decode('utf-8', errors='ignore')
+        lines = content.splitlines()
+        
+        header_idx = 0
+        for idx, line in enumerate(lines):
+            line_low = line.lower()
+            if any(k in line_low for k in ['custom label', 'sku', 'net amount', 'artikelnummer']):
+                header_idx = idx
+                break
+                
+        file_buffer = io.StringIO(content)
+        try:
+            df = pd.read_csv(file_buffer, skiprows=header_idx, sep=";", on_bad_lines="skip")
+            if len(df.columns) <= 1:
+                file_buffer.seek(0)
+                df = pd.read_csv(file_buffer, skiprows=header_idx, sep=",", on_bad_lines="skip")
+        except Exception:
+            file_buffer.seek(0)
+            df = pd.read_csv(file_buffer, skiprows=header_idx, sep=",", on_bad_lines="skip")
+            
+        return df
+    except Exception:
+        return None
+
+def process_uploaded_files(uploaded_files):
+    if not uploaded_files:
+        return None, None
+        
+    dfs = []
+    for f in uploaded_files:
+        parsed = parse_single_file(f)
+        if parsed is not None and not parsed.empty:
+            dfs.append(parsed)
+            
+    if not dfs:
+        return None, "Dateien konnten nicht gelesen werden."
+        
+    df_raw = pd.concat(dfs, ignore_index=True)
+    df_raw.columns = [str(c).strip() for c in df_raw.columns]
+    
+    sku_col, netto_col, id_col = None, None, None
+    for col in df_raw.columns:
+        c_low = col.lower()
+        if c_low in ['custom label', 'sku', 'customlabel', 'artikelnummer']:
+            sku_col = col
+        if c_low in ['net amount', 'netto_betrag', 'netto', 'amount', 'betrag', 'auszahlung']:
+            netto_col = col
+        if c_low in ['transaction id', 'transaktions-id', 'order number', 'bestellnummer']:
+            id_col = col
+
+    if not sku_col or not netto_col:
+        return None, "SKU- oder Netto-Spalte wurde nicht sicher erkannt."
+
+    if id_col:
+        df = df_raw.drop_duplicates(subset=[id_col, sku_col]).copy()
+    else:
+        df = df_raw.drop_duplicates().copy()
+
+    df[netto_col] = df[netto_col].astype(str).str.replace('€', '').str.replace(' ', '').str.replace(',', '.')
+    df[netto_col] = pd.to_numeric(df[netto_col], errors='coerce').fillna(0)
+
+    df['Custom Label'] = df[sku_col]
+    df['Net amount'] = df[netto_col]
+
+    gruppe_a = ['PP', 'BA', 'MK', '001']
+    def assign_group(val):
+        sku = str(val).strip().upper()
+        if not sku or sku == 'NAN':
+            return 'Ohne Zuordnung'
+        for p in gruppe_a:
+            if sku.startswith(p):
+                return 'Gruppe A'
+        return 'Gruppe B'
+
+    df['Gruppe'] = df['Custom Label'].apply(assign_group)
+    return df, None
+
+def create_lexoffice_draft(api_key, customer_id, invoice_date, amount, tax_rate=19.0):
+    url = "https://api.lexoffice.io/v1/invoices"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+    
+    payload = {
+        "archived": False,
+        "voucherDate": str(invoice_date),
+        "address": {"contactId": customer_id},
+        "lineItems": [
+            {
+                "type": "custom",
+                "name": "eBay Abrechnung",
+                "quantity": 1,
+                "unitName": "Pauschal",
+                "unitPrice": {
+                    "currency": "EUR",
+                    "netAmount": round(amount, 2),
+                    "taxRatePercentage": tax_rate
+                }
+            }
+        ]
+    }
+    
+    try:
+        res = requests.post(url, json=payload, headers=headers)
+        if res.status_code in [200, 201]:
+            return True, "Erfolgreich"
+        return False, res.text
+    except Exception as e:
+        return False, str(e)
+
+# --- UI APP ---
 st.title("📋 eBay Payment Tool")
 st.caption("Partnerzuordnung, Abrechnung und Lexware-Office-Rechnungsentwurf")
 
-# --- SIDEBAR ---
 with st.sidebar:
     st.header("Lexware Office")
     api_key = st.text_input("API-Key", type="password", key="lex_api_key")
@@ -16,7 +134,6 @@ with st.sidebar:
     invoice_date = st.date_input("Rechnungsdatum")
     tax_rate = st.number_input("Umsatzsteuer (%)", value=19.0)
 
-# --- UPLOAD SECTION ---
 col_up1, col_up2 = st.columns(2)
 with col_up1:
     ebay_files = st.file_uploader("eBay-Auszahlungen", type=["csv", "xlsx"], accept_multiple_files=True)
@@ -30,10 +147,9 @@ if ebay_files:
         st.warning(error_msg)
     
     if df is not None and not df.empty:
-        sku_col = 'Custom Label' if 'Custom Label' in df.columns else df.columns[0]
-        netto_col = 'Net amount' if 'Net amount' in df.columns else df.columns[1]
+        sku_col = 'Custom Label'
+        netto_col = 'Net amount'
 
-        # TABS
         tab1, tab2, tab3, tab4 = st.tabs([
             "Gruppe A (Direkt)", 
             "Gruppe B (Über Dich)", 
@@ -41,7 +157,6 @@ if ebay_files:
             "Alle Daten"
         ])
 
-        # TAB 1: GRUPPE A
         with tab1:
             st.header("Direkt-Partner")
             st.caption("PP, BA, MK und 001 · Netto-Umsatz abzüglich 0,5 % Provision · kein Lexware-Upload")
@@ -67,7 +182,6 @@ if ebay_files:
                     st.download_button(f"📥 CSV-Download {sku}", csv, f"Abrechnung_{sku}.csv", "text/csv", key=f"dl_a_{sku}")
                     st.markdown("---")
 
-        # TAB 2: GRUPPE B
         with tab2:
             st.header("Evelyn-Gesamtübersicht")
             st.caption("NB und alle übrigen Standard-SKUs · 0,5 % Rabatt")
@@ -116,7 +230,6 @@ if ebay_files:
                     st.download_button(f"📥 CSV {sku}", csv_b, f"Abrechnung_3.5_{sku}.csv", "text/csv", key=f"dl_b_{sku}")
                     st.markdown("---")
 
-        # TAB 3 & 4
         with tab3:
             st.header("Ohne Zuordnung")
             df_none = df[df['Gruppe'] == 'Ohne Zuordnung']
