@@ -3,9 +3,73 @@ import pandas as pd
 import requests
 import io
 
-st.set_page_config(page_title="eBay Payment Tool", layout="wide")
+# --- PAGE CONFIG & CUSTOM CSS ---
+st.set_page_config(
+    page_title="eBay Payment Tool",
+    page_icon="📋",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# --- CORE LOGIC ---
+# Custom Styling für modernes Design
+st.markdown("""
+<style>
+    /* Hauptüberschriften */
+    .main-title {
+        font-size: 2.2rem;
+        font-weight: 700;
+        color: #1E293B;
+        margin-bottom: 0.2rem;
+    }
+    .sub-title {
+        font-size: 1.0rem;
+        color: #64748B;
+        margin-bottom: 1.5rem;
+    }
+    
+    /* Karten-Style für Metriken */
+    div[data-testid="stMetric"] {
+        background-color: #F8FAFC;
+        border: 1px solid #E2E8F0;
+        padding: 15px;
+        border-radius: 10px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    }
+    
+    div[data-testid="stMetricLabel"] {
+        font-size: 0.85rem !important;
+        color: #475569 !important;
+        font-weight: 600;
+    }
+    
+    div[data-testid="stMetricValue"] {
+        font-size: 1.5rem !important;
+        color: #0F172A !important;
+        font-weight: 700;
+    }
+
+    /* Tab-Styling */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        height: 45px;
+        white-space: pre-wrap;
+        border-radius: 6px 6px 0px 0px;
+        padding-top: 10px;
+        padding-bottom: 10px;
+    }
+
+    /* Buttons */
+    .stButton>button {
+        border-radius: 8px;
+        font-weight: 600;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+
+# --- LOGIK: DATEI EINLESEN & VERARBEITEN ---
 def parse_single_file(uploaded_file):
     try:
         if uploaded_file.name.endswith(('.xlsx', '.xls')):
@@ -14,6 +78,7 @@ def parse_single_file(uploaded_file):
         content = uploaded_file.read().decode('utf-8', errors='ignore')
         lines = content.splitlines()
         
+        # Zeile mit den echten Spaltenüberschriften finden
         header_idx = 0
         for idx, line in enumerate(lines):
             line_low = line.lower()
@@ -32,6 +97,7 @@ def parse_single_file(uploaded_file):
     except Exception:
         return None
 
+
 def process_uploaded_files(uploaded_files):
     if not uploaded_files:
         return None, None
@@ -40,11 +106,11 @@ def process_uploaded_files(uploaded_files):
     for f in uploaded_files:
         parsed = parse_single_file(f)
         if parsed is not None and not parsed.empty:
-            # Spaltenbereinigung & Doppelte Spaltennamen auflösen
+            # Spaltenbereinigung
             parsed.columns = [str(c).strip().replace('"', '') for c in parsed.columns]
             parsed = parsed.loc[:, ~parsed.columns.duplicated()]
             
-            # Mapping auf Zielspalten
+            # Mappen auf einheitliche Namen
             col_map = {}
             for col in parsed.columns:
                 col_low = col.lower()
@@ -56,19 +122,18 @@ def process_uploaded_files(uploaded_files):
                     col_map[col] = 'Transaction ID'
             
             parsed = parsed.rename(columns=col_map)
-            # Nach Rename erneut doppelte Spaltennamen entfernen
             parsed = parsed.loc[:, ~parsed.columns.duplicated()]
             
             if 'Custom Label' in parsed.columns and 'Net amount' in parsed.columns:
                 dfs.append(parsed)
 
     if not dfs:
-        return None, "SKU- oder Netto-Spalte wurde nicht erkannt."
+        return None, "SKU- oder Netto-Spalte wurde in den hochgeladenen Dateien nicht erkannt."
         
     df_raw = pd.concat(dfs, ignore_index=True)
     df_raw = df_raw.loc[:, ~df_raw.columns.duplicated()]
 
-    # Duplikate filtern
+    # Duplikate entfernen (falls Dateien doppelt hochgeladen wurden)
     if 'Transaction ID' in df_raw.columns:
         df = df_raw.drop_duplicates(subset=['Transaction ID', 'Custom Label']).copy()
     else:
@@ -78,11 +143,11 @@ def process_uploaded_files(uploaded_files):
     df['Net amount'] = df['Net amount'].astype(str).str.replace('€', '').str.replace(' ', '').str.replace(',', '.')
     df['Net amount'] = pd.to_numeric(df['Net amount'], errors='coerce').fillna(0)
 
-    # Gruppierung
+    # Zuordnung zu Gruppen
     gruppe_a = ['PP', 'BA', 'MK', '001']
     def assign_group(val):
         sku = str(val).strip().upper()
-        if not sku or sku in ['NAN', 'NONE', '']:
+        if not sku or sku in ['NAN', 'NONE', '', '—', '--', '-', 'NAN']:
             return 'Ohne Zuordnung'
         for p in gruppe_a:
             if sku.startswith(p):
@@ -91,6 +156,7 @@ def process_uploaded_files(uploaded_files):
 
     df['Gruppe'] = df['Custom Label'].apply(assign_group)
     return df, None
+
 
 def create_lexoffice_draft(api_key, customer_id, invoice_date, amount, tax_rate=19.0):
     url = "https://api.lexoffice.io/v1/invoices"
@@ -127,23 +193,32 @@ def create_lexoffice_draft(api_key, customer_id, invoice_date, amount, tax_rate=
     except Exception as e:
         return False, str(e)
 
-# --- UI APP ---
-st.title("📋 eBay Payment Tool")
-st.caption("Partnerzuordnung, Abrechnung und Lexware-Office-Rechnungsentwurf")
+
+# --- HEADER & SIDEBAR ---
+st.markdown('<div class="main-title">📋 eBay Payment Tool</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">Partnerzuordnung, Abrechnung und Lexware-Office-Rechnungsentwurf</div>', unsafe_allow_html=True)
 
 with st.sidebar:
-    st.header("Lexware Office")
-    api_key = st.text_input("API-Key", type="password", key="lex_api_key")
-    customer_id = st.text_input("Kundennummer", value="16335")
+    st.header("⚙️ Lexware Office Integration")
+    api_key = st.text_input("API-Key", type="password", key="lex_api_key", help="Lexware Office API Key eingeben")
+    customer_id = st.text_input("Kundennummer / Contact ID", value="16335")
     invoice_date = st.date_input("Rechnungsdatum")
-    tax_rate = st.number_input("Umsatzsteuer (%)", value=19.0)
+    tax_rate = st.number_input("Umsatzsteuer (%)", value=19.0, step=0.5)
+    st.markdown("---")
+    st.caption("v2.4 · Entwickelt für eBay Auszahlungsberichte")
 
+
+# --- UPLOAD SECTION ---
 col_up1, col_up2 = st.columns(2)
 with col_up1:
-    ebay_files = st.file_uploader("eBay-Auszahlungen", type=["csv", "xlsx"], accept_multiple_files=True)
+    ebay_files = st.file_uploader("eBay-Auszahlungsdateien (CSV/XLSX)", type=["csv", "xlsx"], accept_multiple_files=True)
 with col_up2:
     wahan_files = st.file_uploader("Wahan-Bestellübersicht (optional)", type=["csv", "xlsx"], accept_multiple_files=True)
 
+st.markdown("<br>", unsafe_allow_html=True)
+
+
+# --- HAUPTVERARBEITUNG ---
 if ebay_files:
     df, error_msg = process_uploaded_files(ebay_files)
     
@@ -155,20 +230,20 @@ if ebay_files:
         netto_col = 'Net amount'
 
         tab1, tab2, tab3, tab4 = st.tabs([
-            "Gruppe A (Direkt)", 
-            "Gruppe B (Über Dich)", 
-            "Ohne Zuordnung", 
-            "Alle Daten"
+            "🤝 Gruppe A (Direkt)", 
+            "👤 Gruppe B (Über Dich)", 
+            "❓ Ohne Zuordnung", 
+            "📊 Alle Daten"
         ])
 
         # TAB 1: GRUPPE A
         with tab1:
             st.header("Direkt-Partner")
-            st.caption("PP, BA, MK und 001 · Netto-Umsatz abzüglich 0,5 % Provision · kein Lexware-Upload")
+            st.caption("PP, BA, MK und 001 · Netto-Umsatz abzüglich 0,5 % Provision · Kein Lexware-Upload")
             df_a = df[df['Gruppe'] == 'Gruppe A']
             
             if df_a.empty:
-                st.info("Keine Datensätze für Gruppe A vorhanden.")
+                st.info("Keine Datensätze für Gruppe A in den hochgeladenen Dateien gefunden.")
             else:
                 for sku in sorted(df_a[sku_col].astype(str).unique()):
                     sub = df_a[df_a[sku_col].astype(str) == sku]
@@ -182,7 +257,7 @@ if ebay_files:
                     m2.metric("Provision (0,5 %)", f"{prov:,.2f} €")
                     m3.metric("Auszahlungsbetrag", f"{ausz:,.2f} €")
                     
-                    st.dataframe(sub, use_container_width=True)
+                    st.dataframe(sub, use_container_width=True, hide_index=True)
                     csv = sub.to_csv(index=False).encode('utf-8')
                     st.download_button(f"📥 CSV-Download {sku}", csv, f"Abrechnung_{sku}.csv", "text/csv", key=f"dl_a_{sku}")
                     st.markdown("---")
@@ -194,7 +269,7 @@ if ebay_files:
             df_b = df[df['Gruppe'] == 'Gruppe B']
             
             if df_b.empty:
-                st.info("Keine Datensätze für Gruppe B vorhanden.")
+                st.info("Keine Datensätze für Gruppe B in den hochgeladenen Dateien gefunden.")
             else:
                 netto_b = df_b[netto_col].sum()
                 rabatt_b = netto_b * 0.005
@@ -205,9 +280,10 @@ if ebay_files:
                 b2.metric("Nach 0,5 % Rabatt", f"{endbetrag_b:,.2f} €")
                 b3.metric("Rabatt-Betrag", f"{rabatt_b:,.2f} €")
                 
+                st.markdown("<br>", unsafe_allow_html=True)
                 if st.button("🚀 Rechnungsentwurf in Lexware Office erstellen", type="primary"):
                     if not api_key:
-                        st.error("Für den Upload bitte links den Lexware-Office-API-Key eingeben.")
+                        st.error("Bitte gib zuerst links in der Seitenleiste deinen Lexware-Office-API-Key ein.")
                     else:
                         res, msg = create_lexoffice_draft(api_key, customer_id, invoice_date, endbetrag_b, tax_rate)
                         if res:
@@ -225,13 +301,13 @@ if ebay_files:
                     p_b = n_b * 0.035
                     a_b = n_b - p_b
                     
-                    st.markdown(f"**SKU: {sku}**")
+                    st.markdown(f"### SKU: **{sku}**")
                     x1, x2, x3 = st.columns(3)
                     x1.metric("Umsatz SKU", f"{n_b:,.2f} €")
                     x2.metric("Provision (3,5 %)", f"{p_b:,.2f} €")
                     x3.metric("Auszahlung", f"{a_b:,.2f} €")
                     
-                    st.dataframe(sub_b, use_container_width=True)
+                    st.dataframe(sub_b, use_container_width=True, hide_index=True)
                     csv_b = sub_b.to_csv(index=False).encode('utf-8')
                     st.download_button(f"📥 CSV {sku}", csv_b, f"Abrechnung_3.5_{sku}.csv", "text/csv", key=f"dl_b_{sku}")
                     st.markdown("---")
@@ -239,12 +315,20 @@ if ebay_files:
         # TAB 3: OHNE ZUORDNUNG
         with tab3:
             st.header("Ohne Zuordnung")
+            st.caption("Transaktionen ohne gültige SKU / Bestandseinheit oder allgemeine Gebühren")
             df_none = df[df['Gruppe'] == 'Ohne Zuordnung']
-            st.dataframe(df_none, use_container_width=True)
+            
+            if df_none.empty:
+                st.info("Alle Transaktionen konnten erfolgreich einer Gruppe zugeordnet werden!")
+            else:
+                sum_none = df_none[netto_col].sum()
+                st.metric("Gesamtsumme ungeklärte Posten", f"{sum_none:,.2f} €")
+                st.dataframe(df_none, use_container_width=True, hide_index=True)
 
         # TAB 4: ALLE DATEN
         with tab4:
-            st.header("Alle Daten")
-            st.dataframe(df, use_container_width=True)
+            st.header("Alle zusammengefassten Daten")
+            st.caption(f"Gesamtanzahl Transaktionen: {len(df)}")
+            st.dataframe(df, use_container_width=True, hide_index=True)
 else:
-    st.info("Bitte zuerst eine oder mehrere eBay-Auszahlungsdateien oben hochladen.")
+    st.info("👆 Bitte lade oben mindestens eine eBay-Auszahlungsdatei hoch, um die Auswertung zu starten.")
