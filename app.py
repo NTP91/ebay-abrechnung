@@ -10,7 +10,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# Custom Styling (Exakt nach deinen Screenshots)
+# Custom Styling
 st.markdown("""
 <style>
     /* Roter Button */
@@ -334,27 +334,33 @@ if ebay_files:
         st.markdown("<br><br>", unsafe_allow_html=True)
 
         # =========================================================
-        # BLOCK 3: EINZELABRECHNUNGEN & RETOUREN (3,5 % PROVISION)
+        # BLOCK 3: EINZELABRECHNUNGEN MIT SKU-AUSWAHL
         # =========================================================
         st.header("📌 3. Einzelabrechnungen für dich & Patrick (3,5 % Provision)")
-        st.caption("Aufschlüsselung je SKU mit getrennter Darstellung von Verkäufen und Retouren/Gutschriften.")
+        st.caption("Wähle eine SKU aus, um die Details einzusehen und die spezifische CSV herunterzuladen.")
         
         if not df_b.empty:
+            available_skus = sorted(df_b['SKU_Prefix'].unique())
+            sku_options = ["Alle SKUs"] + available_skus
+            
+            # --- SKUS DROPDOWN SELECTION ---
+            selected_sku = st.selectbox("🎯 Welches SKU möchtest du einsehen / herunterladen?", sku_options)
+            
             show_cols = [c for c in df.columns if c not in ['Gruppe', 'SKU_Prefix']]
             
-            for sku in sorted(df_b['SKU_Prefix'].unique()):
-                sub_b = df_b[df_b['SKU_Prefix'] == sku]
+            # Funktion zum Rendern einer einzelnen SKU
+            def render_sku_details(sku_name):
+                sub_b = df_b[df_b['SKU_Prefix'] == sku_name]
                 n_b = sub_b['Net amount'].sum()
                 p_b = n_b * 0.035
                 a_b = n_b - p_b
                 
-                st.markdown(f"### SKU: **{sku}**")
+                st.markdown(f"### SKU: **{sku_name}**")
                 x1, x2, x3 = st.columns(3)
                 x1.metric("Umsatz SKU", f"{n_b:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
                 x2.metric("Provision (3,5 %)", f"{p_b:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
                 x3.metric("Auszahlung", f"{a_b:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
                 
-                # Trennung Verkäufe vs. Retouren/Gutschriften
                 pos_b = sub_b[sub_b['Net amount'] >= 0]
                 neg_b = sub_b[sub_b['Net amount'] < 0]
 
@@ -367,8 +373,14 @@ if ebay_files:
                     st.dataframe(neg_b[show_cols], use_container_width=True, hide_index=True)
 
                 csv_b = sub_b[show_cols].to_csv(index=False).encode('utf-8')
-                st.download_button(f"📥 CSV-Export {sku}", csv_b, f"Abrechnung_3.5_{sku}.csv", "text/csv", key=f"dl_b_{sku}")
+                st.download_button(f"📥 CSV-Export für {sku_name} herunterladen", csv_b, f"Abrechnung_3.5_{sku_name}.csv", "text/csv", key=f"dl_b_{sku_name}")
                 st.markdown("---")
+
+            if selected_sku == "Alle SKUs":
+                for sku in available_skus:
+                    render_sku_details(sku)
+            else:
+                render_sku_details(selected_sku)
 
         st.markdown("<br><br>", unsafe_allow_html=True)
 
