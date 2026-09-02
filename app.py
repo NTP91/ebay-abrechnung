@@ -1,26 +1,16 @@
 import streamlit as st
 import pandas as pd
 
-# --- SEITEN-KONFIGURATION ---
 st.set_page_config(page_title="eBay-Verrechnung Lexoffice", layout="wide")
 st.title("📋 eBay-Auszahlungsverrechnung & Lexoffice Upload")
 
-# --- SIDEBAR: ZWEI SEPARATE UPLOADS ---
+# --- SIDEBAR: DATEI-UPLOADS ---
 st.sidebar.header("Datei-Uploads")
 
-uploaded_ebay = st.sidebar.file_uploader(
-    "1. eBay Auszahlungs-CSV hochladen", 
-    type=["csv", "xlsx"],
-    key="ebay_uploader"
-)
+uploaded_ebay = st.sidebar.file_uploader("1. eBay Auszahlungs-CSV hochladen", type=["csv", "xlsx"], key="ebay")
+uploaded_wahan = st.sidebar.file_uploader("2. Wahan Bestellübersicht hochladen", type=["csv", "xlsx"], key="wahan")
 
-uploaded_wahan = st.sidebar.file_uploader(
-    "2. Wahan Bestellübersicht hochladen", 
-    type=["csv", "xlsx"],
-    key="wahan_uploader"
-)
-
-# --- UI-TABS IMMER ANZEIGEN ---
+# --- TABS FEST ANLEGEN ---
 tab1, tab2, tab3, tab4 = st.tabs([
     "Tab 1: Gruppe A (Direkt)", 
     "Tab 2: Gruppe B (Über Dich)", 
@@ -28,27 +18,26 @@ tab1, tab2, tab3, tab4 = st.tabs([
     "Tab 4: Alle Daten"
 ])
 
-# Hilfsfunktion zum sicheren Einlesen
-def load_data(file):
+def load_file_safely(file):
     if file is None:
         return None
     try:
         if file.name.endswith('.csv'):
+            # on_bad_lines='skip' verhindert den Tokenizing-Fehler bei fehlerhaften Zeilen
             try:
-                return pd.read_csv(file, sep=";")
+                return pd.read_csv(file, sep=";", on_bad_lines='skip')
             except Exception:
                 file.seek(0)
-                return pd.read_csv(file, sep=",")
+                return pd.read_csv(file, sep=",", on_bad_lines='skip')
         else:
             return pd.read_excel(file)
     except Exception as e:
-        st.error(f"Fehler beim Lesen von {file.name}: {e}")
+        st.error(f"Fehler beim Einlesen von {file.name}: {e}")
         return None
 
-df_ebay = load_data(uploaded_ebay)
-df_wahan = load_data(uploaded_wahan)
+df_ebay = load_file_safely(uploaded_ebay)
+df_wahan = load_file_safely(uploaded_wahan)
 
-# Prüfen ob Daten da sind
 if df_ebay is None:
     with tab1:
         st.info("Bitte lade die eBay Auszahlungs-CSV in der Seitenleiste hoch.")
@@ -59,13 +48,10 @@ if df_ebay is None:
     with tab4:
         st.info("Keine Daten geladen.")
 else:
-    # ---------------------------------------------------------
-    # HIER DIE VERRECHNUNGSLOGIK MIT DF_EBAY UND DF_WAHAN
-    # ---------------------------------------------------------
-    
-    # Spalten-Erkennung für eBay (SKU & Netto)
+    # --- SPALTEN-ERKENNUNG ---
     sku_col = None
     netto_col = None
+    
     for col in df_ebay.columns:
         c_low = str(col).strip().lower()
         if c_low in ['sku', 'custom label', 'customlabel', 'artikelnummer']:
@@ -74,12 +60,12 @@ else:
             netto_col = col
 
     if not sku_col or not netto_col:
-        st.warning("⚠️ Bitte Spaltenzuordnung prüfen:")
+        st.warning("⚠️ Spalten konnten nicht automatisch zugeordnet werden:")
         c1, c2 = st.columns(2)
-        sku_col = c1.selectbox("SKU-Spalte:", df_ebay.columns, key="s_sku")
-        netto_col = c2.selectbox("Netto-Betrag-Spalte:", df_ebay.columns, key="s_netto")
+        sku_col = c1.selectbox("SKU-Spalte wählen:", df_ebay.columns)
+        netto_col = c2.selectbox("Netto-Betrag-Spalte wählen:", df_ebay.columns)
 
-    # Clean Beträge
+    # Beträge bereinigen
     df_ebay[netto_col] = df_ebay[netto_col].astype(str).str.replace('€', '').str.replace(' ', '').str.replace(',', '.')
     df_ebay[netto_col] = pd.to_numeric(df_ebay[netto_col], errors='coerce').fillna(0)
 
@@ -94,17 +80,17 @@ else:
 
     df_ebay['Gruppe'] = df_ebay[sku_col].apply(assign_group)
 
-    # --- TAB 1: GRUPPE A (0,5 %) ---
+    # --- TAB 1: GRUPPE A ---
     with tab1:
         st.header("Gruppe A: Direkt-Partner (0,5 % Provision)")
         df_a = df_ebay[df_ebay['Gruppe'] == 'Gruppe A']
         
         if df_a.empty:
-            st.info("Keine Einträge für Gruppe A.")
+            st.info("Keine Einträge für Gruppe A gefunden.")
         else:
             for sku in sorted(df_a[sku_col].astype(str).unique()):
-                sub_df = df_a[df_a[sku_col].astype(str) == sku]
-                netto = sub_df[netto_col].sum()
+                sub = df_a[df_a[sku_col].astype(str) == sku]
+                netto = sub[netto_col].sum()
                 prov = netto * 0.005
                 ausz = netto - prov
                 
@@ -112,22 +98,22 @@ else:
                 m1, m2, m3 = st.columns(3)
                 m1.metric("eBay Netto-Umsatz", f"{netto:,.2f} €")
                 m2.metric("Provision (0,5 %)", f"{prov:,.2f} €")
-                m3.metric("Auszahlungsbetrag", f"{ausz:,.2f} €")
+                m3.metric("Auszahlung", f"{ausz:,.2f} €")
                 
-                st.dataframe(sub_df, use_container_width=True)
-                csv = sub_df.to_csv(index=False).encode('utf-8')
+                st.dataframe(sub, use_container_width=True)
+                csv = sub.to_csv(index=False).encode('utf-8')
                 st.download_button(f"📥 CSV-Download {sku}", csv, f"Abrechnung_{sku}.csv", "text/csv", key=f"dl_a_{sku}")
                 st.markdown("---")
 
-    # --- TAB 2: GRUPPE B (0,5 % Evelyn / 3,5 % Einzel) ---
+    # --- TAB 2: GRUPPE B ---
     with tab2:
         st.header("Gruppe B: Abrechnung über Evelyn / Partner-Einzelübersichten")
         df_b = df_ebay[df_ebay['Gruppe'] == 'Gruppe B']
         
         if df_b.empty:
-            st.info("Keine Einträge für Gruppe B.")
+            st.info("Keine Einträge für Gruppe B gefunden.")
         else:
-            # 1. Evelyn Gesamtabrechnung (0,5 %)
+            # Evelyn Gesamtabrechnung
             st.subheader("1. Gesamtabrechnung an Evelyn Kukulan (Kundennr. 16335)")
             netto_b = df_b[netto_col].sum()
             rabatt_b = netto_b * 0.005
@@ -143,7 +129,7 @@ else:
             
             st.markdown("---")
             
-            # 2. Einzelübersichten (3,5 %)
+            # Einzelabrechnungen (3,5 %)
             st.subheader("2. Partner-Einzelübersichten (3,5 % Provision für Dich & Patrick)")
             for sku in sorted(df_b[sku_col].astype(str).unique()):
                 with st.expander(f"📌 Einzelabrechnung SKU: {sku}"):
