@@ -18,11 +18,11 @@ with st.expander("📖 **Anleitung & Workflow-Erklärung anzeigen**", expanded=T
     st.markdown("""
     ### **Ablauf & Workflow:**
     1. **Auszahlungsberichte hochladen:** Lade deine eBay-Auszahlungsberichte (CSV) oben hoch.
-    2. **Prüfung der Gruppen:**
-       - **Gruppe B (Über Dich):** Rechnungen werden automatisch per Button für Kundennummer `16335` in Lexoffice als Entwurf angelegt (inkl. 0,5% Rabatt & korrekten Nettobeträgen).
-       - **Gruppe A (Direkt):** Verkäufe von Direkt-Partnern (PP, BA, MK, 001). Hier kannst du pro Partner eine fertige CSV-Abrechnung herunterladen, die sie an dich stellen dürfen.
-       - **Ohne Zuordnung:** Positionen ohne erkannte Partner-SKU.
-    3. **Lexoffice-Upload:** Auf den Button unten klicken, um die Rechnungen für Gruppe B direkt in Lexoffice anzulegen.
+    2. **Gruppe A (Partner / Zwischenmann-Geschäft):**
+       - **Partner-Abrechnung:** Lade die einzelnen CSVs für die Partner (NB, PP, BA, MK, 001) herunter. Die Partner stellen ihre Rechnung an dich (**3,5 % Rabatt**).
+       - **Abrechnung an Evelyn:** Lade die Gesamtübersicht für Gruppe A herunter und stelle die Gesamtrechnung an Evelyn (**0,5 % Rabatt**).
+    3. **Gruppe B (Direkt-Abwicklung über Evelyn):**
+       - Rechnungen werden direkt per Button unten für Kundennummer `16335` in Lexoffice angelegt (**0,5 % Rabatt**).
     """)
 
 # Sidebar Einstellungen
@@ -59,12 +59,11 @@ def extract_partner_prefix(sku):
     raw_prefix = sku_clean.split('/')[0].strip()
     if raw_prefix.startswith('001') or raw_prefix == '001':
         return '001'
-    match = re.match(r'^([A-Z]+)', raw_prefix)
+    match = re.match(r'^([A-Z0-9]+)', raw_prefix)
     if match:
         return match.group(1)
     return raw_prefix
 
-# Sichere Kontaktsuche über Paginierung
 def get_lexoffice_contact_id_exact(api_key, target_customer_number):
     headers = {"Authorization": f"Bearer {api_key}"}
     page = 0
@@ -119,7 +118,7 @@ def create_lexoffice_invoice(api_key, contact_id, line_items, remark):
         st.error(f"Fehler beim Erstellen der Rechnung in Lexoffice: {res.text}")
         return None
 
-GROUP_A_PREFIXES = ['PP', 'BA', 'MK', '001']
+GROUP_A_PREFIXES = ['PP', 'BA', 'MK', '001', 'NB']
 
 if uploaded_payout:
     try:
@@ -162,54 +161,74 @@ if uploaded_payout:
         st.markdown("---")
         st.subheader("📊 Übersicht aller Transaktionen nach Gruppen")
 
-        tab_b, tab_a, tab_none, tab_all = st.tabs([
+        # Gruppe A an ERSTER Stelle
+        tab_a, tab_b, tab_none, tab_all = st.tabs([
+            "Gruppe A (Direkt / Partner)", 
             "Gruppe B (Über Dich)", 
-            "Gruppe A (Direkt)", 
             "Ohne Zuordnung", 
             "Alle Daten"
         ])
 
-        df_grp_b = df_payout[df_payout['Gruppe'] == 'Gruppe B (Über Dich)'].copy()
         df_grp_a = df_payout[df_payout['Gruppe'] == 'Gruppe A (Direkt)'].copy()
+        df_grp_b = df_payout[df_payout['Gruppe'] == 'Gruppe B (Über Dich)'].copy()
         df_grp_none = df_payout[df_payout['Gruppe'] == 'Ohne Zuordnung'].copy()
+
+        with tab_a:
+            st.info("""
+            **Gruppe A (Partner-Geschäft mit Zwischenmann):**
+            - **An Partner senden:** Lade unten pro Partner die CSV herunter. Der Partner stellt seine Rechnung mit **3,5 % Rabatt** an dich.
+            - **An Evelyn berechnen:** Lade die Gesamtübersicht Gruppe A herunter und erstelle deine Gesamtrechnung an Evelyn mit **0,5 % Rabatt**.
+            """)
+            st.write(f"**Anzahl Gesamt:** {len(df_grp_a)} Positionen | **Gesamtsumme Netto:** {df_grp_a['eBay_Netto'].sum():.2f} €")
+            
+            # Button für Gesamt-Download Gruppe A (für Evelyn mit 0,5% Rabatt)
+            if not df_grp_a.empty:
+                df_grp_a_evelyn = df_grp_a[['Bestellnummer', 'SKU', 'eBay_Netto', 'Datum der Transaktionserstellung']].copy()
+                df_grp_a_evelyn['Netto_abzgl_0_5_Prozent'] = (df_grp_a_evelyn['eBay_Netto'] * 0.995).round(2)
+                
+                csv_data_a_all = df_grp_a_evelyn.to_csv(index=False, sep=';').encode('utf-8')
+                st.download_button(
+                    label="📥 Gesamtexport Gruppe A für Evelyn (0,5 % Rabatt) herunterladen (CSV)",
+                    data=csv_data_a_all,
+                    file_name="Abrechnung_Gruppe_A_Gesamt_fuer_Evelyn.csv",
+                    mime="text/csv",
+                    key="dl_grp_a_all"
+                )
+            
+            st.markdown("---")
+            st.subheader("📁 Aufschlüsselung für einzelne Partner (3,5 % Rabatt)")
+            
+            partner_prefixes = df_grp_a['SKU_Prefix'].unique()
+            if len(partner_prefixes) > 0:
+                for prefix in sorted(partner_prefixes):
+                    df_partner = df_grp_a[df_grp_a['SKU_Prefix'] == prefix].copy()
+                    df_partner['Netto_abzgl_3_5_Prozent'] = (df_partner['eBay_Netto'] * 0.965).round(2)
+                    
+                    st.markdown(f"#### 📦 Partner: **{prefix}**")
+                    st.write(f"Anzahl: {len(df_partner)} | Summe Netto: {df_partner['eBay_Netto'].sum():.2f} € | Summe Auszahlung Partner (-3,5 %): {df_partner['Netto_abzgl_3_5_Prozent'].sum():.2f} €")
+                    
+                    export_cols = ['Bestellnummer', 'SKU', 'eBay_Netto', 'Netto_abzgl_3_5_Prozent', 'Datum der Transaktionserstellung']
+                    st.dataframe(df_partner[export_cols], use_container_width=True)
+                    
+                    csv_data = df_partner[export_cols].to_csv(index=False, sep=';').encode('utf-8')
+                    st.download_button(
+                        label=f"📥 Partner-CSV herunterladen für ({prefix})",
+                        data=csv_data,
+                        file_name=f"Abrechnung_Partner_{prefix}.csv",
+                        mime="text/csv",
+                        key=f"dl_{prefix}"
+                    )
+                    st.markdown("---")
+            else:
+                st.write("Keine Positionen für Gruppe A vorhanden.")
 
         with tab_b:
             st.info("""
             **Gruppe B (Über Dich / Evelyn Kukulan Onlinehandel):**
-            Diese Artikel werden über deinen Account/Kunden abgewickelt. Die Rechnungen hierfür werden direkt per Button unten an **Lexoffice (Kundennummer 16335)** übertragen.
+            Diese Artikel werden direkt über deinen Account/Kunden abgewickelt. Die Rechnungen hierfür werden direkt per Button unten an **Lexoffice (Kundennummer 16335)** übertragen (mit 0,5 % Rabatt).
             """)
             st.write(f"**Anzahl:** {len(df_grp_b)} Positionen | **Summe Netto:** {df_grp_b['eBay_Netto'].sum():.2f} €")
             st.dataframe(df_grp_b[['Bestellnummer', 'SKU', 'eBay_Netto', 'Datum der Transaktionserstellung']], use_container_width=True)
-
-        with tab_a:
-            st.info("""
-            **Gruppe A (Direkt-Abrechnung mit Partnern):**
-            Diese Bestellungen gehören zu den Direkt-Partnern (**PP, BA, MK, 001**). 
-            Hier erstellst du keine Lexoffice-Rechnung, sondern lädst unten pro Partner die CSV-Datei herunter. Die Partner nutzen diese Übersicht, um ihre Rechnung an dich zu stellen.
-            """)
-            st.write(f"**Anzahl Gesamt:** {len(df_grp_a)} Positionen | **Gesamtsumme Netto:** {df_grp_a['eBay_Netto'].sum():.2f} €")
-            st.markdown("---")
-            
-            # Einzelpositionen aufgeteilt nach Partnern (PP, BA, MK, 001)
-            partner_prefixes = df_grp_a['SKU_Prefix'].unique()
-            for prefix in sorted(partner_prefixes):
-                df_partner = df_grp_a[df_grp_a['SKU_Prefix'] == prefix]
-                st.markdown(f"### 📦 Partner: **{prefix}**")
-                st.write(f"Anzahl: {len(df_partner)} | Summe Netto: {df_partner['eBay_Netto'].sum():.2f} €")
-                
-                export_cols = ['Bestellnummer', 'SKU', 'eBay_Netto', 'Datum der Transaktionserstellung']
-                st.dataframe(df_partner[export_cols], use_container_width=True)
-                
-                # CSV Export-Button für die Abrechnung mit dem jeweiligen Partner
-                csv_data = df_partner[export_cols].to_csv(index=False, sep=';').encode('utf-8')
-                st.download_button(
-                    label=f"📥 Abrechnung Exportieren für {prefix} (CSV)",
-                    data=csv_data,
-                    file_name=f"Abrechnung_Partner_{prefix}.csv",
-                    mime="text/csv",
-                    key=f"dl_{prefix}"
-                )
-                st.markdown("---")
 
         with tab_none:
             st.warning("""
