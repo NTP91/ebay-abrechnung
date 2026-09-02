@@ -4,6 +4,7 @@ import io
 import re
 import requests
 import json
+import datetime
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
@@ -139,9 +140,13 @@ def create_lexoffice_invoice(api_key, contact_id, line_items, remark):
         "Content-Type": "application/json",
         "Accept": "application/json"
     }
+    
+    # Exaktes ISO-Format ohne Mikrossekunden für Lexoffice: YYYY-MM-DDTHH:MM:SS+02:00
+    now_iso = datetime.datetime.now(datetime.timezone.utc).astimezone().replace(microsecond=0).isoformat()
+    
     payload = {
         "archived": False,
-        "voucherDate": pd.Timestamp.now(tz="Europe/Berlin").isoformat(),
+        "voucherDate": now_iso,
         "address": {"contactId": contact_id},
         "lineItems": line_items,
         "totalPrice": {"currency": "EUR"},
