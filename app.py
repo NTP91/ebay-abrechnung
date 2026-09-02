@@ -1,164 +1,191 @@
-import streamlit as st
-import os
-import pandas as pd
 import json
-from datetime import datetime
-from core import (
-    load_master_data, 
-    get_group_b_summary, 
-    get_group_a_summary, 
-    get_refunds_summary, 
-    export_to_excel,
-    ORDERS_DB_PATH,
-    PAYOUTS_DB_PATH
-)
-from core import read_report, import_reports, build_invoice_payload
+import os
+import re
+from pathlib import Path
 
-st.set_page_config(page_title="eBay Payout & Evelyn Billing Engine", layout="wide")
+import streamlit as st
+import core
 
-# ---------------------------------------------------------
-# SIDEBAR: FILE UPLOADER & DB MANAGEMENT
-# ---------------------------------------------------------
-st.sidebar.header("📁 Datei-Upload & Daten")
-
-uploaded_payouts = st.sidebar.file_uploader("1. Payout-Dateien hochladen (CSV)", type=['csv'], accept_multiple_files=True)
-uploaded_orders = st.sidebar.file_uploader("2. Bestellberichte hochladen (CSV/XLSX)", type=['csv', 'xlsx'], accept_multiple_files=True)
-
-if st.sidebar.button("Dateien sicher importieren", disabled=not (uploaded_payouts or uploaded_orders)):
-    try:
-        # Parse every file first. A malformed input cannot silently disappear.
-        payout_frames = [read_report(file, 'payout') for file in uploaded_payouts]
-        order_frames = [read_report(file, 'orders') for file in uploaded_orders]
-        added_orders = import_reports(order_frames, ORDERS_DB_PATH, 'orders')
-        added_payouts = import_reports(payout_frames, PAYOUTS_DB_PATH, 'payout')
-        st.sidebar.success(f"Importiert: {added_payouts} neue Payout-Zeilen, {added_orders} neue Bestellpositionen.")
-    except Exception as exc:
-        st.sidebar.error(f"Import nicht vollständig: {exc}")
-
-st.sidebar.markdown("---")
-st.sidebar.warning("Lokale CSV-Speicherung benötigt einen dauerhaften Datenträger. Vor einem Cloud-Neustart Daten sichern.")
-for label, path in [('Bestellungen', ORDERS_DB_PATH), ('Payouts', PAYOUTS_DB_PATH)]:
-    if os.path.exists(path):
-        with open(path, 'rb') as saved:
-            st.sidebar.download_button(f"{label} sichern", saved.read(), file_name=path)
-
-confirm_archive = st.sidebar.checkbox("Ich möchte beide Masterdateien archivieren und leer beginnen.")
-if st.sidebar.button("Datenbestand archivieren", disabled=not confirm_archive):
-    suffix = datetime.now().strftime('%Y%m%d-%H%M%S-%f')
-    for path in (ORDERS_DB_PATH, PAYOUTS_DB_PATH):
-        if os.path.exists(path):
-            os.replace(path, f"{path}.{suffix}.bak")
-    st.sidebar.success("Daten wurden als .bak archiviert, nicht gelöscht.")
-    st.rerun()
+st.set_page_config(page_title="Payout Studio", page_icon="€", layout="wide")
+st.markdown("""
+<style>
+.stApp {background:#0b1220;color:#e5edf8}
+[data-testid="stSidebar"] {background:#111d30}
+h1,h2,h3 {color:#eef4ff !important;letter-spacing:-.025em}
+[data-testid="stMetric"] {background:#15233a;border:1px solid #263a55;border-radius:14px;padding:20px}
+[data-testid="stMetricLabel"],[data-testid="stMetricValue"] {color:#eef4ff}
+[data-testid="stExpander"] {border:1px solid #263a55;border-radius:12px}
+.stButton>button {border-radius:9px}
+.block-container {padding-top:2.5rem;max-width:1500px}
+[data-testid="stHeader"] {background:#0b1220}
+[data-testid="stWidgetLabel"] p, [data-testid="stCaptionContainer"] p,
+[role="tab"] {color:#bdcde3 !important}
+[data-testid="stMetricValue"] div {font-size:clamp(1.15rem,2vw,1.65rem);white-space:normal}
+[data-testid="stFileUploaderDropzone"] {background:#192a43;color:#dce7f8}
+[data-testid="stFileUploaderDropzone"] button {background:#294466;color:#f0f5ff;border:1px solid #466789}
+[data-testid="stFileUploaderDropzone"] small {color:#bdcde3 !important}
+[data-testid="stSidebar"] small {color:#bdcde3}
+.stButton button, .stDownloadButton button {background:#203652;color:#e5edf8;border:1px solid #355173}
+.stButton button:disabled {color:#899bb3;opacity:.6}
+[data-testid="stAlert"] {color:#e5edf8}
+</style>
+""", unsafe_allow_html=True)
+st.caption("PARTNERABRECHNUNG · EBAY → LEXWARE OFFICE")
+st.title("Payout Studio")
+st.write("1 · Dateien hochladen   →   2 · Zuordnung prüfen   →   3 · Geldeingang bestätigen   →   4 · Entwurf erstellen")
 
 
-# ---------------------------------------------------------
-# HAUPTANSICHT
-# ---------------------------------------------------------
+def euros(value):
+    return f"{value:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def download(label, frame, filename, key):
+    st.download_button(label, core.export_to_excel(frame), filename,
+                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=key)
+
+
+with st.sidebar:
+    st.header("Import & Verbindung")
+    payouts = st.file_uploader("Payout-Dateien", type=["csv"], accept_multiple_files=True)
+    orders = st.file_uploader("Bestellberichte", type=["csv", "xlsx"], accept_multiple_files=True)
+    if st.button("Dateien sicher importieren", type="primary", disabled=not (payouts or orders)):
+        try:
+            pf = [core.read_report(f, "payout") for f in payouts]
+            of = [core.read_report(f, "orders") for f in orders]
+            no = core.import_reports(of, core.ORDERS_DB_PATH, "orders")
+            np = core.import_reports(pf, core.PAYOUTS_DB_PATH, "payout")
+            st.success(f"{np} neue Payout-Zeilen · {no} neue Bestellpositionen")
+        except Exception as exc:
+            st.error(f"Import angehalten: {exc}")
+    st.divider()
+    api_key = st.text_input("Lexware API-Key", type="password")
+    st.caption("Kundennummer 16335 · ausschließlich Entwürfe · kein Versand")
+    st.warning("CSV-Dateien und Settlement_State.sqlite3 benötigen einen persistenten Datenträger. Für Cloud-Rebuilds extern sichern.")
+    for label, filename in [("Payouts sichern", core.PAYOUTS_DB_PATH), ("Bestellungen sichern", core.ORDERS_DB_PATH)]:
+        if Path(filename).exists():
+            st.download_button(label, Path(filename).read_bytes(), Path(filename).name)
+    st.caption("Das Rechnungsregister darf niemals zum erneuten Abrechnen gelöscht werden. Archivierung/Löschen ist hier gesperrt.")
+    if Path(core.PAYOUTS_DB_PATH).exists():
+        st.download_button('Vollständiges Backup inkl. Rechnungssperren', core.backup_data(), 'Settlement_Backup.zip', 'application/zip')
+
 try:
-    df_master = load_master_data()
+    master = core.load_master_data()
+    states = core.sync_status(master) if not master.empty else None
 except Exception as exc:
-    st.error(f'Gespeicherte Daten können nicht sicher verarbeitet werden: {exc}')
+    st.error(f"Datenprüfung angehalten: {exc}")
     st.stop()
 
-st.warning('Prüfstand: Originalimporte getestet. Lexoffice-Upload bleibt gesperrt, bis das tatsächliche Rechnungsbeispiel abgeglichen und dauerhafte Rechnungssperren geprüft sind.')
-if not df_master.empty:
-    with st.expander('Zuordnung, Gebühren und Payout-Prüfung', expanded=True):
-        st.dataframe(df_master, use_container_width=True)
-        fees = df_master[df_master['Art'] == 'Gebühr']
-        issues = df_master[df_master['Prüfhinweis'] != '']
-        st.write(f'{len(issues)} offene Zuordnungen; {len(fees)} separate eBay-Gebühren.')
-        st.download_button('Prüfübersicht herunterladen', export_to_excel(df_master), 'Payout_Pruefung.xlsx')
-    with st.expander('Lexoffice-Positionen offline prüfen (kein API-Aufruf)'):
-        payout_id = st.selectbox('Eine Auszahlung wählen', sorted(df_master['Auszahlung Nr.'].unique()))
-        received = st.checkbox('Für diesen Test ist der tatsächliche Geldeingang bestätigt')
-        if st.button('Test-Payload vorbereiten'):
+if not master.empty:
+    cols = st.columns(4)
+    cols[0].metric("Payouts", master["Auszahlung Nr."].nunique())
+    cols[1].metric("Auszahlung gesamt", euros(master["Erlös_Brutto"].sum()))
+    cols[2].metric("Gruppe B · Saldo", euros(master.loc[master.Gruppe == "Gruppe B", "Erlös_Brutto"].sum()))
+    cols[3].metric("Offene Zuordnungen", int(master["Prüfhinweis"].astype(bool).sum()))
+    st.caption("Die Salden enthalten Erstattungen. Rechnungsentwürfe enthalten nur Bestellungen; Gutschriften werden getrennt geprüft.")
+
+tab_a, tab_b, tab_check, tab_all = st.tabs(["Gruppe A · Direkt", "Gruppe B · Über Patrick", "Zuordnung & Gutschriften", "Alle Daten"])
+with tab_a:
+    st.subheader("Direkt-Partner")
+    st.caption("PP · BA · MK · 001 — 99,5 % an den Partner, ohne Patrick als Zwischeninstanz.")
+    if master.empty:
+        st.info("Bitte Payouts und Bestellberichte hochladen.")
+    else:
+        summary = core.get_group_a_summary(master)
+        st.dataframe(summary.style.format(precision=2), use_container_width=True, hide_index=True)
+        download("Gesamtübersicht", summary, "Gruppe_A.xlsx", "a-summary")
+        for partner, rows in master[master.Gruppe == "Gruppe A"].groupby("Partner"):
+            rows = rows.copy()
+            rows["Partnerbetrag"] = rows["Erlös_Brutto"] * .995
+            download(f"{partner} · Einzelabrechnung", rows, f"Partner_{partner}.xlsx", "a-" + partner)
+
+with tab_b:
+    st.subheader("Payout einzeln abrechnen")
+    if master.empty:
+        st.info("Noch keine Auszahlungen importiert.")
+    else:
+        payout_id = st.selectbox("Eine Auszahlung wählen", sorted(master["Auszahlung Nr."].unique()))
+        block = master[master["Auszahlung Nr."] == payout_id]
+        state = states[states.Auszahlung == payout_id].iloc[0]
+        locked = bool(state.Sperre)
+        if block["Prüfhinweis"].astype(bool).any() or "Prüfung" in state.Status:
+            st.error(state.Status + " — Lexoffice-Erstellung gesperrt.")
+        elif locked:
+            st.success(state.Status) if state.Entwurf else st.warning("Versuch reserviert / Ergebnis unklar. Nicht erneut senden; Lexoffice manuell prüfen.")
+        else:
+            st.info(state.Status)
+        st.dataframe(block[["Art", "Partner", "Angebotstitel", "SKU", "Bestellnummer", "Erlös_Brutto", "Prüfhinweis"]], use_container_width=True, hide_index=True)
+        received = st.checkbox("Geldeingang für diesen Payout geprüft", key="received-" + payout_id)
+        if st.button("Geldeingang speichern", disabled=not received or locked):
             try:
-                payload = build_invoice_payload(df_master, payout_id, '00000000-0000-0000-0000-000000000000', received)
-                st.json(payload)
-                st.download_button('Test-Payload herunterladen', json.dumps(payload, ensure_ascii=False, indent=2), f'Pruefung_{payout_id}.json')
+                core.confirm_received(payout_id)
+                st.rerun()
             except ValueError as exc:
                 st.error(str(exc))
+        if st.button("Test-Payload vorbereiten"):
+            try:
+                payload = core.build_invoice_payload(master, payout_id, "00000000-0000-0000-0000-000000000000", received or state.Status == "Geld eingegangen")
+                st.json(payload)
+                st.download_button("Offline-JSON", json.dumps(payload, ensure_ascii=False, indent=2), f"Pruefung_{payout_id}.json")
+            except ValueError as exc:
+                st.error(str(exc))
+        prior_checked = st.checkbox("In Lexoffice geprüft: Für diesen Payout besteht noch keine Rechnung (auch kein früherer Testentwurf).", key="prior-" + payout_id)
+        confirmed = st.checkbox("Ich möchte genau einen echten, nicht finalisierten Entwurf anlegen.", key="send-" + payout_id)
+        if st.button("Lexoffice-Entwurf erstellen", type="primary",
+                     disabled=locked or not api_key or not prior_checked or not confirmed or state.Status != "Geld eingegangen"):
+            try:
+                invoice_id = core.create_invoice_draft(api_key, payout_id, prior_checked)
+                st.success(f"Entwurf erstellt: {invoice_id}")
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+        if state.Entwurf:
+            st.write("Gespeicherte Lexoffice-ID:", state.Entwurf)
+        target = core.FOLLOWUP.get(state.Status)
+        if target:
+            checked = st.checkbox(f"Manuell geprüft, inklusive Erstattungen/Gutschriften: {target}", key="status-" + payout_id)
+            if st.button("Status bestätigen", disabled=not checked):
+                try:
+                    core.advance_status(payout_id, target)
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+        st.divider()
+        st.subheader("Partnerabrechnungen · 96,5 %")
+        for partner, rows in block[block.Gruppe == "Gruppe B"].groupby("Partner"):
+            rows = rows.copy()
+            rows["Partnerbetrag"] = rows["Erlös_Brutto"] * .965
+            safe = re.sub(r"[^A-Za-z0-9_-]", "_", partner)
+            download(f"{partner} · Auszahlung {payout_id}", rows, f"{safe}_{payout_id}.xlsx", "b-" + payout_id + partner)
+        summary = core.get_group_b_summary(master)
+        download("Evelyn-Gesamtübersicht (nur Export, kein Sammelupload)", summary, "Gruppe_B.xlsx", "b-summary")
 
-st.markdown("### ⚖️ Soll-Ist Statusübersicht")
+with tab_check:
+    st.subheader("Prüfung und Korrekturen")
+    if master.empty:
+        st.info("Noch keine Daten.")
+    else:
+        issues = master[master["Prüfhinweis"] != ""]
+        if issues.empty:
+            st.success("Alle bestellbezogenen Positionen eindeutig mit dem Bestellbericht verknüpft.")
+        else:
+            st.error(f"{len(issues)} Positionen: Zuordnung fehlt")
+            st.dataframe(issues, use_container_width=True)
+        st.subheader("Gutschriftenübersicht")
+        refunds = core.get_refunds_summary(master)
+        st.dataframe(refunds, use_container_width=True, hide_index=True)
+        download("Gutschriften separat herunterladen", refunds, "Gutschriften.xlsx", "refunds")
+        st.caption("Keine automatische Gutschrifterstellung. Voll-/Teilrückerstattungen anhand der Originalbelege prüfen.")
+        st.subheader("Sonstige eBay-Gebühren — kein Partner")
+        st.dataframe(master[master.Art == "Gebühr"], use_container_width=True, hide_index=True)
 
-if not df_master.empty:
-    total_pos = len(df_master)
-    ausbezahlt_pos = 0  # Receipt cannot be inferred from a transaction status.
-    offen_pos = total_pos - ausbezahlt_pos
-    erloes_brutto = df_master['Erlös_Brutto'].sum()
-    auszahlung_partner = df_master.apply(lambda row: row['Erlös_Brutto'] * (0.995 if row['Gruppe'] == 'Gruppe A' else 0.965 if row['Gruppe'] == 'Gruppe B' else 0), axis=1).sum()
-
-    col1, col2, col3, col4, col5 = st.columns(5)
-    col1.metric("Rechnung Positionen", f"{total_pos}")
-    col2.metric("✅ Ausbezahlt", f"{ausbezahlt_pos} Pos.")
-    col3.metric("⏳ Noch Offen", f"{offen_pos} Pos.")
-    col4.metric("💰 eBay Erlös Brutto", f"{erloes_brutto:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
-    col5.metric("🤝 Auszahlung Partner Brutto", f"{auszahlung_partner:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
-
-    with st.expander(f"🔴 Liste der {offen_pos} noch nicht ausgezahlten Positionen anzeigen"):
-        st.dataframe(df_master[df_master['Status'] != 'Ausbezahlt'], use_container_width=True)
-
-st.markdown("---")
-
-st.markdown("### 📊 1. Gruppe B – Gesamtabrechnung für Evelyn (Über DICH)")
-st.info("ℹ️ **Verwendungszweck:** Diese Rechnung nutzt du für die Abrechnung gegenüber Evelyn. Sie enthält NUR die Umsätze aus Gruppe B, die über dich verteilt werden. Evelyn behält 0,5 % Provision.")
-
-df_b = get_group_b_summary(df_master)
-if not df_b.empty:
-    df_b_disp = df_b.copy()
-    for col in ['eBay_Brutto_Gesamt', 'Evelyn_Provision_0_5', 'Auszahlung_von_Evelyn_an_Dich', 'Deine_Marge_3_0']:
-        df_b_disp[col] = df_b_disp[col].apply(lambda x: f"{x:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
-
-    st.dataframe(df_b_disp, use_container_width=True)
-
-    try:
-        excel_b = export_to_excel(df_b)
-        st.download_button(
-            label="📑 Gesamtabrechnung Gruppe B für Evelyn herunterladen (Excel)",
-            data=excel_b,
-            file_name="Gesamtabrechnung_Gruppe_B_Evelyn.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary"
-        )
-    except Exception as e:
-        st.error(f"Excel-Export Fehler: {e}")
-
-st.markdown("---")
-
-st.markdown("### 🏷️ 2. Gruppe A – Direktabrechnungen für Evelyn (PP, BA, MK, 001)")
-st.info("ℹ️ **Verwendungszweck:** Diese Partner rechnen mit 0,5 % Provision direkt mit Evelyn ab (laufen nicht über deine Marge).")
-
-df_a = get_group_a_summary(df_master)
-if not df_a.empty:
-    df_a_disp = df_a.copy()
-    for col in ['eBay_Brutto_Gesamt', 'Evelyn_Provision_0_5', 'Direkt_Auszahlung_Evelyn']:
-        df_a_disp[col] = df_a_disp[col].apply(lambda x: f"{x:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
-
-    st.dataframe(df_a_disp, use_container_width=True)
-
-    try:
-        excel_a = export_to_excel(df_a)
-        st.download_button(
-            label="📥 Übersicht Gruppe A für Evelyn herunterladen (Excel)",
-            data=excel_a,
-            file_name="Uebersicht_Gruppe_A_Evelyn.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-    except Exception as e:
-        st.error(f"Excel-Export Fehler: {e}")
-
-st.markdown("---")
-
-st.markdown("### 🔻 2. Gutschriften & Erstattungen (Für Lexoffice-Gutschriften)")
-st.info("ℹ️ **Verwendungszweck:** Hier sind alle negativen Beträge (z. B. Retouren oder Versandgutschriften wie bei 001) aufgeführt. Nutze diese Übersicht, um in Lexoffice saubere Einzel-Gutschriften zu erstellen.")
-
-df_ref = get_refunds_summary(df_master)
-if not df_ref.empty:
-    df_ref_disp = df_ref.copy()
-    for col in ['Gutschrift_Brutto', 'Provision', 'Gutschrift_Netto_Auszahlung']:
-        df_ref_disp[col] = df_ref_disp[col].apply(lambda x: f"{x:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
-
-    st.dataframe(df_ref_disp, use_container_width=True)
-else:
-    st.write("Keine Gutschriften/Erstattungen vorhanden.")
+with tab_all:
+    if master.empty:
+        st.info("Noch keine Daten.")
+    else:
+        st.dataframe(master, use_container_width=True, hide_index=True)
+        download("Alle Positionen", master, "Alle_Positionen.xlsx", "all")
+        st.subheader("Persistenter Payout-Status")
+        st.dataframe(states, use_container_width=True, hide_index=True)
+        with core.ledger() as db:
+            events = core.pd.read_sql_query("SELECT payout, at, event FROM audit ORDER BY id DESC", db)
+        st.dataframe(events, use_container_width=True, hide_index=True)

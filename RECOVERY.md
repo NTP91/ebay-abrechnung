@@ -1,5 +1,7 @@
 # Wiederherstellung – Prüfstand vor Änderungen
 
+Aktueller Abschlussstand: [WORKFLOW_REPORT.md](WORKFLOW_REPORT.md).
+
 **Aktualisierung:** Die Original-Importtests wurden inzwischen durchgeführt.
 Ergebnisse und verbleibender Rechnungsbeispiel-Prüfpunkt: [REAL_TEST_REPORT.md](REAL_TEST_REPORT.md).
 Die folgenden Abschnitte dokumentieren den vorherigen Zwischenstand.

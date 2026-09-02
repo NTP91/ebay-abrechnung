@@ -1,5 +1,9 @@
 # Realtest vom 02.09.2026
 
+**Fortgeschrieben durch [WORKFLOW_REPORT.md](WORKFLOW_REPORT.md):** Titelquelle ist
+jetzt verbindlich der Bestellbericht; die PDF-Voraussetzung wurde vom Benutzer
+aufgehoben. API, Sperren und Dashboard sind im neueren Bericht dokumentiert.
+
 Branch: `codex/recover-payout-settlement`. Kein Merge nach main.
 Alle Quelldateien nur lesend geöffnet; Masterdateien ausschließlich in temporären
 Testverzeichnissen erzeugt. Keine Kundendaten/Originaldateien im Commit.

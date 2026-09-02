@@ -41,6 +41,9 @@ class RecoveryTests(unittest.TestCase):
         self.paths.stop()
         self.temp.cleanup()
 
+    def seed_orders(self, frames=None):
+        core.import_reports(frames or [payout()], self.orders, 'orders')
+
     def test_csv_metadata_bom_and_amount(self):
         data = 'Hinweis\n\nAuszahlung Nr.;Bestellnummer;Bestandseinheit;Betrag abzügl. Kosten;Angebotstitel\n7700379513;o1;NB / 1;1.234,56;Produkt\n'
         frame = core.read_report(Upload(data.encode('utf-8-sig')))
@@ -72,6 +75,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(before, Path(self.payouts).read_bytes())
 
     def test_refund_is_not_order_duplicate_and_fee_is_separate(self):
+        self.seed_orders()
         frame = pd.concat([payout(), payout(amount='-119,00', kind='Erstattung'), payout(transaction='fee', order='', sku='', title='', amount='-1,78', kind='Sonstige eBay-Gebühr')])
         core.import_reports([frame], self.payouts, 'payout')
         master = core.load_master_data()
@@ -101,6 +105,7 @@ class RecoveryTests(unittest.TestCase):
             core.build_invoice_payload(master, '7700379513', 'contact', True)
 
     def test_product_priority_net_price_and_quantity_preserved(self):
+        self.seed_orders()
         core.import_reports([payout()], self.payouts, 'payout')
         master = core.load_master_data()
         item = core.build_invoice_payload(master, '7700379513', 'contact', True)['lineItems'][0]
@@ -114,6 +119,7 @@ class RecoveryTests(unittest.TestCase):
 
     def test_group_a_mh_and_partial_refund(self):
         frames = [payout(transaction='a', sku='PP / 1'), payout(transaction='b', sku='MH108 / 2'), payout(transaction='c', sku='MH43 / 3', amount='-11,90')]
+        self.seed_orders(frames)
         core.import_reports(frames, self.payouts, 'payout')
         master = core.load_master_data()
         self.assertEqual(master[master['Gruppe'] == 'Gruppe A'].iloc[0]['Partner'], 'PP')
@@ -139,12 +145,14 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(row['Angebotstitel'], 'Vollständiger Produktname')
 
     def test_payload_isolated_by_payout(self):
+        self.seed_orders([payout(), payout('other', transaction='t2', amount='238,00')])
         core.import_reports([payout(), payout('other', transaction='t2', amount='238,00')], self.payouts, 'payout')
         payload = core.build_invoice_payload(core.load_master_data(), '7700379513', 'contact', True)
         self.assertEqual(len(payload['lineItems']), 1)
         self.assertEqual(payload['lineItems'][0]['unitPrice']['netAmount'], 100)
 
     def test_streamlit_with_saved_data_and_payload(self):
+        self.seed_orders()
         from streamlit.testing.v1 import AppTest
         core.import_reports([payout()], self.payouts, 'payout')
         app = AppTest.from_file(str(Path(__file__).with_name('app.py'))).run()

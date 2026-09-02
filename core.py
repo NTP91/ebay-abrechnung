@@ -10,9 +10,14 @@ from pathlib import Path
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 from filelock import FileLock
+import sqlite3
+import hashlib
+import requests
+import zipfile
+from contextlib import contextmanager
 
-ORDERS_DB_PATH = "Master_Orders.csv"
-PAYOUTS_DB_PATH = "Master_Payouts.csv"
+ORDERS_DB_PATH = str(Path(os.environ.get('PAYMENT_DATA_DIR', '.')) / 'Master_Orders.csv')
+PAYOUTS_DB_PATH = str(Path(os.environ.get('PAYMENT_DATA_DIR', '.')) / 'Master_Payouts.csv')
 
 FIELDS = {
     'Bestellnummer': ['bestellnummer', 'order number', 'order id'],
@@ -218,11 +223,14 @@ def match_order(row, orders):
         if len(matches) > 1:
             return None, 'Mehrdeutige Bestellzuordnung'
         if len(matches) == 1:
-            return matches.iloc[0], ''
+            match = matches.iloc[0]
+            if any(row[k] and match[k] and row[k] != match[k] for k in ('Bestellnummer', 'Artikelnummer')):
+                return None, 'Widersprüchliche Bestell-/Artikelnummer'
+            return match, ''
     return None, 'Keine eindeutige Bestellzuordnung'
 
 def load_master_data():
-    """Preserve payout product data and enrich only through unambiguous matches."""
+    """Use order report as the authoritative product source, never the payout."""
     payouts = read_master(PAYOUTS_DB_PATH)
     orders = read_master(ORDERS_DB_PATH)
     processed = []
@@ -230,15 +238,17 @@ def load_master_data():
         amount = float(parse_money(row['Betrag abzügl. Kosten']))
         order_id = row['Bestellnummer']
         fee = not order_id and any(word in row['Typ'].lower() for word in ('gebühr', 'fee', 'belastung'))
-        sku, title = row['SKU'], row['Angebotstitel']
+        sku, title = '', ''
         issue = ''
-        if not fee and (not sku or not title):
+        if not fee:
             match, issue = match_order(row, orders)
             if match is not None:
-                sku = sku or match['SKU']
-                title = title or match['Angebotstitel']
+                sku = match['SKU']
+                title = match['Angebotstitel']
         if not fee and (not order_id or not sku or not title):
-            issue = issue or 'Bestellnummer, SKU oder Produktname fehlt'
+            issue = issue or 'Bestellnummer, SKU oder Produktname im Bestellbericht fehlt'
+        if issue:
+            issue = 'Zuordnung fehlt: ' + issue
         partner = sku.split('/')[0].strip().upper()
         if partner.startswith('MH'):
             partner = 'MH'
@@ -251,6 +261,9 @@ def load_master_data():
             'Transaktionsnummer': row['Transaktionsnummer'], 'Artikelnummer': row['Artikelnummer'],
             'Bestellnummer': order_id, 'Partner': partner, 'SKU': sku,
             'Angebotstitel': title, 'Gruppe': group, 'Erlös_Brutto': amount,
+            'Titelquelle': 'Bestellbericht' if not fee and not issue else '',
+            'Payout-Angebotstitel': row['Angebotstitel'],
+            'eBay-Auszahlungsstatus': clean(row.get('Auszahlungsstatus', '')),
             'eBay_Netto': round(amount / 1.19, 2),
             'Art': 'Gebühr' if fee else 'Erstattung' if amount < 0 else 'Bestellung',
             'Prüfhinweis': issue, 'Status': 'Prüfung erforderlich' if issue else 'vollständig zugeordnet',
@@ -265,6 +278,9 @@ def build_invoice_payload(master, payout_id, contact_id, money_received=False):
     payout = master[master['Auszahlung Nr.'] == str(payout_id)]
     if payout.empty or payout['Prüfhinweis'].astype(bool).any():
         raise ValueError('Payout fehlt oder enthält ungeklärte Zuordnungen.')
+    related = payout[payout['Art'] != 'Gebühr']
+    if not (related['Titelquelle'] == 'Bestellbericht').all():
+        raise ValueError('Zuordnung fehlt: verbindlicher Bestellbericht-Titel fehlt.')
     sales = payout[(payout['Gruppe'] == 'Gruppe B') & (payout['Art'] == 'Bestellung')]
     if sales.empty:
         raise ValueError('Keine Gruppe-B-Bestellungen für diesen Payout.')
@@ -284,6 +300,169 @@ def build_invoice_payload(master, payout_id, contact_id, money_received=False):
         'shippingConditions': {'shippingDate': now, 'shippingType': 'service'},
         'remark': f'eBay-Auszahlung {payout_id}; Erstattungen werden getrennt abgerechnet.',
     }
+
+
+API_URL = 'https://api.lexware.io/v1'
+FOLLOWUP = {
+    'Lexoffice-Entwurf erstellt': 'Partnerrechnung geprüft',
+    'Partnerrechnung geprüft': 'Partner ausgezahlt',
+    'Partner ausgezahlt': 'abgeschlossen',
+}
+
+
+@contextmanager
+def ledger():
+    path = Path(PAYOUTS_DB_PATH).with_name('Settlement_State.sqlite3')
+    connection = sqlite3.connect(path, timeout=30)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute('PRAGMA synchronous=FULL')
+        connection.execute('CREATE TABLE IF NOT EXISTS payouts (id TEXT PRIMARY KEY, status TEXT NOT NULL, fingerprint TEXT, invoice_id TEXT, attempt TEXT, snapshot TEXT)')
+        connection.execute('CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, payout TEXT, at TEXT, event TEXT)')
+        connection.commit()
+        yield connection
+    finally:
+        connection.close()
+
+
+def audit(db, payout_id, event):
+    db.execute('INSERT INTO audit(payout,at,event) VALUES(?,?,?)',
+               (str(payout_id), datetime.now(timezone.utc).isoformat(), event))
+
+
+def payout_fingerprint(block):
+    columns = ['Auszahlung Nr.', 'Bestellnummer', 'Transaktionsnummer', 'Artikelnummer',
+               'SKU', 'Angebotstitel', 'Erlös_Brutto', 'eBay_Netto', 'Art', 'Gruppe', 'Prüfhinweis', 'Titelquelle']
+    records = sorted(json.dumps(row, ensure_ascii=False, sort_keys=True) for row in block[columns].to_dict('records'))
+    return hashlib.sha256('\n'.join(records).encode()).hexdigest()
+
+
+def sync_status(master):
+    with ledger() as db:
+        db.execute('BEGIN IMMEDIATE')
+        if not master.empty:
+            for payout_id, block in master.groupby('Auszahlung Nr.'):
+                inserted = db.execute("INSERT OR IGNORE INTO payouts(id,status) VALUES(?, 'importiert')", (str(payout_id),))
+                if inserted.rowcount:
+                    audit(db, payout_id, 'importiert')
+                row = db.execute('SELECT * FROM payouts WHERE id=?', (str(payout_id),)).fetchone()
+                status = row['status']
+                if row['fingerprint'] and row['fingerprint'] != payout_fingerprint(block):
+                    status = 'Prüfung erforderlich: gesperrte Daten verändert'
+                elif not row['attempt'] and status != 'Geld eingegangen':
+                    status = 'Prüfung erforderlich' if block['Prüfhinweis'].astype(bool).any() else 'vollständig zugeordnet'
+                elif not row['attempt'] and block['Prüfhinweis'].astype(bool).any():
+                    status = 'Prüfung erforderlich'
+                if status != row['status']:
+                    db.execute('UPDATE payouts SET status=? WHERE id=?', (status, str(payout_id)))
+                    audit(db, payout_id, status)
+        db.commit()
+        return pd.read_sql_query('SELECT id AS Auszahlung, status AS Status, invoice_id AS Entwurf, attempt AS Sperre FROM payouts ORDER BY id', db)
+
+
+def confirm_received(payout_id):
+    master = load_master_data()
+    block = master[master['Auszahlung Nr.'] == str(payout_id)]
+    if block.empty or block['Prüfhinweis'].astype(bool).any():
+        raise ValueError('Zuordnung fehlt.')
+    # Confirmation supplements, but cannot override, missing transfer evidence.
+    if not (block['eBay-Auszahlungsstatus'] == 'Betrag überwiesen').all():
+        raise ValueError('eBay-Nachweis „Betrag überwiesen“ fehlt.')
+    sync_status(master)
+    with ledger() as db:
+        db.execute('BEGIN IMMEDIATE')
+        row = db.execute('SELECT * FROM payouts WHERE id=?', (str(payout_id),)).fetchone()
+        if row['attempt']:
+            raise ValueError('Payout bereits gesperrt.')
+        db.execute("UPDATE payouts SET status='Geld eingegangen' WHERE id=?", (str(payout_id),))
+        audit(db, payout_id, 'Geld eingegangen – manuell bestätigt mit eBay-Überweisungsnachweis')
+        db.commit()
+
+
+def advance_status(payout_id, target):
+    sync_status(load_master_data())
+    with ledger() as db:
+        db.execute('BEGIN IMMEDIATE')
+        row = db.execute('SELECT * FROM payouts WHERE id=?', (str(payout_id),)).fetchone()
+        if not row or not row['invoice_id'] or FOLLOWUP.get(row['status']) != target:
+            raise ValueError('Statusübergang nicht erlaubt.')
+        db.execute('UPDATE payouts SET status=? WHERE id=?', (target, str(payout_id)))
+        audit(db, payout_id, target + ' – manuell bestätigt, keine automatische Belegprüfung')
+        db.commit()
+
+
+def create_invoice_draft(api_key, payout_id, prior_invoices_checked=False, http=None):
+    """Single attempt per payout. Any uncertain POST outcome remains locked."""
+    if not api_key or not prior_invoices_checked:
+        raise ValueError('API-Key und Bestätigung der bisherigen Rechnungsprüfung erforderlich.')
+    http = http or requests
+    payout_id = str(payout_id)
+    headers = {'Authorization': f'Bearer {api_key}', 'Accept': 'application/json'}
+    # Protect against simultaneous imports while preparing the immutable snapshot.
+    with FileLock(PAYOUTS_DB_PATH + '.lock'), FileLock(ORDERS_DB_PATH + '.lock'):
+        master = load_master_data()
+        sync_status(master)
+        with ledger() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT * FROM payouts WHERE id=?', (payout_id,)).fetchone()
+            if not row or row['attempt'] or row['status'] != 'Geld eingegangen':
+                raise ValueError('Payout gesperrt oder Geldeingang/Zuordnung nicht bestätigt.')
+            try:
+                response = http.get(API_URL + '/contacts', params={'number': 16335, 'customer': 'true'}, headers=headers, timeout=20)
+                if response.status_code != 200:
+                    raise ValueError('Kontaktabfrage fehlgeschlagen.')
+                contacts = [c for c in response.json().get('content', []) if
+                            str(c.get('roles', {}).get('customer', {}).get('number')) == '16335']
+                if len(contacts) != 1 or not contacts[0].get('id'):
+                    raise ValueError('Kundennummer 16335 nicht eindeutig gefunden.')
+                payload = build_invoice_payload(master, payout_id, contacts[0]['id'], True)
+            except Exception:
+                raise ValueError('Kontakt/Payload-Prüfung fehlgeschlagen; kein Rechnungsaufruf erfolgt.') from None
+            if len(payload['lineItems']) > 300:
+                raise ValueError('Mehr als 300 Positionen; manuelle Prüfung erforderlich.')
+            block = master[master['Auszahlung Nr.'] == payout_id]
+            db.execute("UPDATE payouts SET attempt='pending', fingerprint=?, snapshot=? WHERE id=?",
+                       (payout_fingerprint(block), json.dumps(payload, ensure_ascii=False), payout_id))
+            audit(db, payout_id, 'Entwurfsversuch reserviert; Altbestand manuell geprüft')
+            db.commit()  # durable BEFORE the network write; never automatically retry
+    try:
+        response = http.post(API_URL + '/invoices', params={'finalize': 'false'}, headers=headers, json=payload, timeout=30)
+        if response.status_code not in (200, 201):
+            raise ValueError('Rechnungsantwort nicht erfolgreich.')
+        invoice_id = response.json().get('id')
+        if not isinstance(invoice_id, str) or not invoice_id:
+            raise ValueError('Entwurfs-ID fehlt.')
+    except Exception:
+        with ledger() as db:
+            db.execute("UPDATE payouts SET attempt='unknown', status='Prüfung erforderlich' WHERE id=?", (payout_id,))
+            audit(db, payout_id, 'API-Ergebnis unklar; erneute Erstellung gesperrt, Lexoffice manuell prüfen')
+            db.commit()
+        raise ValueError('API-Ergebnis unklar. Payout bleibt gesperrt; in Lexoffice prüfen. Nicht erneut erstellen.') from None
+    with ledger() as db:
+        db.execute("UPDATE payouts SET attempt='created', invoice_id=?, status='Lexoffice-Entwurf erstellt' WHERE id=?", (invoice_id, payout_id))
+        audit(db, payout_id, 'Lexoffice-Entwurf erstellt: ' + invoice_id)
+        db.commit()
+    return invoice_id
+
+
+def backup_data():
+    """Consistent CSV + SQLite snapshot; never export credentials."""
+    output = io.BytesIO()
+    with FileLock(PAYOUTS_DB_PATH + '.lock'), FileLock(ORDERS_DB_PATH + '.lock'):
+        with tempfile.TemporaryDirectory() as folder:
+            snapshot = Path(folder) / 'Settlement_State.sqlite3'
+            with ledger() as db:
+                copy = sqlite3.connect(snapshot)
+                try:
+                    db.backup(copy)
+                finally:
+                    copy.close()
+            with zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as archive:
+                for filename in (PAYOUTS_DB_PATH, ORDERS_DB_PATH):
+                    if Path(filename).exists():
+                        archive.write(filename, Path(filename).name)
+                archive.write(snapshot, snapshot.name)
+    return output.getvalue()
 
 
 def get_group_b_summary(df):

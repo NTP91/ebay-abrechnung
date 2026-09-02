@@ -6,3 +6,4 @@ Master_*.csv.*
 *.lock
 *.bak
 .env
+Settlement_State.sqlite3*

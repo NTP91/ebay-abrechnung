@@ -68,6 +68,16 @@ class RealReportTests(unittest.TestCase):
         self.assertEqual(master.Art.value_counts().to_dict(), {'Bestellung': 43, 'Erstattung': 6, 'Gebühr': 1})
         self.assertEqual(((master.Bestellnummer != '') & (master.Angebotstitel != '')).sum(), 49)
         self.assertFalse(master['Prüfhinweis'].astype(bool).any())
+        self.assertEqual((master['Titelquelle'] == 'Bestellbericht').sum(), 49)
+        orders = core.read_master(self.orders)
+        raw = core.read_master(self.payouts)
+        for index, row in raw[raw['Bestellnummer'] != ''].iterrows():
+            match, issue = core.match_order(row, orders)
+            self.assertIsNotNone(match)
+            self.assertFalse(issue)
+            self.assertTrue(match['Angebotstitel'])
+            self.assertEqual(master.iloc[index]['Angebotstitel'], match['Angebotstitel'])
+            self.assertEqual(master.iloc[index]['SKU'], match['SKU'])
         self.assertEqual(set(master[master.SKU.str.startswith('MH')].Partner), {'MH'})
         self.assertEqual(set(master[master.Partner == 'NB'].Gruppe), {'Gruppe B'})
         fee = master[master.Art == 'Gebühr'].iloc[0]
@@ -134,6 +144,23 @@ class RealReportTests(unittest.TestCase):
             next(w for w in app.button if w.label == 'Test-Payload vorbereiten').click().run()
             self.assertFalse(list(app.exception))
             self.assertEqual(len(app.json), 1)
+
+    def test_all_real_payouts_mocked_api_and_durable_locks(self):
+        from unittest.mock import Mock
+        http = Mock()
+        http.get.return_value.status_code = 200
+        http.get.return_value.json.return_value = {'content': [{'id': 'test-contact', 'roles': {'customer': {'number': 16335}}}]}
+        http.post.return_value.status_code = 201
+        http.post.return_value.json.side_effect = [{'id': 'test-draft-' + str(i)} for i in range(3)]
+        for payout_id in self.master['Auszahlung Nr.'].unique():
+            core.confirm_received(payout_id)
+            core.create_invoice_draft('fake-key', payout_id, True, http)
+            with self.assertRaises(ValueError):
+                core.create_invoice_draft('fake-key', payout_id, True, http)
+        self.assertEqual(http.post.call_count, 3)
+        for call in http.post.call_args_list:
+            self.assertEqual(call.kwargs['params'], {'finalize': 'false'})
+        self.assertEqual(set(core.sync_status(self.master).Status), {'Lexoffice-Entwurf erstellt'})
 
 
 if __name__ == '__main__':
