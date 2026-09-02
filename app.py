@@ -22,7 +22,6 @@ st.markdown("""
         font-weight: 500 !important;
     }
     
-    /* Hauptüberschriften Styling */
     h2 {
         font-size: 1.5rem !important;
         font-weight: 600 !important;
@@ -343,12 +342,10 @@ if ebay_files:
             available_skus = sorted(df_b['SKU_Prefix'].unique())
             sku_options = ["Alle SKUs"] + available_skus
             
-            # --- SKUS DROPDOWN SELECTION ---
             selected_sku = st.selectbox("🎯 Welches SKU möchtest du einsehen / herunterladen?", sku_options)
             
             show_cols = [c for c in df.columns if c not in ['Gruppe', 'SKU_Prefix']]
             
-            # Funktion zum Rendern einer einzelnen SKU
             def render_sku_details(sku_name):
                 sub_b = df_b[df_b['SKU_Prefix'] == sku_name]
                 n_b = sub_b['Net amount'].sum()
