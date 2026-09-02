@@ -10,10 +10,9 @@ st.set_page_config(
     layout="wide"
 )
 
-# Custom Styling für rote und weiße Download-Buttons
+# Custom Styling für Buttons
 st.markdown("""
 <style>
-    /* Roter Button */
     div.stButton > button[kind="primary"] {
         background-color: #FF4B4B !important;
         color: white !important;
@@ -21,8 +20,6 @@ st.markdown("""
         border-radius: 6px !important;
         font-weight: 500 !important;
     }
-    
-    /* Hauptüberschriften Styling */
     h2 {
         font-size: 1.5rem !important;
         font-weight: 600 !important;
@@ -32,7 +29,44 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# --- HILFSFUNKTIONEN ---
+# --- LEXOFFICE API LOGIK ---
+def create_lexoffice_draft(api_key, customer_id, invoice_date, amount, tax_rate=19.0):
+    url = "https://api.lexoffice.io/v1/invoices"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+    
+    payload = {
+        "archived": False,
+        "voucherDate": str(invoice_date),
+        "address": {"contactId": customer_id},
+        "lineItems": [
+            {
+                "type": "custom",
+                "name": "eBay Abrechnung (Gruppe B)",
+                "quantity": 1,
+                "unitName": "Pauschal",
+                "unitPrice": {
+                    "currency": "EUR",
+                    "netAmount": round(amount, 2),
+                    "taxRatePercentage": tax_rate
+                }
+            }
+        ]
+    }
+    
+    try:
+        res = requests.post(url, json=payload, headers=headers)
+        if res.status_code in [200, 201]:
+            return True, "Rechnungsentwurf erfolgreich erstellt!"
+        return False, f"Fehler von Lexoffice ({res.status_code}): {res.text}"
+    except Exception as e:
+        return False, f"Verbindungsfehler: {str(e)}"
+
+
+# --- HILFSFUNKTIONEN FÜR VERARBEITUNG ---
 def parse_single_file(uploaded_file):
     try:
         if uploaded_file.name.endswith(('.xlsx', '.xls')):
@@ -61,10 +95,17 @@ def parse_single_file(uploaded_file):
 
 
 def clean_sku_prefix(val):
-    s = str(val).strip()
+    s = str(val).strip().upper()
+    
+    # Trennung am Schrägstrich
     if '/' in s:
         s = s.split('/')[0].strip()
-    return s.upper()
+        
+    # Spezifische Zusammenfassung für MH (MH, MH43, MH 44 etc. -> MH)
+    if s.startswith('MH'):
+        return 'MH'
+        
+    return s
 
 
 def process_uploaded_files(uploaded_files):
@@ -126,9 +167,9 @@ def process_uploaded_files(uploaded_files):
 
 # --- SIDEBAR ---
 with st.sidebar:
-    st.header("⚙️ Einstellungen & Lexware")
-    api_key = st.text_input("Lexware API-Key", type="password")
-    customer_id = st.text_input("Kundennummer", value="16335")
+    st.header("⚙️ Lexware Office Einstellungen")
+    api_key = st.text_input("Lexware API-Key", type="password", key="lex_key")
+    customer_id = st.text_input("Kundennummer / Contact-ID", value="16335")
     invoice_date = st.date_input("Rechnungsdatum")
     tax_rate = st.number_input("Umsatzsteuer (%)", value=19.0, step=0.5)
 
@@ -164,37 +205,60 @@ if ebay_files:
             summary_b['Auszahlung_von_Evelyn_an_Dich'] = summary_b['eBay_Brutto_Gesamt'] - summary_b['Evelyn_Provision_0_5']
             summary_b['Deine_Marge_3_0'] = summary_b['eBay_Brutto_Gesamt'] * 0.030
             
-            # Summenzeile hinzufügen
+            tot_trans_b = summary_b['Anzahl_Transaktionen'].sum()
+            tot_brutto_b = summary_b['eBay_Brutto_Gesamt'].sum()
+            tot_prov_b = summary_b['Evelyn_Provision_0_5'].sum()
+            tot_auszahlung_b = summary_b['Auszahlung_von_Evelyn_an_Dich'].sum()
+            tot_marge_b = summary_b['Deine_Marge_3_0'].sum()
+
             total_b = pd.DataFrame([{
                 'SKU_Prefix': 'GESAMTSUMME (Gruppe B)',
-                'Anzahl_Transaktionen': summary_b['Anzahl_Transaktionen'].sum(),
-                'eBay_Brutto_Gesamt': summary_b['eBay_Brutto_Gesamt'].sum(),
-                'Evelyn_Provision_0_5': summary_b['Evelyn_Provision_0_5'].sum(),
-                'Auszahlung_von_Evelyn_an_Dich': summary_b['Auszahlung_von_Evelyn_an_Dich'].sum(),
-                'Deine_Marge_3_0': summary_b['Deine_Marge_3_0'].sum()
+                'Anzahl_Transaktionen': tot_trans_b,
+                'eBay_Brutto_Gesamt': tot_brutto_b,
+                'Evelyn_Provision_0_5': tot_prov_b,
+                'Auszahlung_von_Evelyn_an_Dich': tot_auszahlung_b,
+                'Deine_Marge_3_0': tot_marge_b
             }])
             
             display_b = pd.concat([summary_b, total_b], ignore_index=True)
             
-            # Formatierung als Währung für die Anzeige
             formatted_b = display_b.copy()
             for col in ['eBay_Brutto_Gesamt', 'Evelyn_Provision_0_5', 'Auszahlung_von_Evelyn_an_Dich', 'Deine_Marge_3_0']:
                 formatted_b[col] = formatted_b[col].apply(lambda x: f"{x:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
             
             st.dataframe(formatted_b, use_container_width=True, hide_index=False)
             
-            # Roter Excel-Download Button
-            buffer_b = io.BytesIO()
-            with pd.ExcelWriter(buffer_b, engine='openpyxl') as writer:
-                display_b.to_excel(writer, index=False, sheet_name='Gruppe_B')
+            col_btn1, col_btn2 = st.columns([1, 1])
             
-            st.download_button(
-                label="👛 Gesamtabrechnung Gruppe B für Evelyn herunterladen (Excel)",
-                data=buffer_b.getvalue(),
-                file_name="Gesamtabrechnung_Gruppe_B_Evelyn.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary"
-            )
+            with col_btn1:
+                buffer_b = io.BytesIO()
+                with pd.ExcelWriter(buffer_b, engine='openpyxl') as writer:
+                    display_b.to_excel(writer, index=False, sheet_name='Gruppe_B')
+                
+                st.download_button(
+                    label="👛 Gesamtabrechnung Gruppe B für Evelyn herunterladen (Excel)",
+                    data=buffer_b.getvalue(),
+                    file_name="Gesamtabrechnung_Gruppe_B_Evelyn.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary"
+                )
+            
+            with col_btn2:
+                if st.button("🚀 Rechnungsentwurf in Lexware Office anlegen", key="lex_draft_btn"):
+                    if not api_key:
+                        st.error("Bitte gib zuerst in der linken Seitenleiste deinen Lexware API-Key ein.")
+                    else:
+                        success, msg = create_lexoffice_draft(
+                            api_key=api_key,
+                            customer_id=customer_id,
+                            invoice_date=invoice_date,
+                            amount=tot_auszahlung_b,
+                            tax_rate=tax_rate
+                        )
+                        if success:
+                            st.success(f"{msg} Betrag: {tot_auszahlung_b:,.2f} €")
+                        else:
+                            st.error(msg)
         else:
             st.write("Keine Datensätze für Gruppe B vorhanden.")
 
@@ -217,7 +281,6 @@ if ebay_files:
             summary_a['Evelyn_Provision_0_5'] = summary_a['eBay_Brutto_Gesamt'] * 0.005
             summary_a['Direkt_Auszahlung_Evelyn'] = summary_a['eBay_Brutto_Gesamt'] - summary_a['Evelyn_Provision_0_5']
             
-            # Summenzeile hinzufügen
             total_a = pd.DataFrame([{
                 'SKU_Prefix': 'GESAMTSUMME (Gruppe A)',
                 'Anzahl_Transaktionen': summary_a['Anzahl_Transaktionen'].sum(),
@@ -228,14 +291,12 @@ if ebay_files:
             
             display_a = pd.concat([summary_a, total_a], ignore_index=True)
             
-            # Formatierung als Währung für die Anzeige
             formatted_a = display_a.copy()
             for col in ['eBay_Brutto_Gesamt', 'Evelyn_Provision_0_5', 'Direkt_Auszahlung_Evelyn']:
                 formatted_a[col] = formatted_a[col].apply(lambda x: f"{x:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
             
             st.dataframe(formatted_a, use_container_width=True, hide_index=False)
             
-            # Weißer/Standard Excel-Download Button
             buffer_a = io.BytesIO()
             with pd.ExcelWriter(buffer_a, engine='openpyxl') as writer:
                 display_a.to_excel(writer, index=False, sheet_name='Gruppe_A')
