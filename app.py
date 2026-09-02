@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import io
+import re
 
 st.set_page_config(page_title="eBay Payout & SKU-Abrechnung", layout="wide")
 
@@ -13,19 +14,40 @@ with col1:
 with col2:
     uploaded_invoice = st.file_uploader("2. Soll-Rechnung / Referenz (Excel/CSV)", type=["xlsx", "csv"], key="invoice")
 
+# Hilfsfunktionen
 def parse_german_float(val):
     if pd.isna(val) or val == '--' or str(val).strip() == '':
         return 0.0
     return float(str(val).replace('.', '').replace(',', '.'))
 
-def get_commission_rate(sku):
+def clean_order_number(val):
+    """Entfernt ALLE Sonderzeichen, Bindestriche, Leerzeichen & führende Nullen für 100% Match-Garantie"""
+    if pd.isna(val):
+        return ""
+    s = str(val).strip()
+    if s.endswith('.0'):
+        s = s[:-2]
+    s = re.sub(r'[^A-Za-z0-9]', '', s).upper()
+    s = s.lstrip('0')
+    return s
+
+def extract_partner_prefix(sku):
+    """Extrahiert das Kürzel und fasst z.B. MH43, MH44 -> MH zusammen"""
     if pd.isna(sku):
-        return 0.035
+        return 'OHNE_SKU'
     sku_clean = str(sku).strip().upper()
-    prefix = sku_clean.split('/')[0].strip()
-    if prefix in ['BA', 'MK', 'PP', '001'] or prefix.startswith('001'):
-        return 0.005
-    return 0.035
+    raw_prefix = sku_clean.split('/')[0].strip()
+    
+    if raw_prefix.startswith('001') or raw_prefix == '001':
+        return '001'
+    
+    match = re.match(r'^([A-Z]+)', raw_prefix)
+    if match:
+        return match.group(1)
+    return raw_prefix
+
+# Definition der Gruppe A (Direktabrechnung mit Evelyn)
+GROUP_A_PREFIXES = ['PP', 'BA', 'MK', '001']
 
 if uploaded_payout:
     try:
@@ -40,131 +62,216 @@ if uploaded_payout:
             lines = content.splitlines()
             header_idx = 0
             for i, line in enumerate(lines):
-                if "Datum der Transaktionserstellung" in line:
+                if "Bestellnummer" in line or "Datum der Transaktionserstellung" in line:
                     header_idx = i
                     break
             df_temp = pd.read_csv(io.StringIO("\n".join(lines[header_idx:])), sep=';')
             all_dfs.append(df_temp)
         
         df_payout = pd.concat(all_dfs, ignore_index=True)
-        df_payout = df_payout.drop_duplicates(subset=['Bestellnummer', 'Datum der Transaktionserstellung', 'Betrag abzügl. Kosten'])
         
-        # Berechnungen
+        # Säubern & Grundberechnungen
+        df_payout['Bestellnummer_Match'] = df_payout['Bestellnummer'].apply(clean_order_number)
+        df_payout = df_payout.drop_duplicates(subset=['Bestellnummer_Match', 'Datum der Transaktionserstellung', 'Betrag abzügl. Kosten'])
+        
         df_payout['eBay_Brutto'] = df_payout['Betrag abzügl. Kosten'].apply(parse_german_float)
         df_payout['SKU'] = df_payout['Bestandseinheit'].fillna('OHNE_SKU').astype(str).str.strip()
-        df_payout['Provisionssatz'] = df_payout['SKU'].apply(get_commission_rate)
+        df_payout['SKU_Prefix'] = df_payout['SKU'].apply(extract_partner_prefix)
         
-        df_payout['VK_Netto'] = (df_payout['eBay_Brutto'] / 1.19).round(2)
-        df_payout['Rabatt_Prozent'] = (df_payout['Provisionssatz'] * 100).round(2)
-        df_payout['Provision_EUR'] = (df_payout['eBay_Brutto'] * df_payout['Provisionssatz']).round(2)
-        df_payout['Auszahlung_Partner_Brutto'] = (df_payout['eBay_Brutto'] - df_payout['Provision_EUR']).round(2)
-        df_payout['SKU_Prefix'] = df_payout['SKU'].apply(lambda x: str(x).split('/')[0].strip().upper() if pd.notna(x) else 'FEHLT')
+        # Zuordnung Gruppe A vs. Gruppe B
+        df_payout['Gruppe'] = df_payout['SKU_Prefix'].apply(lambda p: 'Gruppe A (Direkt)' if p in GROUP_A_PREFIXES else 'Gruppe B (Über Dich)')
+        
+        # Provisionssätze berechnen:
+        # Evelyn bekommt immer 0,5%
+        df_payout['Evelyn_Prov_Satz'] = 0.005
+        df_payout['Evelyn_Prov_EUR'] = (df_payout['eBay_Brutto'] * df_payout['Evelyn_Prov_Satz']).round(2)
+        df_payout['Auszahlung_Evelyn_Brutto'] = (df_payout['eBay_Brutto'] - df_payout['Evelyn_Prov_EUR']).round(2)
+        
+        # Partner-Provision: Gruppe A = 0,5%, Gruppe B = 3,5%
+        df_payout['Partner_Prov_Satz'] = df_payout['SKU_Prefix'].apply(lambda p: 0.005 if p in GROUP_A_PREFIXES else 0.035)
+        df_payout['Partner_Prov_EUR'] = (df_payout['eBay_Brutto'] * df_payout['Partner_Prov_Satz']).round(2)
+        df_payout['Auszahlung_Partner_Brutto'] = (df_payout['eBay_Brutto'] - df_payout['Partner_Prov_EUR']).round(2)
+        
+        # Deine Marge (Nur bei Gruppe B: 3.0%)
+        df_payout['Deine_Marge_EUR'] = df_payout.apply(lambda r: (r['Partner_Prov_EUR'] - r['Evelyn_Prov_EUR']) if r['Gruppe'] == 'Gruppe B (Über Dich)' else 0.0, axis=1).round(2)
 
-        # SOLL-IST STATUS
+        # ---------------------------------------------------------
+        # SOLL-IST STATUS OVERVIEW
+        # ---------------------------------------------------------
         if uploaded_invoice is not None:
             if uploaded_invoice.name.endswith('.xlsx'):
-                df_inv = pd.read_excel(uploaded_invoice, header=2)
+                df_inv_raw = pd.read_excel(uploaded_invoice)
+                header_row_idx = 0
+                for r_idx, row in df_inv_raw.iterrows():
+                    if any("Bestellnummer" in str(val) for val in row.values):
+                        header_row_idx = r_idx
+                        break
+                df_inv = pd.read_excel(uploaded_invoice, header=header_row_idx)
             else:
                 df_inv = pd.read_csv(uploaded_invoice)
             
-            payout_orders = set(df_payout['Bestellnummer'].dropna().astype(str).str.strip())
-            inv_orders = set(df_inv['Bestellnummer'].dropna().astype(str).str.strip())
+            inv_col = None
+            for col in df_inv.columns:
+                if "Bestellnummer" in str(col) or "Order" in str(col) or "Bestell-Nr" in str(col):
+                    inv_col = col
+                    break
             
-            paid_count = len(inv_orders.intersection(payout_orders))
-            unpaid_orders = inv_orders - payout_orders
-            unpaid_count = len(unpaid_orders)
-            
-            st.markdown("---")
-            st.subheader("⚖️ Soll-Ist Statusübersicht")
-            m1, m2, m3, m4, m5 = st.columns(5)
-            m1.metric("Rechnung Positionen", len(inv_orders))
-            m2.metric("✅ Ausbezahlt", f"{paid_count} Pos.")
-            m3.metric("⏳ Noch Offen", f"{unpaid_count} Pos.")
-            m4.metric("💰 eBay Erlös Brutto", f"{df_payout['eBay_Brutto'].sum():,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
-            m5.metric("🤝 Auszahlung Partner Brutto", f"{df_payout['Auszahlung_Partner_Brutto'].sum():,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
-            
-            if unpaid_count > 0:
-                missing_mask = df_inv['Bestellnummer'].astype(str).str.strip().isin(unpaid_orders)
-                df_missing = df_inv[missing_mask]
+            if inv_col:
+                df_inv['Bestellnummer_Match'] = df_inv[inv_col].apply(clean_order_number)
                 
-                with st.expander(f"🔴 Liste der {unpaid_count} noch nicht ausgezahlten Positionen anzeigen"):
-                    st.dataframe(df_missing, use_container_width=True)
+                payout_orders = set(df_payout['Bestellnummer_Match'].dropna())
+                payout_orders.discard('')
+                
+                inv_orders = set(df_inv['Bestellnummer_Match'].dropna())
+                inv_orders.discard('')
+                
+                paid_orders = inv_orders.intersection(payout_orders)
+                unpaid_orders = inv_orders - payout_orders
+                
+                paid_count = len(paid_orders)
+                unpaid_count = len(unpaid_orders)
+                
+                st.markdown("---")
+                st.subheader("⚖️ Soll-Ist Statusübersicht")
+                m1, m2, m3, m4, m5 = st.columns(5)
+                m1.metric("Rechnung Positionen", len(inv_orders))
+                m2.metric("✅ Ausbezahlt", f"{paid_count} Pos.")
+                m3.metric("⏳ Noch Offen", f"{unpaid_count} Pos.")
+                m4.metric("💰 eBay Erlös Brutto", f"{df_payout['eBay_Brutto'].sum():,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
+                m5.metric("🤝 Auszahlung Partner Brutto", f"{df_payout['Auszahlung_Partner_Brutto'].sum():,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
+                
+                if unpaid_count > 0:
+                    missing_mask = df_inv['Bestellnummer_Match'].isin(unpaid_orders)
+                    df_missing = df_inv[missing_mask]
+                    
+                    with st.expander(f"🔴 Liste der {unpaid_count} noch nicht ausgezahlten Positionen anzeigen"):
+                        st.dataframe(df_missing, use_container_width=True)
 
+        # ---------------------------------------------------------
+        # BLOCK 1: GESAMTABRECHNUNG FÜR EVELYN (NUR GRUPPE B)
+        # ---------------------------------------------------------
         st.markdown("---")
-        st.subheader("📊 1. Gesamtabrechnung für Evelyn (Intern mit allen Details & Provisionen)")
-        
-        summary = df_payout.groupby('SKU_Prefix').agg(
-            Anzahl_Transaktionen=('SKU', 'count'),
-            eBay_Brutto_Gesamt=('eBay_Brutto', 'sum'),
-            Provision_Gesamt=('Provision_EUR', 'sum'),
-            Partner_Auszahlung_Brutto=('Auszahlung_Partner_Brutto', 'sum')
-        ).reset_index()
-        
-        total_row = pd.DataFrame([{
-            'SKU_Prefix': 'GESAMT',
-            'Anzahl_Transaktionen': summary['Anzahl_Transaktionen'].sum(),
-            'eBay_Brutto_Gesamt': summary['eBay_Brutto_Gesamt'].sum(),
-            'Provision_Gesamt': summary['Provision_Gesamt'].sum(),
-            'Partner_Auszahlung_Brutto': summary['Partner_Auszahlung_Brutto'].sum()
-        }])
-        
-        summary_with_total = pd.concat([summary, total_row], ignore_index=True)
-        
-        st.dataframe(
-            summary_with_total.style.format({
-                'eBay_Brutto_Gesamt': '{:.2f} €',
-                'Provision_Gesamt': '{:.2f} €',
-                'Partner_Auszahlung_Brutto': '{:.2f} €'
-            }),
-            use_container_width=True
-        )
+        st.subheader("📊 1. Gruppe B – Gesamtabrechnung für Evelyn (Über DICH)")
+        st.info("ℹ️ **Verwendungszweck:** Diese Rechnung nutzt du für die Abrechnung gegenüber Evelyn. Sie enthält NUR die Umsätze aus Gruppe B, die über dich verteilt werden. Evelyn behält 0,5 % Provision.")
 
-        # Interner Download für Evelyn (enthält Deine Provision)
-        export_evelyn_details = df_payout[[
-            'Datum der Transaktionserstellung',
-            'Bestellnummer',
-            'SKU_Prefix',
-            'SKU',
-            'Angebotstitel',
-            'eBay_Brutto',
-            'VK_Netto',
-            'Rabatt_Prozent',
-            'Provision_EUR',
-            'Auszahlung_Partner_Brutto'
-        ]].rename(columns={
-            'SKU_Prefix': 'Partner',
-            'eBay_Brutto': 'eBay Erlös Brutto (€)',
-            'VK_Netto': 'VK Netto (€)',
-            'Rabatt_Prozent': 'Provision (%)',
-            'Provision_EUR': 'Deine Provision (€)',
-            'Auszahlung_Partner_Brutto': 'Auszahlung an Partner Brutto (€)'
-        })
+        df_grp_b = df_payout[df_payout['Gruppe'] == 'Gruppe B (Über Dich)'].copy()
 
-        buffer_evelyn = io.BytesIO()
-        with pd.ExcelWriter(buffer_evelyn, engine='openpyxl') as writer:
-            summary_with_total.to_excel(writer, index=False, sheet_name='Übersicht_Partner')
-            export_evelyn_details.to_excel(writer, index=False, sheet_name='Alle_Positionen')
+        if not df_grp_b.empty:
+            summary_b = df_grp_b.groupby('SKU_Prefix').agg(
+                Anzahl_Transaktionen=('SKU', 'count'),
+                eBay_Brutto_Gesamt=('eBay_Brutto', 'sum'),
+                Evelyn_Provision_0_5=('Evelyn_Prov_EUR', 'sum'),
+                Auszahlung_von_Evelyn_an_Dich=('Auszahlung_Evelyn_Brutto', 'sum'),
+                Deine_Marge_3_0=('Deine_Marge_EUR', 'sum')
+            ).reset_index()
             
-        st.download_button(
-            label="📥 Gesamtabrechnung für Evelyn herunterladen (Excel)",
-            data=buffer_evelyn.getvalue(),
-            file_name="Gesamtabrechnung_Evelyn_Alle_Partner.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary"
-        )
+            total_row_b = pd.DataFrame([{
+                'SKU_Prefix': 'GESAMTSUMME (Gruppe B)',
+                'Anzahl_Transaktionen': summary_b['Anzahl_Transaktionen'].sum(),
+                'eBay_Brutto_Gesamt': summary_b['eBay_Brutto_Gesamt'].sum(),
+                'Evelyn_Provision_0_5': summary_b['Evelyn_Provision_0_5'].sum(),
+                'Auszahlung_von_Evelyn_an_Dich': summary_b['Auszahlung_von_Evelyn_an_Dich'].sum(),
+                'Deine_Marge_3_0': summary_b['Deine_Marge_3_0'].sum()
+            }])
+            
+            summary_b_final = pd.concat([summary_b, total_row_b], ignore_index=True)
+            
+            st.dataframe(
+                summary_b_final.style.format({
+                    'eBay_Brutto_Gesamt': '{:.2f} €',
+                    'Evelyn_Provision_0_5': '{:.2f} €',
+                    'Auszahlung_von_Evelyn_an_Dich': '{:.2f} €',
+                    'Deine_Marge_3_0': '{:.2f} €'
+                }),
+                use_container_width=True
+            )
 
+            # Excel-Export für Evelyn
+            export_evelyn_b_details = df_grp_b[[
+                'Datum der Transaktionserstellung',
+                'Bestellnummer',
+                'SKU_Prefix',
+                'SKU',
+                'Angebotstitel',
+                'eBay_Brutto',
+                'Evelyn_Prov_EUR',
+                'Auszahlung_Evelyn_Brutto'
+            ]].rename(columns={
+                'SKU_Prefix': 'Partner',
+                'eBay_Brutto': 'eBay Erlös Brutto (€)',
+                'Evelyn_Prov_EUR': 'Evelyn Provision 0,5% (€)',
+                'Auszahlung_Evelyn_Brutto': 'Auszahlungsbetrag von Evelyn (€)'
+            })
+
+            buffer_evelyn_b = io.BytesIO()
+            with pd.ExcelWriter(buffer_evelyn_b, engine='openpyxl') as writer:
+                summary_b_final.to_excel(writer, index=False, sheet_name='Übersicht_Gruppe_B')
+                export_evelyn_b_details.to_excel(writer, index=False, sheet_name='Alle_Positionen_Gruppe_B')
+                
+            st.download_button(
+                label="📥 Gesamtabrechnung Gruppe B für Evelyn herunterladen (Excel)",
+                data=buffer_evelyn_b.getvalue(),
+                file_name="Gesamtabrechnung_GruppeB_fuer_Evelyn.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary"
+            )
+        else:
+            st.write("Keine Positionen für Gruppe B in den aktuellen Payouts gefunden.")
+
+        # ---------------------------------------------------------
+        # BLOCK 2: GUTSCHRIFTEN & ERSTATTUNGEN (OPTION B)
+        # ---------------------------------------------------------
         st.markdown("---")
-        st.subheader("🔍 2. Einzelabrechnung pro Partner (Für Kunden / Partner-Export)")
-        
-        valid_skus = [s for s in summary['SKU_Prefix'].unique() if s not in ['FEHLT', '--', '']]
-        if not valid_skus:
-            valid_skus = [s for s in summary['SKU_Prefix'].unique() if s != 'FEHLT']
+        st.subheader("🔻 2. Gutschriften & Erstattungen (Für Lexoffice-Gutschriften)")
+        st.info("ℹ️ **Verwendungszweck:** Hier sind alle negativen Beträge (z. B. Retouren oder Versandgutschriften wie bei 001) aufgeführt. Nutze diese Übersicht, um in Lexoffice saubere Einzel-Gutschriften zu erstellen.")
+
+        df_refunds = df_payout[df_payout['eBay_Brutto'] < 0].copy()
+
+        if not df_refunds.empty:
+            refund_display = df_refunds[[
+                'Datum der Transaktionserstellung',
+                'Bestellnummer',
+                'SKU_Prefix',
+                'SKU',
+                'Angebotstitel',
+                'eBay_Brutto',
+                'Partner_Prov_EUR',
+                'Auszahlung_Partner_Brutto'
+            ]].rename(columns={
+                'Datum der Transaktionserstellung': 'Datum',
+                'SKU_Prefix': 'Partner',
+                'eBay_Brutto': 'Gutschrift Brutto (€)',
+                'Partner_Prov_EUR': 'Provision (€)',
+                'Auszahlung_Partner_Brutto': 'Gutschrift Netto/Auszahlung (€)'
+            })
             
-        selected_sku = st.selectbox("Partner / Kürzel auswählen:", valid_skus)
+            st.dataframe(
+                refund_display.style.format({
+                    'Gutschrift Brutto (€)': '{:.2f} €',
+                    'Provision (€)': '{:.2f} €',
+                    'Gutschrift Netto/Auszahlung (€)': '{:.2f} €'
+                }),
+                use_container_width=True
+            )
+        else:
+            st.success("✅ Keine negativen Gutschriften / Erstattungen in den aktuellen Payouts enthalten.")
+
+        # ---------------------------------------------------------
+        # BLOCK 3: EINZELABRECHNUNGEN PRO PARTNER
+        # ---------------------------------------------------------
+        st.markdown("---")
+        st.subheader("🔍 3. Einzelabrechnung pro Partner")
+        st.info("ℹ️ **Hinweis:** Gruppe A Partner (PP, BA, MK, 001) rechnen mit 0,5 % direkt mit Evelyn ab. Gruppe B Partner rechnen mit 3,5 % gegenüber dir ab (deine 3,0 % Marge wird ihnen nicht angezeigt).")
+
+        all_partners = [p for p in df_payout['SKU_Prefix'].unique() if p not in ['OHNE_SKU', 'FEHLT', '--', '']]
+        if not all_partners:
+            all_partners = list(df_payout['SKU_Prefix'].unique())
+            
+        selected_partner = st.selectbox("Partner / Kürzel auswählen:", all_partners)
         
-        filtered_p = df_payout[df_payout['SKU_Prefix'] == selected_sku].copy()
+        filtered_p = df_payout[df_payout['SKU_Prefix'] == selected_partner].copy()
+        is_grp_a = selected_partner in GROUP_A_PREFIXES
         
-        # Partner-Ansicht: OHNE "Deine Provision (€)"
         partner_display = filtered_p[[
             'Datum der Transaktionserstellung',
             'Bestellnummer',
@@ -172,27 +279,29 @@ if uploaded_payout:
             'SKU',
             'Angebotstitel',
             'eBay_Brutto',
-            'VK_Netto',
-            'Rabatt_Prozent',
+            'Partner_Prov_Satz',
             'Auszahlung_Partner_Brutto'
-        ]].rename(columns={
+        ]].copy()
+        
+        partner_display['Provision (%)'] = (partner_display['Partner_Prov_Satz'] * 100).round(2)
+        
+        partner_display = partner_display.rename(columns={
             'Datum der Transaktionserstellung': 'Datum',
             'SKU_Prefix': 'Partner',
             'eBay_Brutto': 'eBay Erlös Brutto (€)',
-            'VK_Netto': 'VK Netto (€)',
-            'Rabatt_Prozent': 'Provision (%)',
             'Auszahlung_Partner_Brutto': 'Auszahlungsbetrag Brutto (€)'
-        })
+        })[[
+            'Datum', 'Bestellnummer', 'Partner', 'SKU', 'Angebotstitel', 
+            'eBay Erlös Brutto (€)', 'Provision (%)', 'Auszahlungsbetrag Brutto (€)'
+        ]]
         
-        # Summenzeile unten drunter
         sum_row_p = pd.DataFrame([{
             'Datum': 'GESAMTSUMME',
             'Bestellnummer': '',
-            'Partner': selected_sku,
+            'Partner': selected_partner,
             'SKU': '',
             'Angebotstitel': '',
             'eBay Erlös Brutto (€)': partner_display['eBay Erlös Brutto (€)'].sum(),
-            'VK Netto (€)': partner_display['VK Netto (€)'].sum(),
             'Provision (%)': partner_display['Provision (%)'].iloc[0] if len(partner_display) > 0 else 0,
             'Auszahlungsbetrag Brutto (€)': partner_display['Auszahlungsbetrag Brutto (€)'].sum()
         }])
@@ -202,7 +311,6 @@ if uploaded_payout:
         st.dataframe(
             partner_final.style.format({
                 'eBay Erlös Brutto (€)': '{:.2f} €',
-                'VK Netto (€)': '{:.2f} €',
                 'Auszahlungsbetrag Brutto (€)': '{:.2f} €'
             }, na_rep=''),
             use_container_width=True
@@ -210,12 +318,13 @@ if uploaded_payout:
         
         buffer_partner_excel = io.BytesIO()
         with pd.ExcelWriter(buffer_partner_excel, engine='openpyxl') as writer:
-            partner_final.to_excel(writer, index=False, sheet_name=f'Abrechnung_{selected_sku}')
+            partner_final.to_excel(writer, index=False, sheet_name=f'Abrechnung_{selected_partner}')
             
+        grp_label = "Gruppe A (Direktabrechnung Evelyn)" if is_grp_a else "Gruppe B (Partner-Abrechnung an Dich)"
         st.download_button(
-            label=f"📥 Excel-Abrechnung für Partner '{selected_sku}' herunterladen",
+            label=f"📥 Excel-Abrechnung für Partner '{selected_partner}' [{grp_label}] herunterladen",
             data=buffer_partner_excel.getvalue(),
-            file_name=f"Abrechnung_Partner_{selected_sku}.xlsx",
+            file_name=f"Abrechnung_Partner_{selected_partner}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
