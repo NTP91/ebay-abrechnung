@@ -1,280 +1,116 @@
-from __future__ import annotations
-
-import csv
-import io
-import re
-import unicodedata
-from dataclasses import dataclass
-from datetime import date, datetime
-from typing import BinaryIO
-from zoneinfo import ZoneInfo
-
+import os
+import glob
 import pandas as pd
-import requests
 
-DIRECT_PREFIXES = ("PP", "BA", "MK", "001")
-BASE_URL = "https://api.lexware.io/v1"
-ALIASES = {
-    "sku": ("sku", "artikelnummer", "artikel nr", "item id", "custom label", "bestandseinheit"),
-    "amount": ("netto", "net amount", "nettobetrag", "betrag netto", "netto umsatz", "auszahlungsbetrag"),
-    "sku": ("custom label", "sku", "customlabel", "artikelnummer"),
-    "amount": ("net amount", "netto_betrag", "netto", "amount", "betrag", "auszahlung"),
-    "order": ("bestellnummer", "order number", "order id", "bestell nr", "auftragsnummer"),
-}
+ORDERS_DB_PATH = "Master_Orders.csv"
 
-HEADER_KEYWORDS = ("custom label", "sku", "net amount", "artikelnummer")
-
-
-@dataclass(frozen=True)
-class ParseResult:
-    frame: pd.DataFrame
-    header_row: int
-    delimiter: str
-    encoding: str
-    skipped_rows: int
-
-
-class LexwareError(RuntimeError):
-    pass
-
-
-def _norm(value: object) -> str:
-    text = unicodedata.normalize("NFKD", str(value)).encode("ascii", "ignore").decode()
-    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
-
-
-def _decode(raw: bytes) -> tuple[str, str]:
-    for encoding in ("utf-8-sig", "utf-16", "cp1252", "latin1"):
-        try:
-            return raw.decode(encoding), encoding
-        except UnicodeDecodeError:
-            pass
-    return raw.decode("utf-8", errors="replace"), "utf-8"
-
-
-def _delimiter(lines: list[str]) -> str:
-    sample = "\n".join(lines[:30])
-    try:
-        return csv.Sniffer().sniff(sample, delimiters=";,\t|").delimiter
-    except csv.Error:
-        counts = {char: sample.count(char) for char in (";", ",", "\t", "|")}
-        return max(counts, key=counts.get)
-
-
-def _header_score(cells: list[str]) -> int:
-    normalized = [_norm(cell) for cell in cells]
-    exact = {alias for aliases in ALIASES.values() for alias in aliases}
-    return sum(3 for cell in normalized if cell in exact) + sum(
-        1 for cell in normalized if any(word in cell for word in ("sku", "bestell", "order", "netto", "amount"))
-    )
-
-
-def _find_header_row(lines: list[str], delimiter: str) -> int:
-    """Return the first delimited row containing a known eBay column keyword."""
-    for index, line in enumerate(lines[:100]):
-        try:
-            cells = next(csv.reader([line], delimiter=delimiter))
-        except csv.Error:
+def save_and_merge_order_reports(uploaded_files, upload_folder="uploads"):
+    """
+    Nimmt CSV & XLSX Bestellberichte entgegen, zieht SKU und Artikelname heraus
+    und baut/aktualisiert die Master_Orders.csv.
+    """
+    all_order_data = []
+    
+    for file in uploaded_files:
+        filepath = os.path.join(upload_folder, file.name)
+        with open(filepath, "wb") as f:
+            f.write(file.getbuffer())
+            
+        if file.name.endswith('.xlsx') or file.name.endswith('.xls'):
+            df = pd.read_excel(filepath, dtype=str)
+        elif file.name.endswith('.csv'):
+            df = pd.read_csv(filepath, sep=None, engine='python', dtype=str)
+        else:
             continue
-        normalized = [_norm(cell) for cell in cells]
-        if any(keyword in cell for cell in normalized for keyword in HEADER_KEYWORDS):
-            return index
-    return 0
+            
+        df.columns = [str(c).strip() for c in df.columns]
+        all_order_data.append(df)
+        
+    if all_order_data:
+        merged_orders = pd.concat(all_order_data, ignore_index=True)
+        merged_orders.drop_duplicates(inplace=True)
+        merged_orders.to_csv(ORDERS_DB_PATH, sep=';', index=False, encoding='utf-8-sig')
+        return merged_orders
+    elif os.path.exists(ORDERS_DB_PATH):
+        return pd.read_csv(ORDERS_DB_PATH, sep=';', dtype=str)
+        
+    return pd.DataFrame()
 
 
-def _normalize_columns(frame: pd.DataFrame) -> pd.DataFrame:
-    frame.columns = [str(column).strip().lower() for column in frame.columns]
-    return frame
+def build_transaction_overview(master_payout_path="Master_Payouts.csv", master_orders_path="Master_Orders.csv"):
+    """
+    Verknüpft Payouts mit den Bestellberichten über die Bestellnummer,
+    um SKU, Artikelname und Netto-Beträge zuzuordnen.
+    """
+    if not os.path.exists(master_payout_path):
+        return pd.DataFrame(), 0, 0.0
 
+    payouts = pd.read_csv(master_payout_path, sep=';', dtype=str)
+    if payouts.empty:
+        return pd.DataFrame(), 0, 0.0
 
-def read_csv_robust(file: BinaryIO | bytes) -> ParseResult:
-    raw = file if isinstance(file, bytes) else file.read()
-    text, encoding = _decode(raw)
-    lines = text.splitlines()
-    delimiter = _delimiter(lines)
-    scored = []
-    for index, line in enumerate(lines[:80]):
-    candidates = []
-    for delimiter in (";", ","):
-        header_row = _find_header_row(lines, delimiter)
+    orders = pd.DataFrame()
+    if os.path.exists(master_orders_path):
         try:
-            cells = next(csv.reader([line], delimiter=delimiter))
-        except csv.Error:
-            frame = pd.read_csv(
-                io.StringIO(text), sep=delimiter, skiprows=header_row, header=0,
-                dtype=str, on_bad_lines="skip", engine="python", keep_default_na=False,
-            )
-        except (csv.Error, pd.errors.ParserError):
-            continue
-        scored.append((_header_score(cells), len(cells), index))
-    header_row = max(scored, default=(0, 0, 0))[2]
-    frame = pd.read_csv(
-        io.StringIO(text), sep=delimiter, header=header_row, dtype=str,
-        on_bad_lines="skip", engine="python", keep_default_na=False,
-    )
-    frame.columns = [str(column).strip() for column in frame.columns]
-    frame = frame.dropna(how="all").loc[:, ~frame.columns.str.startswith("Unnamed")]
-        frame = _normalize_columns(frame)
-        frame = frame.dropna(how="all").loc[:, ~frame.columns.str.startswith("unnamed")]
-        # Prefer the parse that recognizes both business columns, then the one
-        # with more meaningful columns and data rows.
-        recognized = int(detect_column(frame, "sku") is not None) + int(detect_column(frame, "amount") is not None)
-        candidates.append(((recognized, len(frame.columns), len(frame)), frame, header_row, delimiter))
-    if not candidates:
-        raise ValueError("Die CSV-Datei konnte weder mit Semikolon noch mit Komma gelesen werden.")
-    _, frame, header_row, delimiter = max(candidates, key=lambda candidate: candidate[0])
-    expected_lines = max(0, len(lines) - header_row - 1)
-    return ParseResult(frame, header_row, delimiter, encoding, max(0, expected_lines - len(frame)))
+            orders = pd.read_csv(master_orders_path, sep=';', dtype=str)
+        except Exception:
+            orders = pd.DataFrame()
 
+    # Mapping-Schilder aufbauen
+    order_map = {}
+    if not orders.empty:
+        # Finde Spaltennamen flexibel
+        order_id_col = next((c for c in ['Bestellnummer', 'Order ID', 'Verkaufsnummer'] if c in orders.columns), None)
+        sku_col = next((c for c in ['SKU', 'Angebotsnummer', 'Custom Label'] if c in orders.columns), None)
+        title_col = next((c for c in ['Artikelname', 'Artikeltitel', 'Item Title'] if c in orders.columns), None)
 
-def read_xlsx_robust(file: BinaryIO | bytes) -> ParseResult:
-    raw = file if isinstance(file, bytes) else file.read()
-    preview = pd.read_excel(io.BytesIO(raw), header=None, dtype=str, keep_default_na=False)
-    if preview.empty:
-        return ParseResult(pd.DataFrame(), 0, "Excel", "binary", 0)
-    candidates = []
-    for index, row in preview.head(80).iterrows():
-        cells = [str(value) for value in row.tolist() if str(value).strip()]
-        candidates.append((_header_score(cells), len(cells), int(index)))
-    header_row = max(candidates, default=(0, 0, 0))[2]
-    header = [str(value).strip() for value in preview.iloc[header_row].tolist()]
-    header = [str(value).strip().lower() for value in preview.iloc[header_row].tolist()]
-    frame = preview.iloc[header_row + 1:].copy()
-    frame.columns = header
-    frame = frame.dropna(how="all").loc[:, ~frame.columns.str.startswith("Unnamed")]
-    frame = frame.dropna(how="all").loc[:, ~frame.columns.str.startswith("unnamed")]
-    frame = frame.loc[:, [bool(str(column).strip()) for column in frame.columns]]
-    return ParseResult(frame.reset_index(drop=True), header_row, "Excel", "binary", 0)
+        if order_id_col:
+            for _, row in orders.iterrows():
+                oid = str(row[order_id_col]).strip()
+                if oid and oid != 'nan':
+                    order_map[oid] = {
+                        'SKU': str(row[sku_col]).strip() if sku_col and pd.notna(row[sku_col]) else 'NB /',
+                        'Artikelname': str(row[title_col]).strip() if title_col and pd.notna(row[title_col]) else 'NB / Kein Titel gefunden'
+                    }
 
+    result_rows = []
+    total_netto = 0.0
 
-def read_upload(file: BinaryIO | bytes, filename: str) -> ParseResult:
-    return read_xlsx_robust(file) if filename.lower().endswith((".xlsx", ".xlsm")) else read_csv_robust(file)
+    for _, row in payouts.iterrows():
+        bestellnr = str(row.get('Bestellnummer', '')).strip()
+        
+        # Mapping anwenden
+        if bestellnr in order_map:
+            sku = order_map[bestellnr]['SKU']
+            artikelname = order_map[bestellnr]['Artikelname']
+        else:
+            sku = 'NB /'
+            artikelname = 'NB / Kein Titel gefunden'
 
+        # Stückzahl ermitteln
+        stueck = str(row.get('Menge', row.get('Stückzahl', '1'))).strip()
+        if not stueck or stueck == 'nan':
+            stueck = '1'
 
-def combine_uploaded_frames(frames: list[pd.DataFrame]) -> tuple[pd.DataFrame, int]:
-    """Combine payout exports and remove exact duplicate transaction rows."""
-    if not frames:
-        return pd.DataFrame(), 0
-    combined = pd.concat(frames, ignore_index=True, sort=False)
-    before = len(combined)
-    combined = combined.drop_duplicates(ignore_index=True)
-    return combined, before - len(combined)
+        # Betrag / Netto ermitteln
+        betrag_raw = str(row.get('Nettobetrag', row.get('Betrag', '0'))).replace(',', '.')
+        try:
+            betrag_val = float(betrag_raw)
+        except ValueError:
+            betrag_val = 0.0
 
+        total_netto += betrag_val
 
-def detect_column(frame: pd.DataFrame, kind: str) -> str | None:
-    aliases = ALIASES[kind]
-    aliases = tuple(_norm(alias) for alias in ALIASES[kind])
-    normalized = {_norm(column): column for column in frame.columns}
-    for alias in aliases:
-        if alias in normalized:
-            return normalized[alias]
-    for norm, original in normalized.items():
-        if any(alias in norm for alias in aliases):
-            return original
-    return None
+        datum = str(row.get('Datum der Transaktionserstellung', '')).strip()
 
+        result_rows.append({
+            'Bestellnummer': bestellnr,
+            'SKU': sku,
+            'Artikelname': artikelname,
+            'Stück': stueck,
+            'eBay_Netto': f"{betrag_val:.2f}".replace('.', ','),
+            'Datum der Transaktionserstellung': datum
+        })
 
-def parse_amount(value: object) -> float:
-    text = str(value).strip().replace("€", "").replace("EUR", "").replace(" ", "")
-    text = text.replace("−", "-").replace("'", "")
-    if "," in text and "." in text:
-        text = text.replace(".", "").replace(",", ".") if text.rfind(",") > text.rfind(".") else text.replace(",", "")
-    elif "," in text:
-        text = text.replace(".", "").replace(",", ".")
-    text = re.sub(r"[^0-9.\-]", "", text)
-    try:
-        return float(text)
-    except ValueError:
-        return float("nan")
-
-
-def prepare_transactions_detailed(
-    ebay: pd.DataFrame, sku_column: str, amount_column: str, order_column: str | None = None,
-    wahan: pd.DataFrame | None = None, wahan_order_column: str | None = None,
-    wahan_sku_column: str | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    work = pd.DataFrame({"SKU": ebay[sku_column].astype(str).str.strip(), "Netto-Umsatz": ebay[amount_column].map(parse_amount)})
-    if order_column:
-        work["Bestellnummer"] = ebay[order_column].astype(str).str.strip()
-    if wahan is not None and order_column and wahan_order_column and wahan_sku_column:
-        lookup = wahan[[wahan_order_column, wahan_sku_column]].copy().drop_duplicates(wahan_order_column)
-        lookup.columns = ["Bestellnummer", "Wahan-SKU"]
-        lookup["Bestellnummer"] = lookup["Bestellnummer"].astype(str).str.strip()
-        work = work.merge(lookup, on="Bestellnummer", how="left")
-        blank = work["SKU"].isin(("", "nan", "None"))
-        work.loc[blank, "SKU"] = work.loc[blank, "Wahan-SKU"]
-        work = work.drop(columns="Wahan-SKU")
-    missing_sku = work["SKU"].isin(("", "nan", "None"))
-    missing_amount = work["Netto-Umsatz"].isna()
-    invalid = missing_sku | missing_amount
-    work["Grund"] = ""
-    work.loc[missing_sku, "Grund"] = "SKU fehlt"
-    work.loc[missing_amount, "Grund"] = work.loc[missing_amount, "Grund"].map(
-        lambda value: f"{value}; Netto-Betrag ungültig" if value else "Netto-Betrag ungültig"
-    )
-    valid_columns = [column for column in work.columns if column != "Grund"]
-    return work.loc[~invalid, valid_columns].reset_index(drop=True), work.loc[invalid].reset_index(drop=True)
-
-
-def prepare_transactions(*args, **kwargs) -> tuple[pd.DataFrame, int]:
-    valid, unassigned = prepare_transactions_detailed(*args, **kwargs)
-    return valid, len(unassigned)
-
-
-def calculate_overviews(transactions: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    grouped = transactions.groupby("SKU", as_index=False)["Netto-Umsatz"].sum()
-    grouped["Gruppe"] = grouped["SKU"].str.upper().map(
-        lambda sku: "A – Direkt-Partner" if sku.startswith(DIRECT_PREFIXES) else "B – Evelyn Kukulan"
-    )
-    grouped["Provision/Rabatt 0,5 %"] = grouped["Netto-Umsatz"] * 0.005
-    grouped["Abrechnung nach 0,5 %"] = grouped["Netto-Umsatz"] * 0.995
-    grouped["Provision 3,5 %"] = grouped["Netto-Umsatz"] * 0.035
-    grouped["Abrechnung nach 3,5 %"] = grouped["Netto-Umsatz"] * 0.965
-    money = [column for column in grouped.columns if "%" in column or column == "Netto-Umsatz"]
-    grouped[money] = grouped[money].round(2)
-    return grouped[grouped["Gruppe"].str.startswith("A")].reset_index(drop=True), grouped[grouped["Gruppe"].str.startswith("B")].reset_index(drop=True)
-
-
-def csv_bytes(frame: pd.DataFrame) -> bytes:
-    return frame.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig")
-
-
-def _headers(api_key: str) -> dict[str, str]:
-    return {"Authorization": f"Bearer {api_key}", "Accept": "application/json", "Content-Type": "application/json"}
-
-
-def find_customer(api_key: str, customer_number: int = 16335) -> dict:
-    response = requests.get(f"{BASE_URL}/contacts", params={"number": customer_number, "customer": "true"}, headers=_headers(api_key), timeout=20)
-    if not response.ok:
-        raise LexwareError(f"Kontaktabfrage fehlgeschlagen ({response.status_code}): {response.text[:500]}")
-    contacts = response.json().get("content", [])
-    matches = [contact for contact in contacts if contact.get("roles", {}).get("customer", {}).get("number") == customer_number]
-    if len(matches) != 1:
-        raise LexwareError(f"Kundennummer {customer_number} wurde nicht eindeutig gefunden ({len(matches)} Treffer).")
-    return matches[0]
-
-
-def build_invoice_payload(group_b: pd.DataFrame, contact_id: str, invoice_date: date, tax_rate: float = 19.0) -> dict:
-    if group_b.empty:
-        raise LexwareError("Gruppe B enthält keine abrechenbaren Positionen.")
-    timestamp = datetime.combine(invoice_date, datetime.min.time(), tzinfo=ZoneInfo("Europe/Berlin")).isoformat(timespec="milliseconds")
-    items = [{
-        "type": "custom", "name": f"eBay-Abrechnung SKU {row['SKU']}", "quantity": 1,
-        "unitName": "Stück", "unitPrice": {"currency": "EUR", "netAmount": round(float(row["Netto-Umsatz"]), 2), "taxRatePercentage": tax_rate},
-        "discountPercentage": 0.5,
-    } for _, row in group_b.iterrows()]
-    return {
-        "voucherDate": timestamp, "address": {"contactId": contact_id}, "lineItems": items,
-        "totalPrice": {"currency": "EUR"}, "taxConditions": {"taxType": "net"},
-        "paymentConditions": {"paymentTermLabel": "Zahlbar sofort", "paymentTermDuration": 0},
-        "shippingConditions": {"shippingDate": timestamp, "shippingType": "service"},
-        "title": "Rechnung", "introduction": "eBay-Abrechnung gemäß beigefügter Übersicht.",
-        "remark": "Diese Rechnung wurde als Entwurf über das eBay Payment Tool erstellt.",
-    }
-
-
-def create_draft(api_key: str, payload: dict) -> dict:
-    response = requests.post(f"{BASE_URL}/invoices", headers=_headers(api_key), json=payload, timeout=30)
-    if not response.ok:
-        raise LexwareError(f"Rechnungsentwurf konnte nicht erstellt werden ({response.status_code}): {response.text[:1000]}")
-    return response.json()
+    result_df = pd.DataFrame(result_rows)
+    return result_df, len(orders), total_netto
