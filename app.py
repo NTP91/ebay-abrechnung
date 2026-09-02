@@ -176,6 +176,9 @@ if uploaded_payout:
             buffer_evelyn_a = io.BytesIO()
             with pd.ExcelWriter(buffer_evelyn_a, engine='openpyxl') as writer:
                 summary_a_display.to_excel(writer, index=False, sheet_name='Übersicht_Gruppe_A')
+                # Trennung Verkäufe & Gutschriften für Evelyn
+                df_grp_a[df_grp_a['eBay_Brutto'] >= 0].to_excel(writer, index=False, sheet_name='Verkäufe')
+                df_grp_a[df_grp_a['eBay_Brutto'] < 0].to_excel(writer, index=False, sheet_name='Gutschriften')
 
             st.download_button(
                 label="📥 Übersicht Gruppe A für Evelyn herunterladen (Excel)",
@@ -233,6 +236,8 @@ if uploaded_payout:
             buffer_evelyn_b = io.BytesIO()
             with pd.ExcelWriter(buffer_evelyn_b, engine='openpyxl') as writer:
                 summary_b_display.to_excel(writer, index=False, sheet_name='Übersicht_Gruppe_B')
+                df_grp_b[df_grp_b['eBay_Brutto'] >= 0].to_excel(writer, index=False, sheet_name='Verkäufe')
+                df_grp_b[df_grp_b['eBay_Brutto'] < 0].to_excel(writer, index=False, sheet_name='Gutschriften')
                 
             st.download_button(
                 label="📥 Gesamtabrechnung Gruppe B für Evelyn herunterladen (Excel)",
@@ -243,7 +248,7 @@ if uploaded_payout:
             )
 
         # ---------------------------------------------------------
-        # BLOCK 3: GUTSCHRIFTEN & ERSTATTUNGEN
+        # BLOCK 3: GUTSCHRIFTEN & ERSTATTUNGEN (ÜBERBLICK)
         # ---------------------------------------------------------
         st.markdown("---")
         st.subheader("🔻 3. Gutschriften, Erstattungen & Gebühren (Für Lexoffice)")
@@ -291,61 +296,70 @@ if uploaded_payout:
             )
 
         # ---------------------------------------------------------
-        # BLOCK 4: EINZELABRECHNUNGEN PRO PARTNER (3,5% für Gruppe B)
+        # BLOCK 4: EINZELABRECHNUNGEN PRO PARTNER (MIT MULTI-TAB EXPORT)
         # ---------------------------------------------------------
         st.markdown("---")
-        st.subheader("🔍 4. Einzelabrechnung pro Partner (3,5 % Provision für Gruppe B)")
+        st.subheader("🔍 4. Einzelabrechnung pro Partner")
 
         all_partners = [p for p in df_payout['SKU_Prefix'].unique() if p not in ['OHNE_SKU', 'FEHLT', '--', '']]
         if all_partners:
             selected_partner = st.selectbox("Partner / Kürzel auswählen:", all_partners)
             filtered_p = df_payout[df_payout['SKU_Prefix'] == selected_partner].copy()
             
-            partner_display = filtered_p[[
-                'Datum der Transaktionserstellung',
-                'Bestellnummer',
-                'SKU_Prefix',
-                'SKU',
-                'Angebotstitel',
-                'eBay_Brutto',
-                'Partner_Prov_EUR',
-                'Auszahlung_Partner_Brutto'
-            ]].rename(columns={
-                'Datum der Transaktionserstellung': 'Datum',
-                'SKU_Prefix': 'Partner',
-                'eBay_Brutto': 'Erlös Brutto (€)',
-                'Partner_Prov_EUR': 'Provision (€)',
-                'Auszahlung_Partner_Brutto': 'Auszahlungsbetrag Netto (€)'
-            })
+            # Aufteilung in Verkäufe und Gutschriften
+            df_sales = filtered_p[filtered_p['eBay_Brutto'] >= 0].copy()
+            df_retouren = filtered_p[filtered_p['eBay_Brutto'] < 0].copy()
             
-            sum_row_p = pd.DataFrame([{
-                'Datum': 'GESAMTSUMME',
-                'Bestellnummer': '',
-                'Partner': selected_partner,
-                'SKU': '',
-                'Angebotstitel': '',
-                'Erlös Brutto (€)': partner_display['Erlös Brutto (€)'].sum(),
-                'Provision (€)': partner_display['Provision (€)'].sum(),
-                'Auszahlungsbetrag Netto (€)': partner_display['Auszahlungsbetrag Netto (€)'].sum()
-            }])
-            
-            partner_final = pd.concat([partner_display, sum_row_p], ignore_index=True)
-            
-            st.dataframe(
-                partner_final.style.format({
-                    'Erlös Brutto (€)': '{:.2f} €',
-                    'Provision (€)': '{:.2f} €',
-                    'Auszahlungsbetrag Netto (€)': '{:.2f} €'
-                }, na_rep=''),
-                use_container_width=True
-            )
-            
+            # --- TABELLE 1: VERKÄUFE ---
+            st.markdown(f"#### 🛍️ Verkäufe ({len(df_sales)} Positionen)")
+            if not df_sales.empty:
+                partner_sales = df_sales[[
+                    'Datum der Transaktionserstellung', 'Bestellnummer', 'SKU_Prefix', 'SKU', 'Angebotstitel',
+                    'eBay_Brutto', 'Partner_Prov_EUR', 'Auszahlung_Partner_Brutto'
+                ]].rename(columns={
+                    'Datum der Transaktionserstellung': 'Datum', 'SKU_Prefix': 'Partner',
+                    'eBay_Brutto': 'Erlös Brutto (€)', 'Partner_Prov_EUR': 'Provision (€)', 'Auszahlung_Partner_Brutto': 'Auszahlungsbetrag Netto (€)'
+                })
+                sum_sales = pd.DataFrame([{
+                    'Datum': 'GESAMTSUMME VERKÄUFE', 'Bestellnummer': '', 'Partner': selected_partner, 'SKU': '', 'Angebotstitel': '',
+                    'Erlös Brutto (€)': partner_sales['Erlös Brutto (€)'].sum(),
+                    'Provision (€)': partner_sales['Provision (€)'].sum(),
+                    'Auszahlungsbetrag Netto (€)': partner_sales['Auszahlungsbetrag Netto (€)'].sum()
+                }])
+                final_sales = pd.concat([partner_sales, sum_sales], ignore_index=True)
+                st.dataframe(final_sales.style.format({'Erlös Brutto (€)': '{:.2f} €', 'Provision (€)': '{:.2f} €', 'Auszahlungsbetrag Netto (€)': '{:.2f} €'}, na_rep=''), use_container_width=True)
+            else:
+                st.info("Keine Verkäufe im aktuellen Zeitraum.")
+
+            # --- TABELLE 2: GUTSCHRIFTEN & RETOUREN ---
+            if not df_retouren.empty:
+                st.markdown(f"#### 🔻 Gutschriften / Erstattungen ({len(df_retouren)} Positionen)")
+                partner_retouren = df_retouren[[
+                    'Datum der Transaktionserstellung', 'Bestellnummer', 'SKU_Prefix', 'SKU', 'Angebotstitel',
+                    'eBay_Brutto', 'Partner_Prov_EUR', 'Auszahlung_Partner_Brutto'
+                ]].rename(columns={
+                    'Datum der Transaktionserstellung': 'Datum', 'SKU_Prefix': 'Partner',
+                    'eBay_Brutto': 'Gutschrift Brutto (€)', 'Partner_Prov_EUR': 'Erstattete Provision (€)', 'Auszahlung_Partner_Brutto': 'Gutschrift Netto (€)'
+                })
+                sum_retouren = pd.DataFrame([{
+                    'Datum': 'GESAMTSUMME GUTSCHRIFTEN', 'Bestellnummer': '', 'Partner': selected_partner, 'SKU': '', 'Angebotstitel': '',
+                    'Gutschrift Brutto (€)': partner_retouren['Gutschrift Brutto (€)'].sum(),
+                    'Erstattete Provision (€)': partner_retouren['Erstattete Provision (€)'].sum(),
+                    'Gutschrift Netto (€)': partner_retouren['Gutschrift Netto (€)'].sum()
+                }])
+                final_retouren = pd.concat([partner_retouren, sum_retouren], ignore_index=True)
+                st.dataframe(final_retouren.style.format({'Gutschrift Brutto (€)': '{:.2f} €', 'Erstattete Provision (€)': '{:.2f} €', 'Gutschrift Netto (€)': '{:.2f} €'}, na_rep=''), use_container_width=True)
+
+            # EXPORT IN EXCEL MIT TAB-TRENNUNG
             buffer_partner_excel = io.BytesIO()
             with pd.ExcelWriter(buffer_partner_excel, engine='openpyxl') as writer:
-                partner_final.to_excel(writer, index=False, sheet_name=f'Abrechnung_{selected_partner}')
+                if not df_sales.empty:
+                    final_sales.to_excel(writer, index=False, sheet_name='Verkäufe')
+                if not df_retouren.empty:
+                    final_retouren.to_excel(writer, index=False, sheet_name='Gutschriften')
                 
             st.download_button(
-                label=f"📥 Excel-Abrechnung für Partner '{selected_partner}' herunterladen",
+                label=f"📥 Excel-Abrechnung für '{selected_partner}' herunterladen (inkl. Tabs)",
                 data=buffer_partner_excel.getvalue(),
                 file_name=f"Abrechnung_Partner_{selected_partner}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
