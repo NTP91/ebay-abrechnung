@@ -308,34 +308,86 @@ if ebay_files:
             
             display_a = pd.concat([summary_a, total_a], ignore_index=True)
             
-            # --- NEU: Partner-Auswahl für Einzelexport ---
-            partner_list = ["Alle Partner (Gesamt)"] + sorted(summary_a['SKU_Prefix'].unique().tolist())
-            selected_partner = st.selectbox("🎯 Partner auswählen für spezifische Evelyn-Abrechnung:", partner_list, key="sel_partner_a")
+            # --- SKUS / PARTNER DROPDOWN FÜR GRUPPE A ---
+            available_partners_a = sorted(summary_a['SKU_Prefix'].unique().tolist())
+            partner_options_a = ["Alle Partner (Gesamte Übersicht)"] + available_partners_a
             
-            if selected_partner != "Alle Partner (Gesamt)":
-                export_df_a = display_a[display_a['SKU_Prefix'] == selected_partner].copy()
-                file_label = f"Abrechnung_Evelyn_Partner_{selected_partner}.xlsx"
-            else:
-                export_df_a = display_a.copy()
-                file_label = "Uebersicht_Gruppe_A_Evelyn_Gesamt.xlsx"
-
-            formatted_a = export_df_a.copy()
-            for col in ['eBay_Brutto_Gesamt', 'Evelyn_Provision_0_5', 'Direkt_Auszahlung_Evelyn']:
-                formatted_a[col] = formatted_a[col].apply(lambda x: f"{x:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
-            
-            st.dataframe(formatted_a, use_container_width=True, hide_index=True)
-            
-            buffer_a = io.BytesIO()
-            with pd.ExcelWriter(buffer_a, engine='openpyxl') as writer:
-                export_df_a.to_excel(writer, index=False, sheet_name='Gruppe_A')
-            
-            st.download_button(
-                label=f"📥 Excel-Abrechnung für Evelyn herunterladen ({selected_partner})",
-                data=buffer_a.getvalue(),
-                file_name=file_label,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="dl_btn_a"
+            selected_partner_a = st.selectbox(
+                "🎯 Für welchen Partner möchtest du die Abrechnung/Excel generieren?", 
+                partner_options_a, 
+                key="sel_partner_a"
             )
+            
+            show_cols_a = [c for c in df.columns if c not in ['Gruppe', 'SKU_Prefix']]
+            
+            if selected_partner_a == "Alle Partner (Gesamte Übersicht)":
+                formatted_a = display_a.copy()
+                for col in ['eBay_Brutto_Gesamt', 'Evelyn_Provision_0_5', 'Direkt_Auszahlung_Evelyn']:
+                    formatted_a[col] = formatted_a[col].apply(lambda x: f"{x:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
+                
+                st.dataframe(formatted_a, use_container_width=True, hide_index=True)
+                
+                buffer_a = io.BytesIO()
+                with pd.ExcelWriter(buffer_a, engine='openpyxl') as writer:
+                    display_a.to_excel(writer, index=False, sheet_name='Uebersicht_Gruppe_A')
+                    df_a[show_cols_a + ['SKU_Prefix']].to_excel(writer, index=False, sheet_name='Alle_Transaktionen')
+                
+                st.download_button(
+                    label="📥 Gesamtübersicht Gruppe A (Excel) herunterladen",
+                    data=buffer_a.getvalue(),
+                    file_name="Uebersicht_Gruppe_A_Evelyn_Gesamt.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="dl_btn_a_all"
+                )
+            else:
+                # Einzelner Partner ausgewählt (z.B. BA, PP, MK, 001)
+                sub_a = df_a[df_a['SKU_Prefix'] == selected_partner_a]
+                sum_row_a = summary_a[summary_a['SKU_Prefix'] == selected_partner_a].iloc[0]
+                
+                n_a = sum_row_a['eBay_Brutto_Gesamt']
+                p_a = sum_row_a['Evelyn_Provision_0_5']
+                a_a = sum_row_a['Direkt_Auszahlung_Evelyn']
+                
+                st.markdown(f"### Partner / SKU-Prefix: **{selected_partner_a}**")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("eBay Brutto Gesamt", f"{n_a:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
+                c2.metric("Evelyn Provision (0,5 %)", f"{p_a:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
+                c3.metric("Direkt-Auszahlung Evelyn", f"{a_a:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
+                
+                pos_a = sub_a[sub_a['Net amount'] >= 0]
+                neg_a = sub_a[sub_a['Net amount'] < 0]
+
+                if not pos_a.empty:
+                    st.markdown('<div class="box-sales">🟢 Verkäufe & Einnahmen</div>', unsafe_allow_html=True)
+                    st.dataframe(pos_a[show_cols_a], use_container_width=True, hide_index=True)
+
+                if not neg_a.empty:
+                    st.markdown('<div class="box-refunds">🔴 Gutschriften, Retouren & Gebühren</div>', unsafe_allow_html=True)
+                    st.dataframe(neg_a[show_cols_a], use_container_width=True, hide_index=True)
+
+                # Excel für einzelnen Partner mit Übersicht + Transaktionen
+                buffer_partner = io.BytesIO()
+                with pd.ExcelWriter(buffer_partner, engine='openpyxl') as writer:
+                    # Tab 1: Abrechnungs-Zusammenfassung
+                    partner_summary_df = pd.DataFrame([{
+                        'Partner / SKU': selected_partner_a,
+                        'Anzahl Transaktionen': sum_row_a['Anzahl_Transaktionen'],
+                        'eBay Brutto Gesamt (€)': n_a,
+                        'Evelyn Provision 0.5% (€)': p_a,
+                        'Auszahlung von Evelyn (€)': a_a
+                    }])
+                    partner_summary_df.to_excel(writer, index=False, sheet_name='Abrechnung_Evelyn')
+                    # Tab 2: Alle Transaktionsdaten
+                    sub_a[show_cols_a].to_excel(writer, index=False, sheet_name='Transaktionen')
+
+                st.download_button(
+                    label=f"📥 Excel-Abrechnung für {selected_partner_a} (Evelyn) herunterladen",
+                    data=buffer_partner.getvalue(),
+                    file_name=f"Abrechnung_Evelyn_{selected_partner_a}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"dl_btn_a_{selected_partner_a}"
+                )
+
         else:
             st.write("Keine Datensätze für Gruppe A vorhanden.")
 
