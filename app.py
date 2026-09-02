@@ -70,7 +70,6 @@ def get_lexoffice_contact_id_exact(api_key, target_customer_number):
                 cust_num = str(contact.get('roles', {}).get('customer', {}).get('number', '')).strip()
                 supp_num = str(contact.get('roles', {}).get('vendor', {}).get('number', '')).strip()
                 
-                # Exakte Prüfung der Kundennummer
                 if cust_num == target_str or supp_num == target_str:
                     return contact['id']
             page += 1
@@ -136,7 +135,7 @@ if uploaded_payout:
         
         df_payout['eBay_Brutto'] = df_payout['Betrag abzügl. Kosten'].apply(parse_german_float)
         
-        # Nur positive Verkäufe berücksichtigen (Gutschriften ausschließen)
+        # Nur positive Verkäufe für die Abrechnung berücksichtigen
         df_payout = df_payout[df_payout['eBay_Brutto'] > 0].copy()
         
         df_payout['eBay_Netto'] = (df_payout['eBay_Brutto'] / 1.19).round(2)
@@ -148,15 +147,43 @@ if uploaded_payout:
             lambda p: 'Gruppe A (Direkt)' if p in GROUP_A_PREFIXES else ('Ohne Zuordnung' if p == 'OHNE_SKU' else 'Gruppe B (Über Dich)')
         )
 
+        st.markdown("---")
+        st.subheader("📊 Übersicht aller Transaktionen nach Gruppen")
+
+        # Tabs zur übersichtlichen Unterteilung aller Gruppen
+        tab_b, tab_a, tab_none, tab_all = st.tabs([
+            "Gruppe B (Über Dich)", 
+            "Gruppe A (Direkt)", 
+            "Ohne Zuordnung", 
+            "Alle Daten"
+        ])
+
         df_grp_b = df_payout[df_payout['Gruppe'] == 'Gruppe B (Über Dich)'].copy()
+        df_grp_a = df_payout[df_payout['Gruppe'] == 'Gruppe A (Direkt)'].copy()
+        df_grp_none = df_payout[df_payout['Gruppe'] == 'Ohne Zuordnung'].copy()
+
+        with tab_b:
+            st.write(f"**Anzahl:** {len(df_grp_b)} Positionen | **Summe Netto:** {df_grp_b['eBay_Netto'].sum():.2f} €")
+            st.dataframe(df_grp_b[['Bestellnummer', 'SKU', 'eBay_Netto', 'Datum der Transaktionserstellung']], use_container_width=True)
+
+        with tab_a:
+            st.write(f"**Anzahl:** {len(df_grp_a)} Positionen | **Summe Netto:** {df_grp_a['eBay_Netto'].sum():.2f} €")
+            st.dataframe(df_grp_a[['Bestellnummer', 'SKU', 'eBay_Netto', 'Datum der Transaktionserstellung']], use_container_width=True)
+
+        with tab_none:
+            st.write(f"**Anzahl:** {len(df_grp_none)} Positionen | **Summe Netto:** {df_grp_none['eBay_Netto'].sum():.2f} €")
+            st.dataframe(df_grp_none[['Bestellnummer', 'SKU', 'eBay_Netto', 'Datum der Transaktionserstellung']], use_container_width=True)
+
+        with tab_all:
+            st.write(f"**Gesamtanzahl:** {len(df_payout)} Positionen | **Gesamtsumme Netto:** {df_payout['eBay_Netto'].sum():.2f} €")
+            st.dataframe(df_payout[['Bestellnummer', 'SKU', 'Gruppe', 'eBay_Netto', 'Datum der Transaktionserstellung']], use_container_width=True)
+
+        # Lexoffice-Aktion ausschließlich für Gruppe B
+        st.markdown("---")
+        st.subheader("🚀 Lexoffice Direct-Upload (Nur Gruppe B)")
 
         if not df_grp_b.empty:
-            st.markdown("---")
-            st.subheader("📊 Vorschau der Einzelpositionen (nur Gruppe B)")
-            st.dataframe(df_grp_b[['Bestellnummer', 'SKU', 'eBay_Netto']], use_container_width=True)
-
-            st.markdown("---")
-            if st.button("🚀 JETZT AUTOMATISCH IN LEXOFFICE ANLEGEN", type="primary"):
+            if st.button("🚀 JETZT GRUPPE B AUTOMATISCH IN LEXOFFICE ANLEGEN", type="primary"):
                 with st.spinner(f"Suche exakt Kundennummer {target_customer_num} in Lexoffice..."):
                     contact_id = get_lexoffice_contact_id_exact(lexoffice_api_key, target_customer_num)
                 
@@ -165,12 +192,10 @@ if uploaded_payout:
                 else:
                     line_items = []
                     for _, r in df_grp_b.iterrows():
-                        # Fett gedruckte Hauptzeile (SKU / Artikelbezeichnung)
                         title_str = str(r.get('Artikelbezeichnung', '')).strip()
                         if not title_str or title_str == 'nan':
                             title_str = r['SKU']
 
-                        # Untertext darunter: NUR noch die eBay Bestellnummer (keine doppelte SKU)
                         description_str = f"eBay Bestellnummer: {r['Bestellnummer']}"
                         
                         line_items.append({
@@ -195,6 +220,8 @@ if uploaded_payout:
                     if inv_id:
                         st.balloons()
                         st.success(f"🎉 Erfolgreich angelegt für Kundennummer {target_customer_num}! (Entwurfs-ID: {inv_id})")
+        else:
+            st.info("Keine Positionen für Gruppe B in den hochgeladenen Dateien enthalten.")
 
     except Exception as e:
         st.error(f"Fehler bei der Verarbeitung: {e}")
