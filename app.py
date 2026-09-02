@@ -98,6 +98,14 @@ def parse_single_file(uploaded_file):
         return None
 
 
+def clean_sku(val):
+    """Extrahiert nur das Kürzel vor dem ersten /"""
+    s = str(val).strip()
+    if '/' in s:
+        s = s.split('/')[0].strip()
+    return s
+
+
 def process_uploaded_files(uploaded_files):
     if not uploaded_files:
         return None, None
@@ -143,7 +151,10 @@ def process_uploaded_files(uploaded_files):
     df['Net amount'] = df['Net amount'].astype(str).str.replace('€', '').str.replace(' ', '').str.replace(',', '.')
     df['Net amount'] = pd.to_numeric(df['Net amount'], errors='coerce').fillna(0)
 
-    # Zuordnung zu Gruppen
+    # SKU Kürzen (nur der Teil vor dem '/')
+    df['Partner_SKU'] = df['Custom Label'].apply(clean_sku)
+
+    # Zuordnung zu Gruppen basierend auf dem KÜRZEL
     gruppe_a = ['PP', 'BA', 'MK', '001']
     def assign_group(val):
         sku = str(val).strip().upper()
@@ -154,7 +165,7 @@ def process_uploaded_files(uploaded_files):
                 return 'Gruppe A'
         return 'Gruppe B'
 
-    df['Gruppe'] = df['Custom Label'].apply(assign_group)
+    df['Gruppe'] = df['Partner_SKU'].apply(assign_group)
     return df, None
 
 
@@ -205,7 +216,7 @@ with st.sidebar:
     invoice_date = st.date_input("Rechnungsdatum")
     tax_rate = st.number_input("Umsatzsteuer (%)", value=19.0, step=0.5)
     st.markdown("---")
-    st.caption("v2.4 · Entwickelt für eBay Auszahlungsberichte")
+    st.caption("v2.5 · Entwickelt für eBay Auszahlungsberichte")
 
 
 # --- UPLOAD SECTION ---
@@ -226,7 +237,7 @@ if ebay_files:
         st.warning(error_msg)
     
     if df is not None and not df.empty:
-        sku_col = 'Custom Label'
+        sku_col = 'Partner_SKU'
         netto_col = 'Net amount'
 
         tab1, tab2, tab3, tab4 = st.tabs([
