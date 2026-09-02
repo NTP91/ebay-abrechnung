@@ -1,0 +1,8 @@
+__pycache__/
+.pytest_cache/
+.streamlit/
+Master_*.csv
+Master_*.csv.*
+*.lock
+*.bak
+.env
