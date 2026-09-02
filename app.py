@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import hashlib
-import io
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="eBay Payout & Lexoffice Manager", layout="wide")
@@ -59,47 +58,6 @@ def calculate_file_hash(uploaded_file):
     file_bytes = uploaded_file.getvalue()
     return hashlib.md5(file_bytes).hexdigest()
 
-def read_payout_csv_safely(uploaded_file):
-    """Liest eBay Payout CSVs flexibel ein und sucht die Kopfzeile"""
-    content = uploaded_file.getvalue()
-    df = None
-    
-    # Versuche verschiedene Encodings und Trennzeichen
-    for encoding in ['utf-8', 'latin1', 'cp1252']:
-        for sep in [',', ';', '\t']:
-            try:
-                uploaded_file.seek(0)
-                temp_df = pd.read_csv(
-                    io.BytesIO(content),
-                    sep=sep,
-                    encoding=encoding,
-                    on_bad_lines='skip',
-                    quotechar='"'
-                )
-                if len(temp_df.columns) > 1:
-                    df = temp_df
-                    break
-            except Exception:
-                continue
-        if df is not None:
-            break
-
-    if df is None:
-        uploaded_file.seek(0)
-        df = pd.read_csv(uploaded_file, on_bad_lines='skip')
-
-    # Header-Erkennung, falls der Kopf weiter unten liegt
-    order_keywords = ['bestellnummer', 'order', 'transaktion', 'auszahlung', 'betrag', 'amount']
-    if not any(any(k in str(col).lower() for k in order_keywords) for col in df.columns):
-        for idx, row in df.iterrows():
-            row_str = row.astype(str).str.lower()
-            if any(row_str.str.contains(k).any() for k in order_keywords):
-                df.columns = df.iloc[idx]
-                df = df.iloc[idx+1:].reset_index(drop=True)
-                break
-
-    return df
-
 def normalize_dataframe(df):
     """Sucht automatisch die Kopfzeile mit 'Bestellnummer'"""
     if not any('Bestellnummer' in str(col) for col in df.columns):
@@ -121,7 +79,7 @@ def save_single_order_file(uploaded_file):
                 df = pd.read_csv(uploaded_file, sep=';', header=1)
             except:
                 uploaded_file.seek(0)
-                df = pd.read_csv(uploaded_file, sep=None, engine='python', on_bad_lines='skip')
+                df = pd.read_csv(uploaded_file, sep=None, engine='python')
 
         df = normalize_dataframe(df)
 
@@ -158,7 +116,7 @@ def save_single_order_file(uploaded_file):
         return 0, f"❌ Fehler bei `{uploaded_file.name}`: {str(e)}"
 
 def process_payout_files(uploaded_files):
-    """Verarbeitet Payout-CSVs mit erweiterter Spaltenerkennung"""
+    """Verarbeitet Payout-CSVs ohne Duplikate"""
     conn = get_db_connection()
     cursor = conn.cursor()
     messages = []
@@ -174,17 +132,16 @@ def process_payout_files(uploaded_files):
             
         file.seek(0)
         try:
-            df = read_payout_csv_safely(file)
+            df = pd.read_csv(file, sep=None, engine='python')
         except Exception as e:
             messages.append(f"❌ **{file.name}**: Fehler beim Einlesen ({str(e)})")
             continue
-
-        # Erweiterte Spaltenerkennung für verschiedene eBay-Payout-Formate
-        col_tx = next((c for c in df.columns if any(k in str(c).lower() for k in ['transaktion', 'transaction', 'referenz', 'auszahlungs-id', 'auszahlungsnummer', 'payout id'])), None)
-        col_order = next((c for c in df.columns if any(k in str(c).lower() for k in ['bestellnummer', 'order', 'verkaufs-id', 'ausgleichs-id', 'beleg'])), None)
-        col_amount = next((c for c in df.columns if any(k in str(c).lower() for k in ['netto', 'betrag', 'amount', 'auszahlung', 'summe', 'auszahlungsbetrag'])), None)
-        col_date = next((c for c in df.columns if any(k in str(c).lower() for k in ['datum', 'date', 'erstellt'])), None)
-        col_qty = next((c for c in df.columns if any(k in str(c).lower() for k in ['anzahl', 'stück', 'quantity', 'menge'])), None)
+            
+        col_tx = next((c for c in df.columns if 'Transaktions' in str(c) or 'Transaction' in str(c) or 'Referenz' in str(c)), None)
+        col_order = next((c for c in df.columns if 'Bestellnummer' in str(c) or 'Order' in str(c)), None)
+        col_amount = next((c for c in df.columns if 'Netto' in str(c) or 'Betrag' in str(c) or 'Amount' in str(c)), None)
+        col_date = next((c for c in df.columns if 'Datum' in str(c) or 'Date' in str(c)), None)
+        col_qty = next((c for c in df.columns if 'Anzahl' in str(c) or 'Stück' in str(c) or 'Quantity' in str(c)), None)
 
         if not col_tx and col_order:
             df['generated_tx_id'] = df.index.astype(str) + "_" + df[col_order].astype(str) + "_" + file_hash[:6]
@@ -197,29 +154,19 @@ def process_payout_files(uploaded_files):
         art_map = dict(zip(art_df['bestellnummer'], art_df['artikelname']))
         sku_map = dict(zip(art_df['bestellnummer'], art_df['sku']))
 
-        if col_amount or col_order:
-            for idx, row in df.iterrows():
-                order_id = str(row[col_order]).strip() if col_order and pd.notna(row[col_order]) else ""
-                tx_id = str(row[col_tx]).strip() if col_tx and pd.notna(row[col_tx]) else f"{file_hash[:6]}_{idx}"
+        if col_order:
+            for _, row in df.iterrows():
+                tx_id = str(row[col_tx]).strip() if col_tx else hashlib.md5(str(row).encode()).hexdigest()
+                order_id = str(row[col_order]).strip() if pd.notna(row[col_order]) else ""
                 
                 cursor.execute("SELECT transaction_id FROM payouts WHERE transaction_id = ?", (tx_id,))
                 if cursor.fetchone():
                     skipped_tx += 1
                     continue
-                
-                raw_amount = str(row[col_amount]) if col_amount and pd.notna(row[col_amount]) else "0"
-                cleaned_amount = raw_amount.replace('€', '').replace('EUR', '').replace(' ', '').replace(',', '.').strip()
-                try:
-                    amount = float(cleaned_amount)
-                except ValueError:
-                    amount = 0.0
-
+                    
+                amount = float(str(row[col_amount]).replace(',', '.').replace('€', '').strip()) if col_amount and pd.notna(row[col_amount]) else 0.0
                 date_val = str(row[col_date]) if col_date and pd.notna(row[col_date]) else ""
-                
-                try:
-                    qty = float(row[col_qty]) if col_qty and pd.notna(row[col_qty]) else 1.0
-                except (ValueError, TypeError):
-                    qty = 1.0
+                qty = float(row[col_qty]) if col_qty and pd.notna(row[col_qty]) else 1.0
                 
                 art_name = art_map.get(order_id, "NB / Kein Titel gefunden")
                 sku_val = sku_map.get(order_id, "NB /")
@@ -233,8 +180,6 @@ def process_payout_files(uploaded_files):
             cursor.execute("INSERT INTO processed_files (filename, file_hash) VALUES (?, ?)", (file.name, file_hash))
             conn.commit()
             messages.append(f"✅ **{file.name}**: {added_tx} neue Zeilen importiert ({skipped_tx} Duplikate geblockt).")
-        else:
-            messages.append(f"⚠️ **{file.name}**: Keinen verknüpfbaren Inhalt/Spalten gefunden.")
 
     conn.close()
     return messages
@@ -246,6 +191,7 @@ with st.sidebar:
     st.subheader("📌 Bestellberichte importieren")
     st.caption("Wähle hier beide Dateien (CSV & XLSX) gleichzeitig aus:")
     
+    # JETZT MIT accept_multiple_files=True!
     order_files = st.file_uploader("Bestellberichte (CSV & XLSX)", type=["csv", "xlsx"], accept_multiple_files=True, key="orders_up")
     
     if order_files:
