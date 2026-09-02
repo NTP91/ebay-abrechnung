@@ -25,7 +25,14 @@ if uploaded_payouts:
     payout_frames = []
     for f in uploaded_payouts:
         try:
-            df_p = pd.read_csv(f, sep=None, engine='python', dtype=str)
+            try:
+                df_p = pd.read_csv(f, sep=';', dtype=str)
+                if len(df_p.columns) <= 1:
+                    f.seek(0)
+                    df_p = pd.read_csv(f, sep=',', dtype=str)
+            except Exception:
+                f.seek(0)
+                df_p = pd.read_csv(f, sep=None, engine='python', dtype=str)
             payout_frames.append(df_p)
         except Exception:
             pass
@@ -41,7 +48,14 @@ if uploaded_orders:
             if f.name.endswith(('.xlsx', '.xls')):
                 df_o = pd.read_excel(f, dtype=str)
             else:
-                df_o = pd.read_csv(f, sep=None, engine='python', dtype=str)
+                try:
+                    df_o = pd.read_csv(f, sep=';', dtype=str)
+                    if len(df_o.columns) <= 1:
+                        f.seek(0)
+                        df_o = pd.read_csv(f, sep=',', dtype=str)
+                except Exception:
+                    f.seek(0)
+                    df_o = pd.read_csv(f, sep=None, engine='python', dtype=str)
             order_frames.append(df_o)
         except Exception:
             pass
