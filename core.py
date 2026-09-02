@@ -70,16 +70,24 @@ def load_master_data():
         is_group_a = any(partner.upper().startswith(p) for p in prefixes_a)
         gruppe = "Gruppe A" if is_group_a else "Gruppe B"
 
-        # Betrag / Netto
+        # Robustere Betragskonvertierung (sucht nach Betrag, Nettobetrag, Amount, etc.)
         betrag_val = 0.0
-        for col in ['Nettobetrag', 'Betrag', 'Gesamtbetrag', 'Amount', 'Erlös Brutto']:
-            if col in row and pd.notna(row[col]):
-                raw_s = str(row[col]).strip().replace('.', '').replace(',', '.') if ',' in str(row[col]) else str(row[col]).strip()
-                try:
-                    betrag_val = float(raw_s)
-                    break
-                except ValueError:
-                    continue
+        for col in row.index:
+            c_clean = str(col).lower().replace(' ', '').replace('_', '')
+            if any(k in c_clean for k in ['betrag', 'amount', 'erlös', 'netto', 'gesamt']):
+                val_str = str(row[col]).strip()
+                if val_str and val_str not in ['nan', 'None', '']:
+                    clean_str = val_str.replace('€', '').replace(' ', '')
+                    if ',' in clean_str and '.' in clean_str:
+                        clean_str = clean_str.replace('.', '').replace(',', '.')
+                    elif ',' in clean_str:
+                        clean_str = clean_str.replace(',', '.')
+                    try:
+                        betrag_val = float(clean_str)
+                        if betrag_val != 0.0:
+                            break
+                    except ValueError:
+                        continue
 
         datum = str(row.get('Datum der Transaktionserstellung', row.get('Datum', ''))).strip()
 
@@ -173,8 +181,8 @@ def get_refunds_summary(df):
 
 
 def export_to_excel(df):
-    """Erzeugt Excel-Download-Stream."""
+    """Erzeugt Excel-Download-Stream ohne externe xlsxwriter-Abhängigkeit."""
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Abrechnung')
     return output.getvalue()
