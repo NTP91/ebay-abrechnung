@@ -52,7 +52,7 @@ def extract_partner_prefix(sku):
         return match.group(1)
     return raw_prefix
 
-# Sichere & strikte Kontaktsuche über Paginierung
+# Sichere Kontaktsuche über Paginierung
 def get_lexoffice_contact_id_exact(api_key, target_customer_number):
     headers = {"Authorization": f"Bearer {api_key}"}
     page = 0
@@ -135,7 +135,7 @@ if uploaded_payout:
         
         df_payout['eBay_Brutto'] = df_payout['Betrag abzügl. Kosten'].apply(parse_german_float)
         
-        # Nur positive Verkäufe für die Abrechnung berücksichtigen
+        # Nur positive Verkäufe berücksichtigen
         df_payout = df_payout[df_payout['eBay_Brutto'] > 0].copy()
         
         df_payout['eBay_Netto'] = (df_payout['eBay_Brutto'] / 1.19).round(2)
@@ -150,7 +150,6 @@ if uploaded_payout:
         st.markdown("---")
         st.subheader("📊 Übersicht aller Transaktionen nach Gruppen")
 
-        # Tabs zur übersichtlichen Unterteilung aller Gruppen
         tab_b, tab_a, tab_none, tab_all = st.tabs([
             "Gruppe B (Über Dich)", 
             "Gruppe A (Direkt)", 
@@ -167,8 +166,29 @@ if uploaded_payout:
             st.dataframe(df_grp_b[['Bestellnummer', 'SKU', 'eBay_Netto', 'Datum der Transaktionserstellung']], use_container_width=True)
 
         with tab_a:
-            st.write(f"**Anzahl:** {len(df_grp_a)} Positionen | **Summe Netto:** {df_grp_a['eBay_Netto'].sum():.2f} €")
-            st.dataframe(df_grp_a[['Bestellnummer', 'SKU', 'eBay_Netto', 'Datum der Transaktionserstellung']], use_container_width=True)
+            st.write(f"**Anzahl Gesamt:** {len(df_grp_a)} Positionen | **Gesamtsumme Netto:** {df_grp_a['eBay_Netto'].sum():.2f} €")
+            st.markdown("---")
+            
+            # Einzelpositionen aufgeteilt nach Partnern (PP, BA, MK, 001)
+            partner_prefixes = df_grp_a['SKU_Prefix'].unique()
+            for prefix in sorted(partner_prefixes):
+                df_partner = df_grp_a[df_grp_a['SKU_Prefix'] == prefix]
+                st.markdown(f"### 📦 Partner: **{prefix}**")
+                st.write(f"Anzahl: {len(df_partner)} | Summe Netto: {df_partner['eBay_Netto'].sum():.2f} €")
+                
+                export_cols = ['Bestellnummer', 'SKU', 'eBay_Netto', 'Datum der Transaktionserstellung']
+                st.dataframe(df_partner[export_cols], use_container_width=True)
+                
+                # CSV Export-Button für die Abrechnung mit dem jeweiligen Partner
+                csv_data = df_partner[export_cols].to_csv(index=False, sep=';').encode('utf-8')
+                st.download_button(
+                    label=f"📥 Abrechnung Exportieren für {prefix} (CSV)",
+                    data=csv_data,
+                    file_name=f"Abrechnung_Partner_{prefix}.csv",
+                    mime="text/csv",
+                    key=f"dl_{prefix}"
+                )
+                st.markdown("---")
 
         with tab_none:
             st.write(f"**Anzahl:** {len(df_grp_none)} Positionen | **Summe Netto:** {df_grp_none['eBay_Netto'].sum():.2f} €")
@@ -178,7 +198,7 @@ if uploaded_payout:
             st.write(f"**Gesamtanzahl:** {len(df_payout)} Positionen | **Gesamtsumme Netto:** {df_payout['eBay_Netto'].sum():.2f} €")
             st.dataframe(df_payout[['Bestellnummer', 'SKU', 'Gruppe', 'eBay_Netto', 'Datum der Transaktionserstellung']], use_container_width=True)
 
-        # Lexoffice-Aktion ausschließlich für Gruppe B
+        # Lexoffice-Aktion für Gruppe B
         st.markdown("---")
         st.subheader("🚀 Lexoffice Direct-Upload (Nur Gruppe B)")
 
