@@ -72,6 +72,9 @@ if uploaded_payout:
         df_payout = df_payout.drop_duplicates(subset=['Bestellnummer_Match', 'Datum der Transaktionserstellung', 'Betrag abzügl. Kosten'])
         
         df_payout['eBay_Brutto'] = df_payout['Betrag abzügl. Kosten'].apply(parse_german_float)
+        df_payout['eBay_Netto'] = (df_payout['eBay_Brutto'] / 1.19).round(2)
+        df_payout['eBay_MwSt'] = (df_payout['eBay_Brutto'] - df_payout['eBay_Netto']).round(2)
+        
         df_payout['SKU'] = df_payout['Bestandseinheit'].fillna('OHNE_SKU').astype(str).str.strip()
         df_payout['SKU_Prefix'] = df_payout['SKU'].apply(extract_partner_prefix)
         
@@ -87,7 +90,7 @@ if uploaded_payout:
             lambda p: 'Gruppe A (Direkt)' if p in GROUP_A_PREFIXES else ('Ohne Zuordnung' if p == 'OHNE_SKU' else 'Gruppe B (Über Dich)')
         )
         
-        # Provisionen berechnen
+        # Provisionen berechnen (Brutto & Netto)
         df_payout['Evelyn_Prov_EUR'] = (df_payout['eBay_Brutto'] * 0.005).round(2)
         df_payout['Auszahlung_Evelyn_Brutto'] = (df_payout['eBay_Brutto'] - df_payout['Evelyn_Prov_EUR']).round(2)
         
@@ -149,34 +152,44 @@ if uploaded_payout:
         if not df_grp_a.empty:
             summary_a = df_grp_a.groupby('SKU_Prefix').agg(
                 Anzahl_Transaktionen=('SKU', 'count'),
-                eBay_Brutto_Gesamt=('eBay_Brutto', 'sum'),
+                Erlös_Netto=('eBay_Netto', 'sum'),
+                Erlös_Brutto=('eBay_Brutto', 'sum'),
                 Evelyn_Provision=('Evelyn_Prov_EUR', 'sum'),
                 Auszahlungsbetrag=('Auszahlung_Evelyn_Brutto', 'sum')
             ).reset_index()
 
+            summary_a['Rabatt_Prozent'] = "0,5 %"
+
             total_row_a = pd.DataFrame([{
                 'SKU_Prefix': 'GESAMTSUMME',
                 'Anzahl_Transaktionen': summary_a['Anzahl_Transaktionen'].sum(),
-                'eBay_Brutto_Gesamt': summary_a['eBay_Brutto_Gesamt'].sum(),
+                'Erlös_Netto': summary_a['Erlös_Netto'].sum(),
+                'Erlös_Brutto': summary_a['Erlös_Brutto'].sum(),
+                'Rabatt_Prozent': "0,5 %",
                 'Evelyn_Provision': summary_a['Evelyn_Provision'].sum(),
                 'Auszahlungsbetrag': summary_a['Auszahlungsbetrag'].sum()
             }])
 
             summary_a_final = pd.concat([summary_a, total_row_a], ignore_index=True)
 
-            summary_a_display = summary_a_final.rename(columns={
+            summary_a_display = summary_a_final[[
+                'SKU_Prefix', 'Anzahl_Transaktionen', 'Erlös_Netto', 'Rabatt_Prozent', 'Evelyn_Provision', 'Erlös_Brutto', 'Auszahlungsbetrag'
+            ]].rename(columns={
                 'SKU_Prefix': 'Partner / Kürzel',
                 'Anzahl_Transaktionen': 'Anzahl Transaktionen',
-                'eBay_Brutto_Gesamt': 'Erlös Brutto (€)',
-                'Evelyn_Provision': 'Provision 0,5 % (€)',
-                'Auszahlungsbetrag': 'Abrechnungsbetrag (€)'
+                'Erlös_Netto': 'VK Netto Lexoffice (€)',
+                'Rabatt_Prozent': 'Rabatt %',
+                'Evelyn_Provision': 'Provision (€)',
+                'Erlös_Brutto': 'Erlös Brutto (€)',
+                'Auszahlungsbetrag': 'Abrechnungsbetrag Brutto (€)'
             })
 
             st.dataframe(
                 summary_a_display.style.format({
+                    'VK Netto Lexoffice (€)': '{:.2f} €',
+                    'Provision (€)': '{:.2f} €',
                     'Erlös Brutto (€)': '{:.2f} €',
-                    'Provision 0,5 % (€)': '{:.2f} €',
-                    'Abrechnungsbetrag (€)': '{:.2f} €'
+                    'Abrechnungsbetrag Brutto (€)': '{:.2f} €'
                 }),
                 use_container_width=True
             )
@@ -199,41 +212,51 @@ if uploaded_payout:
         # ---------------------------------------------------------
         st.markdown("---")
         st.subheader("📊 2. Gruppe B – Gesamtabrechnung für Evelyn (Über DICH)")
-        st.info("ℹ️ **Verwendungszweck:** Abrechnung gegenüber Evelyn (0,5 % Provision). Enthält keine internen Margen.")
+        st.info("ℹ️ **Lexoffice-Anleitung:** Trage pro Partner den 'VK Netto Lexoffice' und '0,5 % Rabatt' ein.")
 
         df_grp_b = df_payout[df_payout['Gruppe'] == 'Gruppe B (Über Dich)'].copy()
 
         if not df_grp_b.empty:
             summary_b = df_grp_b.groupby('SKU_Prefix').agg(
                 Anzahl_Transaktionen=('SKU', 'count'),
-                eBay_Brutto_Gesamt=('eBay_Brutto', 'sum'),
+                Erlös_Netto=('eBay_Netto', 'sum'),
+                Erlös_Brutto=('eBay_Brutto', 'sum'),
                 Evelyn_Provision=('Evelyn_Prov_EUR', 'sum'),
                 Auszahlungsbetrag=('Auszahlung_Evelyn_Brutto', 'sum')
             ).reset_index()
+
+            summary_b['Rabatt_Prozent'] = "0,5 %"
             
             total_row_b = pd.DataFrame([{
                 'SKU_Prefix': 'GESAMTSUMME',
                 'Anzahl_Transaktionen': summary_b['Anzahl_Transaktionen'].sum(),
-                'eBay_Brutto_Gesamt': summary_b['eBay_Brutto_Gesamt'].sum(),
+                'Erlös_Netto': summary_b['Erlös_Netto'].sum(),
+                'Erlös_Brutto': summary_b['Erlös_Brutto'].sum(),
+                'Rabatt_Prozent': "0,5 %",
                 'Evelyn_Provision': summary_b['Evelyn_Provision'].sum(),
                 'Auszahlungsbetrag': summary_b['Auszahlungsbetrag'].sum()
             }])
             
             summary_b_final = pd.concat([summary_b, total_row_b], ignore_index=True)
             
-            summary_b_display = summary_b_final.rename(columns={
+            summary_b_display = summary_b_final[[
+                'SKU_Prefix', 'Anzahl_Transaktionen', 'Erlös_Netto', 'Rabatt_Prozent', 'Evelyn_Provision', 'Erlös_Brutto', 'Auszahlungsbetrag'
+            ]].rename(columns={
                 'SKU_Prefix': 'Partner / Kürzel',
                 'Anzahl_Transaktionen': 'Anzahl Transaktionen',
-                'eBay_Brutto_Gesamt': 'Erlös Brutto (€)',
-                'Evelyn_Provision': 'Provision 0,5 % (€)',
-                'Auszahlungsbetrag': 'Abrechnungsbetrag (€)'
+                'Erlös_Netto': 'VK Netto Lexoffice (€)',
+                'Rabatt_Prozent': 'Rabatt %',
+                'Evelyn_Provision': 'Provision (€)',
+                'Erlös_Brutto': 'Erlös Brutto (€)',
+                'Auszahlungsbetrag': 'Abrechnungsbetrag Brutto (€)'
             })
             
             st.dataframe(
                 summary_b_display.style.format({
+                    'VK Netto Lexoffice (€)': '{:.2f} €',
+                    'Provision (€)': '{:.2f} €',
                     'Erlös Brutto (€)': '{:.2f} €',
-                    'Provision 0,5 % (€)': '{:.2f} €',
-                    'Abrechnungsbetrag (€)': '{:.2f} €'
+                    'Abrechnungsbetrag Brutto (€)': '{:.2f} €'
                 }),
                 use_container_width=True
             )
@@ -268,6 +291,7 @@ if uploaded_payout:
                 'SKU',
                 'Menge',
                 'Angebotstitel',
+                'eBay_Netto',
                 'eBay_Brutto',
                 'Partner_Prov_EUR',
                 'Auszahlung_Partner_Brutto'
@@ -275,6 +299,7 @@ if uploaded_payout:
                 'Datum der Transaktionserstellung': 'Datum',
                 'SKU_Prefix': 'Partner',
                 'Menge': 'Stück',
+                'eBay_Netto': 'Gutschrift Netto (€)',
                 'eBay_Brutto': 'Gutschrift Brutto (€)',
                 'Partner_Prov_EUR': 'Erstattete Provision (€)',
                 'Auszahlung_Partner_Brutto': 'Abrechnungsbetrag (€)'
@@ -287,6 +312,7 @@ if uploaded_payout:
                 'SKU': '',
                 'Stück': refund_display['Stück'].sum(),
                 'Angebotstitel': '',
+                'Gutschrift Netto (€)': refund_display['Gutschrift Netto (€)'].sum(),
                 'Gutschrift Brutto (€)': refund_display['Gutschrift Brutto (€)'].sum(),
                 'Erstattete Provision (€)': refund_display['Erstattete Provision (€)'].sum(),
                 'Abrechnungsbetrag (€)': refund_display['Abrechnungsbetrag (€)'].sum()
@@ -296,6 +322,7 @@ if uploaded_payout:
 
             st.dataframe(
                 refund_final.style.format({
+                    'Gutschrift Netto (€)': '{:.2f} €',
                     'Gutschrift Brutto (€)': '{:.2f} €',
                     'Erstattete Provision (€)': '{:.2f} €',
                     'Abrechnungsbetrag (€)': '{:.2f} €'
@@ -308,7 +335,7 @@ if uploaded_payout:
         # ---------------------------------------------------------
         st.markdown("---")
         st.subheader("🔍 4. Einzelabrechnungen (Verkäufe inklusive Gutschrift)")
-        st.info("ℹ️ **Verwendungszweck:** Hier wählst du deinen jeweiligen Kunden aus. Die Übersicht dient dem Kunden als Rechnungsgrundlage bzw. Abrechnungsnachweis für Lexoffice.")
+        st.info("ℹ️ **Verwendungszweck:** Hier wählst du deinen jeweiligen Kunden aus. Erschienen sind die VK Netto Werte inklusive des 3,5 % Rabatts.")
 
         all_partners = sorted([p for p in df_payout['SKU_Prefix'].unique() if p not in ['OHNE_SKU', 'FEHLT', '--', '']])
         
@@ -319,11 +346,9 @@ if uploaded_payout:
             if selected_partner != "-- Bitte Partner auswählen --":
                 filtered_p = df_payout[df_payout['SKU_Prefix'] == selected_partner].copy()
                 
-                # Ermittlung des konkreten Prozentsatzes für die Spaltenüberschrift
-                prov_rate_pct = "0,5 %" if selected_partner in GROUP_A_PREFIXES else "3,5 %"
-                prov_col_name = f"Provision {prov_rate_pct} (€)"
+                prov_rate_pct_val = 0.5 if selected_partner in GROUP_A_PREFIXES else 3.5
+                prov_rate_str = f"{prov_rate_pct_val:.1f} %".replace('.', ',')
                 
-                # Aufteilung in Verkäufe und Gutschriften
                 df_sales = filtered_p[filtered_p['eBay_Brutto'] >= 0].copy()
                 df_retouren = filtered_p[filtered_p['eBay_Brutto'] < 0].copy()
                 
@@ -332,28 +357,34 @@ if uploaded_payout:
                 if not df_sales.empty:
                     partner_sales = df_sales[[
                         'Datum der Transaktionserstellung', 'Bestellnummer', 'SKU_Prefix', 'SKU', 'Menge', 'Angebotstitel',
-                        'eBay_Brutto', 'Partner_Prov_EUR', 'Auszahlung_Partner_Brutto'
+                        'eBay_Netto', 'eBay_Brutto', 'Partner_Prov_EUR', 'Auszahlung_Partner_Brutto'
                     ]].rename(columns={
                         'Datum der Transaktionserstellung': 'Datum', 
                         'SKU_Prefix': 'Partner',
                         'Menge': 'Stück',
+                        'eBay_Netto': 'VK Netto Lexoffice (€)',
                         'eBay_Brutto': 'Erlös Brutto (€)', 
-                        'Partner_Prov_EUR': prov_col_name, 
+                        'Partner_Prov_EUR': f'Provision {prov_rate_str} (€)', 
                         'Auszahlung_Partner_Brutto': 'Abrechnungsbetrag (€)'
                     })
                     
+                    partner_sales.insert(7, 'Rabatt %', prov_rate_str)
+                    
                     sum_sales = pd.DataFrame([{
                         'Datum': 'GESAMTSUMME VERKÄUFE', 'Bestellnummer': '', 'Partner': selected_partner, 'SKU': '', 'Stück': partner_sales['Stück'].sum(), 'Angebotstitel': '',
+                        'VK Netto Lexoffice (€)': partner_sales['VK Netto Lexoffice (€)'].sum(),
+                        'Rabatt %': prov_rate_str,
                         'Erlös Brutto (€)': partner_sales['Erlös Brutto (€)'].sum(),
-                        prov_col_name: partner_sales[prov_col_name].sum(),
+                        f'Provision {prov_rate_str} (€)': partner_sales[f'Provision {prov_rate_str} (€)'].sum(),
                         'Abrechnungsbetrag (€)': partner_sales['Abrechnungsbetrag (€)'].sum()
                     }])
                     final_sales = pd.concat([partner_sales, sum_sales], ignore_index=True)
                     
                     st.dataframe(
                         final_sales.style.format({
+                            'VK Netto Lexoffice (€)': '{:.2f} €',
                             'Erlös Brutto (€)': '{:.2f} €', 
-                            prov_col_name: '{:.2f} €', 
+                            f'Provision {prov_rate_str} (€)': '{:.2f} €', 
                             'Abrechnungsbetrag (€)': '{:.2f} €'
                         }, na_rep=''), 
                         use_container_width=True
@@ -366,20 +397,22 @@ if uploaded_payout:
                     st.markdown(f"#### 🔻 Gutschriften / Erstattungen ({len(df_retouren)} Positionen)")
                     partner_retouren = df_retouren[[
                         'Datum der Transaktionserstellung', 'Bestellnummer', 'SKU_Prefix', 'SKU', 'Menge', 'Angebotstitel',
-                        'eBay_Brutto', 'Partner_Prov_EUR', 'Auszahlung_Partner_Brutto'
+                        'eBay_Netto', 'eBay_Brutto', 'Partner_Prov_EUR', 'Auszahlung_Partner_Brutto'
                     ]].rename(columns={
                         'Datum der Transaktionserstellung': 'Datum', 
                         'SKU_Prefix': 'Partner',
                         'Menge': 'Stück',
+                        'eBay_Netto': 'Gutschrift Netto (€)',
                         'eBay_Brutto': 'Gutschrift Brutto (€)', 
-                        'Partner_Prov_EUR': f'Erstattete {prov_col_name}', 
+                        'Partner_Prov_EUR': f'Erstattete Provision {prov_rate_str} (€)', 
                         'Auszahlung_Partner_Brutto': 'Abrechnungsbetrag (€)'
                     })
                     
-                    ret_prov_col = f'Erstattete {prov_col_name}'
+                    ret_prov_col = f'Erstattete Provision {prov_rate_str} (€)'
                     
                     sum_retouren = pd.DataFrame([{
                         'Datum': 'GESAMTSUMME GUTSCHRIFTEN', 'Bestellnummer': '', 'Partner': selected_partner, 'SKU': '', 'Stück': partner_retouren['Stück'].sum(), 'Angebotstitel': '',
+                        'Gutschrift Netto (€)': partner_retouren['Gutschrift Netto (€)'].sum(),
                         'Gutschrift Brutto (€)': partner_retouren['Gutschrift Brutto (€)'].sum(),
                         ret_prov_col: partner_retouren[ret_prov_col].sum(),
                         'Abrechnungsbetrag (€)': partner_retouren['Abrechnungsbetrag (€)'].sum()
@@ -388,6 +421,7 @@ if uploaded_payout:
                     
                     st.dataframe(
                         final_retouren.style.format({
+                            'Gutschrift Netto (€)': '{:.2f} €',
                             'Gutschrift Brutto (€)': '{:.2f} €', 
                             ret_prov_col: '{:.2f} €', 
                             'Abrechnungsbetrag (€)': '{:.2f} €'
