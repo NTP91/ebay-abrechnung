@@ -13,10 +13,12 @@ st.set_page_config(page_title="eBay Payout & Lexoffice Automatisierung", layout=
 
 st.title("⚡ eBay Payout & Lexoffice Direct-Upload")
 
-# Sidebar für Zugangsdaten
-st.sidebar.header("🔑 Lexoffice API Konfiguration")
+# Lexoffice API Konfiguration (Key direkt im Code)
 lexoffice_api_key = "Wciy230Sw_pNI7.yFDyNsWuvvXIB2sxJ2MKLk2jfMowyWJKU"
-customer_name_search = st.sidebar.text_input("2. Exakter Kundenname in Lexoffice:", value="Evelyn")
+
+# Sidebar Einstellungen
+st.sidebar.header("🔑 Lexoffice Konfiguration")
+customer_name_search = st.sidebar.text_input("Kundenname in Lexoffice:", value="Evelyn")
 
 # Uploads
 col1, col2 = st.columns(2)
@@ -220,53 +222,50 @@ if uploaded_payout:
 
             st.markdown("---")
             if st.button("🚀 JETZT AUTOMATISCH IN LEXOFFICE ANLEGEN", type="primary"):
-                if not lexoffice_api_key:
-                    st.error("Bitte trage zuerst deinen Lexoffice API-Key in der linken Seitenleiste ein!")
+                with st.spinner("Suche Kunde in Lexoffice..."):
+                    contact_id = get_lexoffice_contact_id(lexoffice_api_key, customer_name_search)
+                
+                if not contact_id:
+                    st.error(f"Kunde '{customer_name_search}' wurde in Lexoffice nicht gefunden! Bitte Namen in der linken Seitenleiste prüfen.")
                 else:
-                    with st.spinner("Suche Kunde in Lexoffice..."):
-                        contact_id = get_lexoffice_contact_id(lexoffice_api_key, customer_name_search)
-                    
-                    if not contact_id:
-                        st.error(f"Kunde '{customer_name_search}' wurde in Lexoffice nicht gefunden! Bitte stelle sicher, dass der Kunde unter Kontakte in Lexoffice existiert.")
+                    line_items = []
+                    if "Option A" in position_mode:
+                        for _, r in summary_b.iterrows():
+                            line_items.append({
+                                "type": "custom",
+                                "name": f"Abrechnung Partner {r['SKU_Prefix']} ({r['Anzahl_Transaktionen']} Stück laut Anlage)",
+                                "quantity": 1,
+                                "unitName": "Stück",
+                                "unitPrice": {"currency": "EUR", "netAmount": round(r['Erlös_Netto'], 2), "taxRatePercentage": 19},
+                                "discountPercentage": 0.5
+                            })
                     else:
-                        line_items = []
-                        if "Option A" in position_mode:
-                            for _, r in summary_b.iterrows():
-                                line_items.append({
-                                    "type": "custom",
-                                    "name": f"Abrechnung Partner {r['SKU_Prefix']} ({r['Anzahl_Transaktionen']} Stück laut Anlage)",
-                                    "quantity": 1,
-                                    "unitName": "Stück",
-                                    "unitPrice": {"currency": "EUR", "netAmount": round(r['Erlös_Netto'], 2), "taxRatePercentage": 19},
-                                    "discountPercentage": 0.5
-                                })
+                        for _, r in df_grp_b.iterrows():
+                            line_items.append({
+                                "type": "custom",
+                                "name": f"Bestellung {r['Bestellnummer']} | SKU: {r['SKU']}",
+                                "quantity": 1,
+                                "unitName": "Stück",
+                                "unitPrice": {"currency": "EUR", "netAmount": round(r['eBay_Netto'], 2), "taxRatePercentage": 19},
+                                "discountPercentage": 0.5
+                            })
+                    
+                    remark_text = "Die detaillierte Einzelaufstellung der Verkäufe und Rückerstattungen entnehmen Sie bitte der beigefügten Anlage."
+                    
+                    with st.spinner("Erstelle Rechnungsentwurf in Lexoffice..."):
+                        inv_id = create_lexoffice_invoice(lexoffice_api_key, contact_id, line_items, remark_text)
+                    
+                    if inv_id:
+                        st.success(f"✅ Rechnung erfolgreich als Entwurf in Lexoffice angelegt! (ID: {inv_id})")
+                        
+                        with st.spinner("Hänge PDF-Einzelnachweis an den Entwurf an..."):
+                            ok = upload_lexoffice_document(lexoffice_api_key, inv_id, pdf_bytes, "Rechnungsanlage_Details.pdf")
+                        
+                        if ok:
+                            st.balloons()
+                            st.success("🎉 PERFEKT: Die PDF-Anlage wurde unrennbar an die Lexoffice-Rechnung angehängt!")
                         else:
-                            for _, r in df_grp_b.iterrows():
-                                line_items.append({
-                                    "type": "custom",
-                                    "name": f"Bestellung {r['Bestellnummer']} | SKU: {r['SKU']}",
-                                    "quantity": 1,
-                                    "unitName": "Stück",
-                                    "unitPrice": {"currency": "EUR", "netAmount": round(r['eBay_Netto'], 2), "taxRatePercentage": 19},
-                                    "discountPercentage": 0.5
-                                })
-                        
-                        remark_text = "Die detaillierte Einzelaufstellung der Verkäufe und Rückerstattungen entnehmen Sie bitte der beigefügten Anlage."
-                        
-                        with st.spinner("Erstelle Rechnungsentwurf in Lexoffice..."):
-                            inv_id = create_lexoffice_invoice(lexoffice_api_key, contact_id, line_items, remark_text)
-                        
-                        if inv_id:
-                            st.success(f"✅ Rechnung erfolgreich als Entwurf in Lexoffice angelegt! (ID: {inv_id})")
-                            
-                            with st.spinner("Hänge PDF-Einzelnachweis an den Entwurf an..."):
-                                ok = upload_lexoffice_document(lexoffice_api_key, inv_id, pdf_bytes, "Rechnungsanlage_Details.pdf")
-                            
-                            if ok:
-                                st.balloons()
-                                st.success("🎉 PERFEKT: Die PDF-Anlage wurde unrennbar an die Lexoffice-Rechnung angehängt!")
-                            else:
-                                st.warning("Rechnung wurde angelegt, aber das PDF konnte nicht angehängt werden.")
+                            st.warning("Rechnung wurde angelegt, aber das PDF konnte nicht angehängt werden.")
 
     except Exception as e:
         st.error(f"Fehler: {e}")
