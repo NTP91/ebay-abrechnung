@@ -2,17 +2,34 @@ import streamlit as st
 import pandas as pd
 import io
 import re
+import requests
+import json
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib import colors
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
-st.set_page_config(page_title="eBay Payout & SKU-Abrechnung", layout="wide")
+st.set_page_config(page_title="eBay Payout & Lexoffice Automatisierung", layout="wide")
 
-st.title("📦 eBay Payout & SKU-Abrechnungs Tool")
-st.write("Lade deine eBay Auszahlungsberichte (CSV) sowie deine Soll-Rechnung (Excel/CSV) hoch.")
+st.title("⚡ eBay Payout & Lexoffice Direct-Upload")
 
+# Sidebar für Zugangsdaten
+st.sidebar.header("🔑 Lexoffice API Konfiguration")
+lexoffice_api_key = Wciy230Sw_pNI7.yFDyNsWuvvXIB2sxJ2MKLk2jfMowyWJKU", type="password")
+customer_name_search = st.sidebar.text_input("2. Exakter Kundenname in Lexoffice:", value="Evelyn")
+
+# Uploads
 col1, col2 = st.columns(2)
 with col1:
     uploaded_payout = st.file_uploader("1. eBay Auszahlungsberichte (CSV)", type=["csv"], accept_multiple_files=True, key="payout")
 with col2:
     uploaded_invoice = st.file_uploader("2. Soll-Rechnung / Referenz (Excel/CSV)", type=["xlsx", "csv"], key="invoice")
+
+# Positionen-Modus
+position_mode = st.radio(
+    "Wie sollen die Positionen in Lexoffice angelegt werden?",
+    ["Option A: Sammelpositionen pro Partner + PDF-Einzelnachweis (Empfohlen)", "Option B: Jede Bestellung als einzelne Position in Lexoffice"]
+)
 
 # Hilfsfunktionen
 def parse_german_float(val):
@@ -35,14 +52,112 @@ def extract_partner_prefix(sku):
         return 'OHNE_SKU'
     sku_clean = str(sku).strip().upper()
     raw_prefix = sku_clean.split('/')[0].strip()
-    
     if raw_prefix.startswith('001') or raw_prefix == '001':
         return '001'
-    
     match = re.match(r'^([A-Z]+)', raw_prefix)
     if match:
         return match.group(1)
     return raw_prefix
+
+def generate_pdf_report(title_text, summary_df, details_df):
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), rightMargin=20, leftMargin=20, topMargin=20, bottomMargin=20)
+    story = []
+    
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontSize=16, leading=20, textColor=colors.HexColor("#1A365D"))
+    subtitle_style = ParagraphStyle('SubTitleStyle', parent=styles['Heading2'], fontSize=12, leading=16, textColor=colors.HexColor("#2B6CB0"))
+    cell_style = ParagraphStyle('CellStyle', parent=styles['Normal'], fontSize=8, leading=10)
+    header_cell_style = ParagraphStyle('HeaderCellStyle', parent=styles['Normal'], fontSize=8, leading=10, textColor=colors.white, fontName="Helvetica-Bold")
+    
+    story.append(Paragraph(title_text, title_style))
+    story.append(Spacer(1, 10))
+    story.append(Paragraph("1. Zusammenfassung nach Partnern", subtitle_style))
+    story.append(Spacer(1, 5))
+    
+    sum_data = [[Paragraph(col, header_cell_style) for col in summary_df.columns]]
+    for _, row in summary_df.iterrows():
+        sum_data.append([Paragraph(str(val), cell_style) for val in row])
+        
+    t_sum = Table(sum_data)
+    t_sum.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#2B6CB0")),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+        ('TOPPADDING', (0,0), (-1,-1), 4),
+    ]))
+    story.append(t_sum)
+    story.append(Spacer(1, 15))
+    
+    story.append(Paragraph("2. Einzelnachweis aller Transaktionen", subtitle_style))
+    story.append(Spacer(1, 5))
+    
+    det_cols = ['Datum', 'Bestellnummer', 'SKU', 'Stück', 'Erlös Brutto (€)', 'Abrechnungsbetrag (€)']
+    det_df = details_df[['Datum der Transaktionserstellung', 'Bestellnummer', 'SKU', 'Menge', 'eBay_Brutto', 'Auszahlung_Evelyn_Brutto']].copy()
+    det_df.columns = det_cols
+    
+    det_data = [[Paragraph(col, header_cell_style) for col in det_cols]]
+    for _, row in det_df.iterrows():
+        r_list = []
+        for col in det_cols:
+            val = row[col]
+            if isinstance(val, float):
+                val = f"{val:.2f} €".replace('.', ',')
+            r_list.append(Paragraph(str(val), cell_style))
+        det_data.append(r_list)
+        
+    t_det = Table(det_data)
+    t_det.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#4A5568")),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.lightgrey),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 3),
+        ('TOPPADDING', (0,0), (-1,-1), 3),
+    ]))
+    story.append(t_det)
+    
+    doc.build(story)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+# Lexoffice API Funktionen
+def get_lexoffice_contact_id(api_key, name):
+    headers = {"Authorization": f"Bearer {api_key}"}
+    res = requests.get(f"https://api.lexoffice.io/v1/contacts?name={name}", headers=headers)
+    if res.status_code == 200:
+        data = res.json()
+        if data.get('content'):
+            return data['content'][0]['id']
+    return None
+
+def create_lexoffice_invoice(api_key, contact_id, line_items, remark):
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+    payload = {
+        "archived": False,
+        "voucherDate": pd.Timestamp.now().strftime("%Y-%m-%d"),
+        "address": {"contactId": contact_id},
+        "lineItems": line_items,
+        "totalPrice": {"currency": "EUR"},
+        "taxConditions": {"taxType": "net"},
+        "remark": remark
+    }
+    res = requests.post("https://api.lexoffice.io/v1/invoices?finalize=false", headers=headers, json=payload)
+    if res.status_code in [200, 201]:
+        return res.json()['id']
+    else:
+        st.error(f"Fehler beim Erstellen der Rechnung in Lexoffice: {res.text}")
+        return None
+
+def upload_lexoffice_document(api_key, invoice_id, pdf_bytes, filename):
+    headers = {"Authorization": f"Bearer {api_key}"}
+    files = {"file": (filename, pdf_bytes, "application/pdf")}
+    res = requests.post(f"https://api.lexoffice.io/v1/invoices/{invoice_id}/document", headers=headers, files=files)
+    return res.status_code in [200, 201]
 
 GROUP_A_PREFIXES = ['PP', 'BA', 'MK', '001']
 
@@ -67,156 +182,29 @@ if uploaded_payout:
         
         df_payout = pd.concat(all_dfs, ignore_index=True)
         
-        # Säubern & Vorbereiten
         df_payout['Bestellnummer_Match'] = df_payout['Bestellnummer'].apply(clean_order_number)
         df_payout = df_payout.drop_duplicates(subset=['Bestellnummer_Match', 'Datum der Transaktionserstellung', 'Betrag abzügl. Kosten'])
         
         df_payout['eBay_Brutto'] = df_payout['Betrag abzügl. Kosten'].apply(parse_german_float)
         df_payout['eBay_Netto'] = (df_payout['eBay_Brutto'] / 1.19).round(2)
-        df_payout['eBay_MwSt'] = (df_payout['eBay_Brutto'] - df_payout['eBay_Netto']).round(2)
         
         df_payout['SKU'] = df_payout['Bestandseinheit'].fillna('OHNE_SKU').astype(str).str.strip()
         df_payout['SKU_Prefix'] = df_payout['SKU'].apply(extract_partner_prefix)
-        
-        # Menge / Stückzahl extrahieren
-        if 'Stückzahl' in df_payout.columns:
-            df_payout['Menge'] = pd.to_numeric(df_payout['Stückzahl'], errors='coerce').fillna(1).astype(int)
-        elif 'Anzahl' in df_payout.columns:
-            df_payout['Menge'] = pd.to_numeric(df_payout['Anzahl'], errors='coerce').fillna(1).astype(int)
-        else:
-            df_payout['Menge'] = 1
+        df_payout['Menge'] = 1
 
         df_payout['Gruppe'] = df_payout['SKU_Prefix'].apply(
             lambda p: 'Gruppe A (Direkt)' if p in GROUP_A_PREFIXES else ('Ohne Zuordnung' if p == 'OHNE_SKU' else 'Gruppe B (Über Dich)')
         )
         
-        # Provisionen berechnen (Brutto & Netto)
         df_payout['Evelyn_Prov_EUR'] = (df_payout['eBay_Brutto'] * 0.005).round(2)
         df_payout['Auszahlung_Evelyn_Brutto'] = (df_payout['eBay_Brutto'] - df_payout['Evelyn_Prov_EUR']).round(2)
-        
-        df_payout['Partner_Prov_Satz'] = df_payout['SKU_Prefix'].apply(lambda p: 0.005 if p in GROUP_A_PREFIXES else 0.035)
-        df_payout['Partner_Prov_EUR'] = (df_payout['eBay_Brutto'] * df_payout['Partner_Prov_Satz']).round(2)
-        df_payout['Auszahlung_Partner_Brutto'] = (df_payout['eBay_Brutto'] - df_payout['Partner_Prov_EUR']).round(2)
-        
-        df_payout['Deine_Marge_EUR'] = df_payout.apply(
-            lambda r: (r['Partner_Prov_EUR'] - r['Evelyn_Prov_EUR']) if r['Gruppe'] == 'Gruppe B (Über Dich)' else 0.0, axis=1
-        ).round(2)
-
-        # ---------------------------------------------------------
-        # SOLL-IST STATUS OVERVIEW & INTERNE MARGE
-        # ---------------------------------------------------------
-        if uploaded_invoice is not None:
-            if uploaded_invoice.name.endswith('.xlsx'):
-                df_inv_raw = pd.read_excel(uploaded_invoice)
-                header_row_idx = 0
-                for r_idx, row in df_inv_raw.iterrows():
-                    if any("Bestellnummer" in str(val) for val in row.values):
-                        header_row_idx = r_idx
-                        break
-                df_inv = pd.read_excel(uploaded_invoice, header=header_row_idx)
-            else:
-                df_inv = pd.read_csv(uploaded_invoice)
-            
-            inv_col = None
-            for col in df_inv.columns:
-                if "Bestellnummer" in str(col) or "Order" in str(col) or "Bestell-Nr" in str(col):
-                    inv_col = col
-                    break
-            
-            if inv_col:
-                df_inv['Bestellnummer_Match'] = df_inv[inv_col].apply(clean_order_number)
-                payout_orders = set(df_payout['Bestellnummer_Match'].dropna()) - {''}
-                inv_orders = set(df_inv['Bestellnummer_Match'].dropna()) - {''}
-                
-                paid_count = len(inv_orders.intersection(payout_orders))
-                unpaid_count = len(inv_orders - payout_orders)
-                
-                st.markdown("---")
-                st.subheader("⚖️ Soll-Ist Statusübersicht & Interne Kennzahlen")
-                m1, m2, m3, m4, m5 = st.columns(5)
-                m1.metric("Rechnung Positionen", len(inv_orders))
-                m2.metric("✅ Ausbezahlt", f"{paid_count} Pos.")
-                m3.metric("⏳ Noch Offen", f"{unpaid_count} Pos.")
-                m4.metric("💰 Gesamterlös Brutto", f"{df_payout['eBay_Brutto'].sum():,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
-                m5.metric("🔒 Deine Marge (3,0 % Gruppe B)", f"{df_payout['Deine_Marge_EUR'].sum():,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
-
-        # ---------------------------------------------------------
-        # BLOCK 1: GRUPPE A – DIREKTABRECHNUNG MIT EVELYN
-        # ---------------------------------------------------------
-        st.markdown("---")
-        st.subheader("🏷️ 1. Gruppe A – Direktabrechnungen für Evelyn (PP, BA, MK, 001)")
-        st.info("ℹ️ **Verwendungszweck:** Diese Umsätze rechnen mit 0,5 % Provision direkt mit Evelyn ab.")
-
-        df_grp_a = df_payout[df_payout['Gruppe'] == 'Gruppe A (Direkt)'].copy()
-
-        if not df_grp_a.empty:
-            summary_a = df_grp_a.groupby('SKU_Prefix').agg(
-                Anzahl_Transaktionen=('SKU', 'count'),
-                Erlös_Netto=('eBay_Netto', 'sum'),
-                Erlös_Brutto=('eBay_Brutto', 'sum'),
-                Evelyn_Provision=('Evelyn_Prov_EUR', 'sum'),
-                Auszahlungsbetrag=('Auszahlung_Evelyn_Brutto', 'sum')
-            ).reset_index()
-
-            summary_a['Rabatt_Prozent'] = "0,5 %"
-
-            total_row_a = pd.DataFrame([{
-                'SKU_Prefix': 'GESAMTSUMME',
-                'Anzahl_Transaktionen': summary_a['Anzahl_Transaktionen'].sum(),
-                'Erlös_Netto': summary_a['Erlös_Netto'].sum(),
-                'Erlös_Brutto': summary_a['Erlös_Brutto'].sum(),
-                'Rabatt_Prozent': "0,5 %",
-                'Evelyn_Provision': summary_a['Evelyn_Provision'].sum(),
-                'Auszahlungsbetrag': summary_a['Auszahlungsbetrag'].sum()
-            }])
-
-            summary_a_final = pd.concat([summary_a, total_row_a], ignore_index=True)
-
-            summary_a_display = summary_a_final[[
-                'SKU_Prefix', 'Anzahl_Transaktionen', 'Erlös_Netto', 'Rabatt_Prozent', 'Evelyn_Provision', 'Erlös_Brutto', 'Auszahlungsbetrag'
-            ]].rename(columns={
-                'SKU_Prefix': 'Partner / Kürzel',
-                'Anzahl_Transaktionen': 'Anzahl Transaktionen',
-                'Erlös_Netto': 'VK Netto Lexoffice (€)',
-                'Rabatt_Prozent': 'Rabatt %',
-                'Evelyn_Provision': 'Provision (€)',
-                'Erlös_Brutto': 'Erlös Brutto (€)',
-                'Auszahlungsbetrag': 'Abrechnungsbetrag Brutto (€)'
-            })
-
-            st.dataframe(
-                summary_a_display.style.format({
-                    'VK Netto Lexoffice (€)': '{:.2f} €',
-                    'Provision (€)': '{:.2f} €',
-                    'Erlös Brutto (€)': '{:.2f} €',
-                    'Abrechnungsbetrag Brutto (€)': '{:.2f} €'
-                }),
-                use_container_width=True
-            )
-
-            buffer_evelyn_a = io.BytesIO()
-            with pd.ExcelWriter(buffer_evelyn_a, engine='openpyxl') as writer:
-                summary_a_display.to_excel(writer, index=False, sheet_name='Übersicht_Gruppe_A')
-                df_grp_a[df_grp_a['eBay_Brutto'] >= 0].to_excel(writer, index=False, sheet_name='Verkäufe')
-                df_grp_a[df_grp_a['eBay_Brutto'] < 0].to_excel(writer, index=False, sheet_name='Gutschriften')
-
-            st.download_button(
-                label="📥 Übersicht Gruppe A für Evelyn herunterladen (Excel)",
-                data=buffer_evelyn_a.getvalue(),
-                file_name="Direktabrechnungen_GruppeA_fuer_Evelyn.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-
-        # ---------------------------------------------------------
-        # BLOCK 2: GESAMTABRECHNUNG FÜR EVELYN (NUR GRUPPE B)
-        # ---------------------------------------------------------
-        st.markdown("---")
-        st.subheader("📊 2. Gruppe B – Gesamtabrechnung für Evelyn (Über DICH)")
-        st.info("ℹ️ **Lexoffice-Anleitung:** Trage pro Partner den 'VK Netto Lexoffice' und '0,5 % Rabatt' ein.")
 
         df_grp_b = df_payout[df_payout['Gruppe'] == 'Gruppe B (Über Dich)'].copy()
 
         if not df_grp_b.empty:
+            st.markdown("---")
+            st.subheader("📊 Vorschau für Lexoffice")
+            
             summary_b = df_grp_b.groupby('SKU_Prefix').agg(
                 Anzahl_Transaktionen=('SKU', 'count'),
                 Erlös_Netto=('eBay_Netto', 'sum'),
@@ -226,223 +214,59 @@ if uploaded_payout:
             ).reset_index()
 
             summary_b['Rabatt_Prozent'] = "0,5 %"
-            
-            total_row_b = pd.DataFrame([{
-                'SKU_Prefix': 'GESAMTSUMME',
-                'Anzahl_Transaktionen': summary_b['Anzahl_Transaktionen'].sum(),
-                'Erlös_Netto': summary_b['Erlös_Netto'].sum(),
-                'Erlös_Brutto': summary_b['Erlös_Brutto'].sum(),
-                'Rabatt_Prozent': "0,5 %",
-                'Evelyn_Provision': summary_b['Evelyn_Provision'].sum(),
-                'Auszahlungsbetrag': summary_b['Auszahlungsbetrag'].sum()
-            }])
-            
-            summary_b_final = pd.concat([summary_b, total_row_b], ignore_index=True)
-            
-            summary_b_display = summary_b_final[[
-                'SKU_Prefix', 'Anzahl_Transaktionen', 'Erlös_Netto', 'Rabatt_Prozent', 'Evelyn_Provision', 'Erlös_Brutto', 'Auszahlungsbetrag'
-            ]].rename(columns={
-                'SKU_Prefix': 'Partner / Kürzel',
-                'Anzahl_Transaktionen': 'Anzahl Transaktionen',
-                'Erlös_Netto': 'VK Netto Lexoffice (€)',
-                'Rabatt_Prozent': 'Rabatt %',
-                'Evelyn_Provision': 'Provision (€)',
-                'Erlös_Brutto': 'Erlös Brutto (€)',
-                'Auszahlungsbetrag': 'Abrechnungsbetrag Brutto (€)'
-            })
-            
-            st.dataframe(
-                summary_b_display.style.format({
-                    'VK Netto Lexoffice (€)': '{:.2f} €',
-                    'Provision (€)': '{:.2f} €',
-                    'Erlös Brutto (€)': '{:.2f} €',
-                    'Abrechnungsbetrag Brutto (€)': '{:.2f} €'
-                }),
-                use_container_width=True
-            )
+            st.dataframe(summary_b, use_container_width=True)
 
-            buffer_evelyn_b = io.BytesIO()
-            with pd.ExcelWriter(buffer_evelyn_b, engine='openpyxl') as writer:
-                summary_b_display.to_excel(writer, index=False, sheet_name='Übersicht_Gruppe_B')
-                df_grp_b[df_grp_b['eBay_Brutto'] >= 0].to_excel(writer, index=False, sheet_name='Verkäufe')
-                df_grp_b[df_grp_b['eBay_Brutto'] < 0].to_excel(writer, index=False, sheet_name='Gutschriften')
-                
-            st.download_button(
-                label="📥 Gesamtabrechnung Gruppe B für Evelyn herunterladen (Excel)",
-                data=buffer_evelyn_b.getvalue(),
-                file_name="Gesamtabrechnung_GruppeB_fuer_Evelyn.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary"
-            )
+            pdf_bytes = generate_pdf_report("Rechnungsanlage – Gesamtabrechnung Gruppe B", summary_b, df_grp_b)
 
-        # ---------------------------------------------------------
-        # BLOCK 3: GUTSCHRIFTEN & ERSTATTUNGEN (ÜBERBLICK)
-        # ---------------------------------------------------------
-        st.markdown("---")
-        st.subheader("🔻 3. Gutschriften, Erstattungen & Gebühren (Für Lexoffice)")
-
-        df_refunds = df_payout[(df_payout['eBay_Brutto'] < 0) | (df_payout['SKU_Prefix'] == 'OHNE_SKU')].copy()
-
-        if not df_refunds.empty:
-            refund_display = df_refunds[[
-                'Datum der Transaktionserstellung',
-                'Bestellnummer',
-                'SKU_Prefix',
-                'SKU',
-                'Menge',
-                'Angebotstitel',
-                'eBay_Netto',
-                'eBay_Brutto',
-                'Partner_Prov_EUR',
-                'Auszahlung_Partner_Brutto'
-            ]].rename(columns={
-                'Datum der Transaktionserstellung': 'Datum',
-                'SKU_Prefix': 'Partner',
-                'Menge': 'Stück',
-                'eBay_Netto': 'Gutschrift Netto (€)',
-                'eBay_Brutto': 'Gutschrift Brutto (€)',
-                'Partner_Prov_EUR': 'Erstattete Provision (€)',
-                'Auszahlung_Partner_Brutto': 'Abrechnungsbetrag (€)'
-            })
-
-            sum_refunds = pd.DataFrame([{
-                'Datum': 'GESAMTSUMME',
-                'Bestellnummer': '',
-                'Partner': '',
-                'SKU': '',
-                'Stück': refund_display['Stück'].sum(),
-                'Angebotstitel': '',
-                'Gutschrift Netto (€)': refund_display['Gutschrift Netto (€)'].sum(),
-                'Gutschrift Brutto (€)': refund_display['Gutschrift Brutto (€)'].sum(),
-                'Erstattete Provision (€)': refund_display['Erstattete Provision (€)'].sum(),
-                'Abrechnungsbetrag (€)': refund_display['Abrechnungsbetrag (€)'].sum()
-            }])
-
-            refund_final = pd.concat([refund_display, sum_refunds], ignore_index=True)
-
-            st.dataframe(
-                refund_final.style.format({
-                    'Gutschrift Netto (€)': '{:.2f} €',
-                    'Gutschrift Brutto (€)': '{:.2f} €',
-                    'Erstattete Provision (€)': '{:.2f} €',
-                    'Abrechnungsbetrag (€)': '{:.2f} €'
-                }, na_rep=''),
-                use_container_width=True
-            )
-
-        # ---------------------------------------------------------
-        # BLOCK 4: VERKÄUFE INKLUSIVE GUTSCHRIFT (EINZELABRECHNUNG KUNDEN)
-        # ---------------------------------------------------------
-        st.markdown("---")
-        st.subheader("🔍 4. Einzelabrechnungen (Verkäufe inklusive Gutschrift)")
-        st.info("ℹ️ **Verwendungszweck:** Hier wählst du deinen jeweiligen Kunden aus. Erschienen sind die VK Netto Werte inklusive des 3,5 % Rabatts.")
-
-        all_partners = sorted([p for p in df_payout['SKU_Prefix'].unique() if p not in ['OHNE_SKU', 'FEHLT', '--', '']])
-        
-        if all_partners:
-            partner_options = ["-- Bitte Partner auswählen --"] + all_partners
-            selected_partner = st.selectbox("Partner / Kürzel auswählen:", partner_options)
-            
-            if selected_partner != "-- Bitte Partner auswählen --":
-                filtered_p = df_payout[df_payout['SKU_Prefix'] == selected_partner].copy()
-                
-                prov_rate_pct_val = 0.5 if selected_partner in GROUP_A_PREFIXES else 3.5
-                prov_rate_str = f"{prov_rate_pct_val:.1f} %".replace('.', ',')
-                
-                df_sales = filtered_p[filtered_p['eBay_Brutto'] >= 0].copy()
-                df_retouren = filtered_p[filtered_p['eBay_Brutto'] < 0].copy()
-                
-                # --- TABELLE 1: VERKÄUFE ---
-                st.markdown(f"#### 🛍️ Verkäufe ({len(df_sales)} Positionen)")
-                if not df_sales.empty:
-                    partner_sales = df_sales[[
-                        'Datum der Transaktionserstellung', 'Bestellnummer', 'SKU_Prefix', 'SKU', 'Menge', 'Angebotstitel',
-                        'eBay_Netto', 'eBay_Brutto', 'Partner_Prov_EUR', 'Auszahlung_Partner_Brutto'
-                    ]].rename(columns={
-                        'Datum der Transaktionserstellung': 'Datum', 
-                        'SKU_Prefix': 'Partner',
-                        'Menge': 'Stück',
-                        'eBay_Netto': 'VK Netto Lexoffice (€)',
-                        'eBay_Brutto': 'Erlös Brutto (€)', 
-                        'Partner_Prov_EUR': f'Provision {prov_rate_str} (€)', 
-                        'Auszahlung_Partner_Brutto': 'Abrechnungsbetrag (€)'
-                    })
-                    
-                    partner_sales.insert(7, 'Rabatt %', prov_rate_str)
-                    
-                    sum_sales = pd.DataFrame([{
-                        'Datum': 'GESAMTSUMME VERKÄUFE', 'Bestellnummer': '', 'Partner': selected_partner, 'SKU': '', 'Stück': partner_sales['Stück'].sum(), 'Angebotstitel': '',
-                        'VK Netto Lexoffice (€)': partner_sales['VK Netto Lexoffice (€)'].sum(),
-                        'Rabatt %': prov_rate_str,
-                        'Erlös Brutto (€)': partner_sales['Erlös Brutto (€)'].sum(),
-                        f'Provision {prov_rate_str} (€)': partner_sales[f'Provision {prov_rate_str} (€)'].sum(),
-                        'Abrechnungsbetrag (€)': partner_sales['Abrechnungsbetrag (€)'].sum()
-                    }])
-                    final_sales = pd.concat([partner_sales, sum_sales], ignore_index=True)
-                    
-                    st.dataframe(
-                        final_sales.style.format({
-                            'VK Netto Lexoffice (€)': '{:.2f} €',
-                            'Erlös Brutto (€)': '{:.2f} €', 
-                            f'Provision {prov_rate_str} (€)': '{:.2f} €', 
-                            'Abrechnungsbetrag (€)': '{:.2f} €'
-                        }, na_rep=''), 
-                        use_container_width=True
-                    )
+            st.markdown("---")
+            if st.button("🚀 JETZT AUTOMATISCH IN LEXOFFICE ANLEGEN", type="primary"):
+                if not lexoffice_api_key:
+                    st.error("Bitte trage zuerst deinen Lexoffice API-Key in der linken Seitenleiste ein!")
                 else:
-                    st.info("Keine Verkäufe im aktuellen Zeitraum vorhanden.")
-
-                # --- TABELLE 2: GUTSCHRIFTEN & RETOUREN ---
-                if not df_retouren.empty:
-                    st.markdown(f"#### 🔻 Gutschriften / Erstattungen ({len(df_retouren)} Positionen)")
-                    partner_retouren = df_retouren[[
-                        'Datum der Transaktionserstellung', 'Bestellnummer', 'SKU_Prefix', 'SKU', 'Menge', 'Angebotstitel',
-                        'eBay_Netto', 'eBay_Brutto', 'Partner_Prov_EUR', 'Auszahlung_Partner_Brutto'
-                    ]].rename(columns={
-                        'Datum der Transaktionserstellung': 'Datum', 
-                        'SKU_Prefix': 'Partner',
-                        'Menge': 'Stück',
-                        'eBay_Netto': 'Gutschrift Netto (€)',
-                        'eBay_Brutto': 'Gutschrift Brutto (€)', 
-                        'Partner_Prov_EUR': f'Erstattete Provision {prov_rate_str} (€)', 
-                        'Auszahlung_Partner_Brutto': 'Abrechnungsbetrag (€)'
-                    })
+                    with st.spinner("Suche Kunde in Lexoffice..."):
+                        contact_id = get_lexoffice_contact_id(lexoffice_api_key, customer_name_search)
                     
-                    ret_prov_col = f'Erstattete Provision {prov_rate_str} (€)'
-                    
-                    sum_retouren = pd.DataFrame([{
-                        'Datum': 'GESAMTSUMME GUTSCHRIFTEN', 'Bestellnummer': '', 'Partner': selected_partner, 'SKU': '', 'Stück': partner_retouren['Stück'].sum(), 'Angebotstitel': '',
-                        'Gutschrift Netto (€)': partner_retouren['Gutschrift Netto (€)'].sum(),
-                        'Gutschrift Brutto (€)': partner_retouren['Gutschrift Brutto (€)'].sum(),
-                        ret_prov_col: partner_retouren[ret_prov_col].sum(),
-                        'Abrechnungsbetrag (€)': partner_retouren['Abrechnungsbetrag (€)'].sum()
-                    }])
-                    final_retouren = pd.concat([partner_retouren, sum_retouren], ignore_index=True)
-                    
-                    st.dataframe(
-                        final_retouren.style.format({
-                            'Gutschrift Netto (€)': '{:.2f} €',
-                            'Gutschrift Brutto (€)': '{:.2f} €', 
-                            ret_prov_col: '{:.2f} €', 
-                            'Abrechnungsbetrag (€)': '{:.2f} €'
-                        }, na_rep=''), 
-                        use_container_width=True
-                    )
-
-                # EXPORT IN EXCEL MIT TAB-TRENNUNG
-                buffer_partner_excel = io.BytesIO()
-                with pd.ExcelWriter(buffer_partner_excel, engine='openpyxl') as writer:
-                    if not df_sales.empty:
-                        final_sales.to_excel(writer, index=False, sheet_name='Verkäufe')
-                    if not df_retouren.empty:
-                        final_retouren.to_excel(writer, index=False, sheet_name='Gutschriften')
-                    
-                st.download_button(
-                    label=f"📥 Excel-Abrechnung für '{selected_partner}' herunterladen (inkl. Tabs)",
-                    data=buffer_partner_excel.getvalue(),
-                    file_name=f"Abrechnung_Partner_{selected_partner}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+                    if not contact_id:
+                        st.error(f"Kunde '{customer_name_search}' wurde in Lexoffice nicht gefunden! Bitte stelle sicher, dass der Kunde unter Kontakte in Lexoffice existiert.")
+                    else:
+                        line_items = []
+                        if "Option A" in position_mode:
+                            for _, r in summary_b.iterrows():
+                                line_items.append({
+                                    "type": "custom",
+                                    "name": f"Abrechnung Partner {r['SKU_Prefix']} ({r['Anzahl_Transaktionen']} Stück laut Anlage)",
+                                    "quantity": 1,
+                                    "unitName": "Stück",
+                                    "unitPrice": {"currency": "EUR", "netAmount": round(r['Erlös_Netto'], 2), "taxRatePercentage": 19},
+                                    "discountPercentage": 0.5
+                                })
+                        else:
+                            for _, r in df_grp_b.iterrows():
+                                line_items.append({
+                                    "type": "custom",
+                                    "name": f"Bestellung {r['Bestellnummer']} | SKU: {r['SKU']}",
+                                    "quantity": 1,
+                                    "unitName": "Stück",
+                                    "unitPrice": {"currency": "EUR", "netAmount": round(r['eBay_Netto'], 2), "taxRatePercentage": 19},
+                                    "discountPercentage": 0.5
+                                })
+                        
+                        remark_text = "Die detaillierte Einzelaufstellung der Verkäufe und Rückerstattungen entnehmen Sie bitte der beigefügten Anlage."
+                        
+                        with st.spinner("Erstelle Rechnungsentwurf in Lexoffice..."):
+                            inv_id = create_lexoffice_invoice(lexoffice_api_key, contact_id, line_items, remark_text)
+                        
+                        if inv_id:
+                            st.success(f"✅ Rechnung erfolgreich als Entwurf in Lexoffice angelegt! (ID: {inv_id})")
+                            
+                            with st.spinner("Hänge PDF-Einzelnachweis an den Entwurf an..."):
+                                ok = upload_lexoffice_document(lexoffice_api_key, inv_id, pdf_bytes, "Rechnungsanlage_Details.pdf")
+                            
+                            if ok:
+                                st.balloons()
+                                st.success("🎉 PERFEKT: Die PDF-Anlage wurde unrennbar an die Lexoffice-Rechnung angehängt!")
+                            else:
+                                st.warning("Rechnung wurde angelegt, aber das PDF konnte nicht angehängt werden.")
 
     except Exception as e:
-        st.error(f"Fehler beim Verarbeiten der Dateien: {e}")
+        st.error(f"Fehler: {e}")
