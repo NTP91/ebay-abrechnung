@@ -49,7 +49,7 @@ if uploaded_payout:
         df_payout = pd.concat(all_dfs, ignore_index=True)
         df_payout = df_payout.drop_duplicates(subset=['Bestellnummer', 'Datum der Transaktionserstellung', 'Betrag abzügl. Kosten'])
         
-        # Berechnungen genau wie in deinem Screenshot
+        # Berechnungen
         df_payout['eBay_Brutto'] = df_payout['Betrag abzügl. Kosten'].apply(parse_german_float)
         df_payout['SKU'] = df_payout['Bestandseinheit'].fillna('OHNE_SKU').astype(str).str.strip()
         df_payout['Provisionssatz'] = df_payout['SKU'].apply(get_commission_rate)
@@ -91,7 +91,7 @@ if uploaded_payout:
                     st.dataframe(df_missing, use_container_width=True)
 
         st.markdown("---")
-        st.subheader("📊 1. Gesamtabrechnung für Evelyn (Alle Positionen & Partner)")
+        st.subheader("📊 1. Gesamtabrechnung für Evelyn (Intern mit allen Details & Provisionen)")
         
         summary = df_payout.groupby('SKU_Prefix').agg(
             Anzahl_Transaktionen=('SKU', 'count'),
@@ -119,7 +119,7 @@ if uploaded_payout:
             use_container_width=True
         )
 
-        # Download für Evelyn (Alles in einer Excel)
+        # Interner Download für Evelyn (enthält Deine Provision)
         export_evelyn_details = df_payout[[
             'Datum der Transaktionserstellung',
             'Bestellnummer',
@@ -154,7 +154,7 @@ if uploaded_payout:
         )
 
         st.markdown("---")
-        st.subheader("🔍 2. Einzelabrechnung pro Partner")
+        st.subheader("🔍 2. Einzelabrechnung pro Partner (Für Kunden / Partner-Export)")
         
         valid_skus = [s for s in summary['SKU_Prefix'].unique() if s not in ['FEHLT', '--', '']]
         if not valid_skus:
@@ -164,7 +164,7 @@ if uploaded_payout:
         
         filtered_p = df_payout[df_payout['SKU_Prefix'] == selected_sku].copy()
         
-        # Genau der Aufbau aus deinem Screenshot
+        # Partner-Ansicht: OHNE "Deine Provision (€)"
         partner_display = filtered_p[[
             'Datum der Transaktionserstellung',
             'Bestellnummer',
@@ -174,7 +174,6 @@ if uploaded_payout:
             'eBay_Brutto',
             'VK_Netto',
             'Rabatt_Prozent',
-            'Provision_EUR',
             'Auszahlung_Partner_Brutto'
         ]].rename(columns={
             'Datum der Transaktionserstellung': 'Datum',
@@ -182,7 +181,6 @@ if uploaded_payout:
             'eBay_Brutto': 'eBay Erlös Brutto (€)',
             'VK_Netto': 'VK Netto (€)',
             'Rabatt_Prozent': 'Provision (%)',
-            'Provision_EUR': 'Deine Provision (€)',
             'Auszahlung_Partner_Brutto': 'Auszahlungsbetrag Brutto (€)'
         })
         
@@ -196,7 +194,6 @@ if uploaded_payout:
             'eBay Erlös Brutto (€)': partner_display['eBay Erlös Brutto (€)'].sum(),
             'VK Netto (€)': partner_display['VK Netto (€)'].sum(),
             'Provision (%)': partner_display['Provision (%)'].iloc[0] if len(partner_display) > 0 else 0,
-            'Deine Provision (€)': partner_display['Deine Provision (€)'].sum(),
             'Auszahlungsbetrag Brutto (€)': partner_display['Auszahlungsbetrag Brutto (€)'].sum()
         }])
         
@@ -206,7 +203,6 @@ if uploaded_payout:
             partner_final.style.format({
                 'eBay Erlös Brutto (€)': '{:.2f} €',
                 'VK Netto (€)': '{:.2f} €',
-                'Deine Provision (€)': '{:.2f} €',
                 'Auszahlungsbetrag Brutto (€)': '{:.2f} €'
             }, na_rep=''),
             use_container_width=True
