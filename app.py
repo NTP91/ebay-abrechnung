@@ -1,109 +1,103 @@
-import os
-import pandas as pd
 import streamlit as st
-from importer import import_payout_files
-from core import save_and_merge_order_reports, build_transaction_overview
-
-UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), 'uploads')
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-
-MASTER_CSV_PATH = os.path.join(os.path.dirname(__file__), 'Master_Payouts.csv')
-
-st.set_page_config(page_title="eBay Abrechnung", layout="wide")
-
-# --- SIDEBAR: EINSTELLUNGEN & UPLOAD ---
-st.sidebar.title("⚙️ Einstellungen & Datenbank")
-
-st.sidebar.markdown("### 📌 Bestellberichte importieren")
-st.sidebar.caption("Wähle hier beide Dateien (CSV & XLSX) gleichzeitig aus:")
-
-uploaded_orders = st.sidebar.file_uploader(
-    "Bestellberichte (CSV & XLSX)", 
-    type=["csv", "xlsx", "xls"], 
-    accept_multiple_files=True,
-    key="order_uploader"
+import pandas as pd
+from core import (
+    load_master_data, 
+    get_group_b_summary, 
+    get_group_a_summary, 
+    get_refunds_summary, 
+    export_to_excel
 )
 
-if uploaded_orders:
-    if st.sidebar.button("Bestellberichte verarbeiten"):
-        save_and_merge_order_reports(uploaded_orders, upload_folder=UPLOAD_FOLDER)
-        st.sidebar.success("Bestellberichte verarbeitet!")
-        st.rerun()
+st.set_page_config(page_title="eBay Payout & Evelyn Billing Engine", layout="wide")
 
-st.sidebar.markdown("---")
-st.sidebar.markdown("### 📌 Payout CSVs importieren")
+df_master = load_master_data()
 
-uploaded_payouts = st.sidebar.file_uploader(
-    "Payout CSVs hochladen", 
-    type=["csv"], 
-    accept_multiple_files=True,
-    key="payout_uploader"
-)
+# ---------------------------------------------------------
+# SOLL-IST STATUSÜBERSICHT (KPI CARDS)
+# ---------------------------------------------------------
+st.markdown("### ⚖️ Soll-Ist Statusübersicht")
 
-logs = []
-if uploaded_payouts:
-    if st.sidebar.button("Payouts speichern & entdoppeln"):
-        for file in uploaded_payouts:
-            filepath = os.path.join(UPLOAD_FOLDER, file.name)
-            with open(filepath, "wb") as f:
-                f.write(file.getbuffer())
+if not df_master.empty:
+    total_pos = len(df_master)
+    ausbezahlt_pos = len(df_master[df_master['Status'] == 'Ausbezahlt'])
+    offen_pos = total_pos - ausbezahlt_pos
+    erloes_brutto = df_master['Erlös_Brutto'].sum()
+    auszahlung_partner = erloes_brutto * 0.965
 
-        _, logs = import_payout_files(
-            input_directory=UPLOAD_FOLDER, 
-            output_master_csv=MASTER_CSV_PATH
-        )
-        st.rerun()
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("Rechnung Positionen", f"{total_pos}")
+    col2.metric("✅ Ausbezahlt", f"{ausbezahlt_pos} Pos.")
+    col3.metric("⏳ Noch Offen", f"{offen_pos} Pos.")
+    col4.metric("💰 eBay Erlös Brutto", f"{erloes_brutto:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
+    col5.metric("🤝 Auszahlung Partner Brutto", f"{auszahlung_partner:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
 
-# DB-Status Anzeigen
-st.sidebar.markdown("---")
-st.sidebar.markdown("### 📦 DB-Status")
+    with st.expander(f"🔴 Liste der {offen_pos} noch nicht ausgezahlten Positionen anzeigen"):
+        st.dataframe(df_master[df_master['Status'] != 'Ausbezahlt'], use_container_width=True)
 
-orders_df_count = 0
-if os.path.exists("Master_Orders.csv"):
-    try:
-        orders_df_count = len(pd.read_csv("Master_Orders.csv", sep=';', dtype=str))
-    except Exception:
-        pass
+st.markdown("---")
 
-payout_count = 0
-if os.path.exists(MASTER_CSV_PATH):
-    try:
-        payout_count = len(pd.read_csv(MASTER_CSV_PATH, sep=';', dtype=str))
-    except Exception:
-        pass
+# ---------------------------------------------------------
+# 1. GRUPPE B – GESAMTABRECHNUNG FÜR EVELYN (ÜBER DICH)
+# ---------------------------------------------------------
+st.markdown("### 📊 1. Gruppe B – Gesamtabrechnung für Evelyn (Über DICH)")
+st.info("ℹ️ **Verwendungszweck:** Diese Rechnung nutzt du für die Abrechnung gegenüber Evelyn. Sie enthält NUR die Umsätze aus Gruppe B, die über dich verteilt werden. Evelyn behält 0,5 % Provision.")
 
-st.sidebar.text(f"• Artikel in DB: {orders_df_count}")
-st.sidebar.text(f"• Gesp. Payout-Zeilen: {payout_count}")
+df_b = get_group_b_summary(df_master)
+if not df_b.empty:
+    # Formatiere Währung für Anzeige
+    df_b_disp = df_b.copy()
+    for col in ['eBay_Brutto_Gesamt', 'Evelyn_Provision_0_5', 'Auszahlung_von_Evelyn_an_Dich', 'Deine_Marge_3_0']:
+        df_b_disp[col] = df_b_disp[col].apply(lambda x: f"{x:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
 
-if st.sidebar.button("🗑️ Datenbank komplett leeren"):
-    for f in [MASTER_CSV_PATH, "Master_Orders.csv"]:
-        if os.path.exists(f):
-            os.remove(f)
-    st.sidebar.warning("Datenbank zurückgesetzt!")
-    st.rerun()
+    st.dataframe(df_b_disp, use_container_width=True)
 
+    excel_b = export_to_excel(df_b)
+    st.download_button(
+        label="📑 Gesamtabrechnung Gruppe B für Evelyn herunterladen (Excel)",
+        data=excel_b,
+        file_name="Gesamtabrechnung_Gruppe_B_Evelyn.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        type="primary"
+    )
 
-# --- HAUPTANSICHT ---
+st.markdown("---")
 
-# Hinweis-Boxen bei Dubletten-Uploads anzeigen
-if logs:
-    for log in logs:
-        if "Übersprungen" in log:
-            st.warning(log)
-        else:
-            st.info(log)
+# ---------------------------------------------------------
+# 2. GRUPPE A – DIREKTABRECHNUNGEN FÜR EVELYN
+# ---------------------------------------------------------
+st.markdown("### 🏷️ 2. Gruppe A – Direktabrechnungen für Evelyn (PP, BA, MK, 001)")
+st.info("ℹ️ **Verwendungszweck:** Diese Partner rechnen mit 0,5 % Provision direkt mit Evelyn ab (laufen nicht über deine Marge).")
 
-st.title("📊 Übersicht aller Transaktionen (Dauerhaft in DB)")
+df_a = get_group_a_summary(df_master)
+if not df_a.empty:
+    df_a_disp = df_a.copy()
+    for col in ['eBay_Brutto_Gesamt', 'Evelyn_Provision_0_5', 'Direkt_Auszahlung_Evelyn']:
+        df_a_disp[col] = df_a_disp[col].apply(lambda x: f"{x:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
 
-# Daten für die Haupttabelle generieren
-df_display, order_db_size, total_netto = build_transaction_overview(
-    master_payout_path=MASTER_CSV_PATH,
-    master_orders_path="Master_Orders.csv"
-)
+    st.dataframe(df_a_disp, use_container_width=True)
 
-st.write(f"**Anzahl Gesamt:** {len(df_display)} Positionen | **Gesamtsumme Netto:** {total_netto:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
+    excel_a = export_to_excel(df_a)
+    st.download_button(
+        label="📥 Übersicht Gruppe A für Evelyn herunterladen (Excel)",
+        data=excel_a,
+        file_name="Uebersicht_Gruppe_A_Evelyn.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
-if not df_display.empty:
-    st.dataframe(df_display, use_container_width=True)
+st.markdown("---")
+
+# ---------------------------------------------------------
+# 3. GUTSCHRIFTEN & ERSTATTUNGEN (LEXOFFICE)
+# ---------------------------------------------------------
+st.markdown("### 🔻 2. Gutschriften & Erstattungen (Für Lexoffice-Gutschriften)")
+st.info("ℹ️ **Verwendungszweck:** Hier sind alle negativen Beträge (z. B. Retouren oder Versandgutschriften wie bei 001) aufgeführt. Nutze diese Übersicht, um in Lexoffice saubere Einzel-Gutschriften zu erstellen.")
+
+df_ref = get_refunds_summary(df_master)
+if not df_ref.empty:
+    df_ref_disp = df_ref.copy()
+    for col in ['Gutschrift_Brutto', 'Provision', 'Gutschrift_Netto_Auszahlung']:
+        df_ref_disp[col] = df_ref_disp[col].apply(lambda x: f"{x:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
+
+    st.dataframe(df_ref_disp, use_container_width=True)
 else:
-    st.info("Noch keine Transaktionen vorhanden. Bitte importiere Payouts und Bestellberichte über die Seitenleiste.")
+    st.write("Keine Gutschriften/Erstattungen vorhanden.")
