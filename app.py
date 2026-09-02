@@ -160,7 +160,21 @@ if uploaded_payout:
         df_payout['eBay_Netto'] = (df_payout['eBay_Brutto'] / 1.19).round(2)
         df_payout['SKU'] = df_payout['Bestandseinheit'].fillna('OHNE_SKU').astype(str).str.strip()
         df_payout['SKU_Prefix'] = df_payout['SKU'].apply(extract_partner_prefix)
-        df_payout['Menge'] = 1
+        
+        # Dynamisches Auslesen von Artikelbezeichnung und Menge/Stückzahl
+        if 'Angebotsüberschrift' in df_payout.columns:
+            df_payout['Artikelname'] = df_payout['Angebotsüberschrift'].fillna('-').astype(str)
+        elif 'Artikelbezeichnung' in df_payout.columns:
+            df_payout['Artikelname'] = df_payout['Artikelbezeichnung'].fillna('-').astype(str)
+        else:
+            df_payout['Artikelname'] = '-'
+
+        if 'Stückzahl' in df_payout.columns:
+            df_payout['Stück'] = df_payout['Stückzahl'].fillna(1)
+        elif 'Menge' in df_payout.columns:
+            df_payout['Stück'] = df_payout['Menge'].fillna(1)
+        else:
+            df_payout['Stück'] = 1
 
         df_payout['Gruppe'] = df_payout['SKU_Prefix'].apply(
             lambda p: 'Gruppe A (Direkt)' if p in GROUP_A_PREFIXES else ('Ohne Zuordnung' if p == 'OHNE_SKU' else 'Gruppe B (Über Dich)')
@@ -197,10 +211,10 @@ if uploaded_payout:
                     st.markdown(f"#### 📦 Partner: **{prefix}**")
                     st.write(f"Anzahl: {len(df_partner)} | Summe Netto: {df_partner['eBay_Netto'].sum():.2f} €")
                     
-                    export_cols = ['Bestellnummer', 'SKU', 'eBay_Netto', 'Datum der Transaktionserstellung']
-                    st.dataframe(df_partner[export_cols], use_container_width=True)
+                    export_cols_a = ['Bestellnummer', 'SKU', 'Artikelname', 'Stück', 'eBay_Netto', 'Datum der Transaktionserstellung']
+                    st.dataframe(df_partner[export_cols_a], use_container_width=True)
                     
-                    csv_data = df_partner[export_cols].to_csv(index=False, sep=';').encode('utf-8')
+                    csv_data = df_partner[export_cols_a].to_csv(index=False, sep=';').encode('utf-8')
                     st.download_button(
                         label=f"📥 CSV Exportieren für Partner ({prefix})",
                         data=csv_data,
@@ -220,7 +234,7 @@ if uploaded_payout:
             - **Partner-Downloads:** Unten findest du für jedes Partner-Kürzel die Aufschlüsselung inkl. **3,5 % Rabatt**, damit dir die Partner ihre Rechnung stellen können.
             """)
             st.write(f"**Anzahl Gesamt:** {len(df_grp_b)} Positionen | **Gesamtsumme Netto:** {df_grp_b['eBay_Netto'].sum():.2f} €")
-            st.dataframe(df_grp_b[['Bestellnummer', 'SKU', 'eBay_Netto', 'Datum der Transaktionserstellung']], use_container_width=True)
+            st.dataframe(df_grp_b[['Bestellnummer', 'SKU', 'Artikelname', 'Stück', 'eBay_Netto', 'Datum der Transaktionserstellung']], use_container_width=True)
 
             st.markdown("---")
             st.markdown("### 📥 Partner-Downloads & Aufschlüsselung (3,5 % Rabatt)")
@@ -238,7 +252,7 @@ if uploaded_payout:
                     anzahl = len(df_partner_b)
                     
                     with st.expander(f"📦 **Partner/Kürzel: {prefix}** — ({anzahl} Positionen | Netto: {summe_netto:.2f} € | **Auszahlung -3,5%: {summe_rabatt:.2f} €**)"):
-                        export_cols_b = ['Bestellnummer', 'SKU', 'eBay_Netto', 'Netto_abzgl_3_5_Prozent', 'Datum der Transaktionserstellung']
+                        export_cols_b = ['Bestellnummer', 'SKU', 'Artikelname', 'Stück', 'eBay_Netto', 'Netto_abzgl_3_5_Prozent', 'Datum der Transaktionserstellung']
                         
                         csv_data_b = df_partner_b[export_cols_b].to_csv(index=False, sep=';').encode('utf-8')
                         st.download_button(
@@ -259,11 +273,11 @@ if uploaded_payout:
             Bestellungen ohne bekannte SKU oder Prefix. Diese müssen manuell geprüft werden.
             """)
             st.write(f"**Anzahl:** {len(df_grp_none)} Positionen | **Summe Netto:** {df_grp_none['eBay_Netto'].sum():.2f} €")
-            st.dataframe(df_grp_none[['Bestellnummer', 'SKU', 'eBay_Netto', 'Datum der Transaktionserstellung']], use_container_width=True)
+            st.dataframe(df_grp_none[['Bestellnummer', 'SKU', 'Artikelname', 'Stück', 'eBay_Netto', 'Datum der Transaktionserstellung']], use_container_width=True)
 
         with tab_all:
             st.write(f"**Gesamtanzahl:** {len(df_payout)} Positionen | **Gesamtsumme Netto:** {df_payout['eBay_Netto'].sum():.2f} €")
-            st.dataframe(df_payout[['Bestellnummer', 'SKU', 'Gruppe', 'eBay_Netto', 'Datum der Transaktionserstellung']], use_container_width=True)
+            st.dataframe(df_payout[['Bestellnummer', 'SKU', 'Artikelname', 'Stück', 'Gruppe', 'eBay_Netto', 'Datum der Transaktionserstellung']], use_container_width=True)
 
         # Lexoffice-Aktion für Gruppe B
         st.markdown("---")
@@ -279,17 +293,18 @@ if uploaded_payout:
                 else:
                     line_items = []
                     for _, r in df_grp_b.iterrows():
-                        title_str = str(r.get('Artikelbezeichnung', '')).strip()
-                        if not title_str or title_str == 'nan':
+                        title_str = str(r.get('Artikelname', '')).strip()
+                        if not title_str or title_str == '-' or title_str == 'nan':
                             title_str = r['SKU']
 
                         description_str = f"eBay Bestellnummer: {r['Bestellnummer']}"
+                        qty = int(r.get('Stück', 1))
                         
                         line_items.append({
                             "type": "custom",
                             "name": title_str,
                             "description": description_str,
-                            "quantity": 1,
+                            "quantity": qty,
                             "unitName": "Stück",
                             "unitPrice": {
                                 "currency": "EUR", 
