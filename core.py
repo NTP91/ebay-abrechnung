@@ -17,7 +17,7 @@ PAYOUTS_DB_PATH = "Master_Payouts.csv"
 FIELDS = {
     'Bestellnummer': ['bestellnummer', 'order number', 'order id'],
     'Transaktionsnummer': ['transaktionsnummer', 'transaktions id', 'transaktions-id', 'transaction id'],
-    'Artikelnummer': ['artikelnummer', 'item id', 'item number'],
+    'Artikelnummer': ['artikelnummer', 'artikelnr.', 'item id', 'item number'],
     'SKU': ['bestandseinheit', 'custom label', 'customlabel', 'sku', 'eigene sku'],
     'Angebotstitel': ['angebotstitel', 'artikelbezeichnung', 'artikeltitel', 'artikelname', 'item title', 'title'],
     'Auszahlung Nr.': ['auszahlung nr.', 'auszahlungsnummer', 'payout id', 'payout number'],
@@ -42,8 +42,15 @@ def canonicalize(frame):
     for field, aliases in FIELDS.items():
         candidates = [c for c in result if normalized(c) in {normalized(a) for a in [field, *aliases]}]
         if len(candidates) > 1:
-            raise ValueError(f'Mehrdeutige Spalten für {field}: {candidates}')
-        if candidates:
+            # Older master files may have both an original alias and an empty
+            # generated canonical column. Coalesce only non-conflicting values.
+            values = result[candidates].map(clean)
+            if values.apply(lambda row: len(set(v for v in row if v)), axis=1).gt(1).any():
+                raise ValueError(f'Mehrdeutige Spalten für {field}: {candidates}')
+            merged = values.apply(lambda row: next((v for v in row if v), ''), axis=1)
+            result = result.drop(columns=candidates)
+            result[field] = merged
+        elif candidates:
             result = result.rename(columns={candidates[0]: field})
     for field in FIELDS:
         if field not in result:
@@ -110,6 +117,14 @@ def read_report(file, kind='payout'):
         rows = []
         for row in reader:
             if not row or not any(clean(c) for c in row):
+                continue
+            # eBay order exports end with a record count and seller label.
+            # Match those exact footer shapes, never skip arbitrary short rows.
+            if kind == 'orders' and (
+                (len(row) == 3 and row[0].strip().isdigit()
+                 and row[1].strip() == 'Verkaufsprotokoll(e) heruntergeladen' and not row[2].strip())
+                or (len(row) == 1 and row[0].strip().startswith('Verkäufername :'))
+            ):
                 continue
             if len(row) != len(header):
                 raise ValueError(f'Unregelmäßige CSV-Zeile {index + reader.line_num}; Import abgebrochen statt Beträge zu verlieren.')

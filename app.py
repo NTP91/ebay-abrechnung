@@ -61,7 +61,7 @@ except Exception as exc:
     st.error(f'Gespeicherte Daten können nicht sicher verarbeitet werden: {exc}')
     st.stop()
 
-st.warning('Reparaturstand zur Prüfung: Kein produktiver Lexoffice-Upload. Original-Testdateien und Rechnungsbeispiel fehlen noch.')
+st.warning('Prüfstand: Originalimporte getestet. Lexoffice-Upload bleibt gesperrt, bis das tatsächliche Rechnungsbeispiel abgeglichen und dauerhafte Rechnungssperren geprüft sind.')
 if not df_master.empty:
     with st.expander('Zuordnung, Gebühren und Payout-Prüfung', expanded=True):
         st.dataframe(df_master, use_container_width=True)

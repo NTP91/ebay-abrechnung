@@ -1,5 +1,9 @@
 # Wiederherstellung – Prüfstand vor Änderungen
 
+**Aktualisierung:** Die Original-Importtests wurden inzwischen durchgeführt.
+Ergebnisse und verbleibender Rechnungsbeispiel-Prüfpunkt: [REAL_TEST_REPORT.md](REAL_TEST_REPORT.md).
+Die folgenden Abschnitte dokumentieren den vorherigen Zwischenstand.
+
 Branch: `codex/recover-payout-settlement`, Basis: `8c8e60e`.
 Der vorherige lokale Stand ist als Commit `e32c6b5` auf
 `codex/workspace-backup-20260902` gesichert. `main` wird nicht verändert.

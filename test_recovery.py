@@ -24,6 +24,12 @@ def payout(payout_id='7700379513', transaction='t1', order='o1', sku='NB / 1', t
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_old_master_empty_article_alias_is_coalesced(self):
+        frame = core.canonicalize(pd.DataFrame([{'Artikelnummer': '', 'Artikelnr.': '123'}]))
+        self.assertEqual(frame.iloc[0]['Artikelnummer'], '123')
+        with self.assertRaises(ValueError):
+            core.canonicalize(pd.DataFrame([{'Artikelnummer': '456', 'Artikelnr.': '123'}]))
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.orders = str(Path(self.temp.name) / 'Master_Orders.csv')
