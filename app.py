@@ -43,38 +43,40 @@ def process_uploaded_files(uploaded_files):
     for f in uploaded_files:
         parsed = parse_single_file(f)
         if parsed is not None and not parsed.empty:
-            dfs.append(parsed)
+            # Spaltenüberschriften säubern
+            parsed.columns = [str(c).strip().lower() for c in parsed.columns]
             
+            # Schlüsselspalten ermitteln & umbenennen
+            col_map = {}
+            for col in parsed.columns:
+                if any(k in col for k in ['custom label', 'sku', 'customlabel', 'artikelnummer']):
+                    col_map[col] = 'Custom Label'
+                elif any(k in col for k in ['net amount', 'netto_betrag', 'netto', 'amount', 'betrag', 'auszahlung']):
+                    col_map[col] = 'Net amount'
+                elif any(k in col for k in ['transaction id', 'transaktions-id', 'order number', 'bestellnummer']):
+                    col_map[col] = 'Transaction ID'
+            
+            parsed = parsed.rename(columns=col_map)
+            
+            if 'Custom Label' in parsed.columns and 'Net amount' in parsed.columns:
+                dfs.append(parsed)
+
     if not dfs:
-        return None, "Dateien konnten nicht gelesen werden."
+        return None, "SKU- oder Netto-Spalte wurde in den hochgeladenen Dateien nicht sicher erkannt."
         
     df_raw = pd.concat(dfs, ignore_index=True)
-    df_raw.columns = [str(c).strip() for c in df_raw.columns]
-    
-    sku_col, netto_col, id_col = None, None, None
-    for col in df_raw.columns:
-        c_low = col.lower()
-        if c_low in ['custom label', 'sku', 'customlabel', 'artikelnummer']:
-            sku_col = col
-        if c_low in ['net amount', 'netto_betrag', 'netto', 'amount', 'betrag', 'auszahlung']:
-            netto_col = col
-        if c_low in ['transaction id', 'transaktions-id', 'order number', 'bestellnummer']:
-            id_col = col
 
-    if not sku_col or not netto_col:
-        return None, "SKU- oder Netto-Spalte wurde nicht sicher erkannt."
-
-    if id_col:
-        df = df_raw.drop_duplicates(subset=[id_col, sku_col]).copy()
+    # Duplikate filtern
+    if 'Transaction ID' in df_raw.columns:
+        df = df_raw.drop_duplicates(subset=['Transaction ID', 'Custom Label']).copy()
     else:
         df = df_raw.drop_duplicates().copy()
 
-    df[netto_col] = df[netto_col].astype(str).str.replace('€', '').str.replace(' ', '').str.replace(',', '.')
-    df[netto_col] = pd.to_numeric(df[netto_col], errors='coerce').fillna(0)
+    # Beträge säubern
+    df['Net amount'] = df['Net amount'].astype(str).str.replace('€', '').str.replace(' ', '').str.replace(',', '.')
+    df['Net amount'] = pd.to_numeric(df['Net amount'], errors='coerce').fillna(0)
 
-    df['Custom Label'] = df[sku_col]
-    df['Net amount'] = df[netto_col]
-
+    # Gruppierung
     gruppe_a = ['PP', 'BA', 'MK', '001']
     def assign_group(val):
         sku = str(val).strip().upper()
@@ -157,6 +159,7 @@ if ebay_files:
             "Alle Daten"
         ])
 
+        # TAB 1: GRUPPE A
         with tab1:
             st.header("Direkt-Partner")
             st.caption("PP, BA, MK und 001 · Netto-Umsatz abzüglich 0,5 % Provision · kein Lexware-Upload")
@@ -182,6 +185,7 @@ if ebay_files:
                     st.download_button(f"📥 CSV-Download {sku}", csv, f"Abrechnung_{sku}.csv", "text/csv", key=f"dl_a_{sku}")
                     st.markdown("---")
 
+        # TAB 2: GRUPPE B
         with tab2:
             st.header("Evelyn-Gesamtübersicht")
             st.caption("NB und alle übrigen Standard-SKUs · 0,5 % Rabatt")
@@ -230,11 +234,13 @@ if ebay_files:
                     st.download_button(f"📥 CSV {sku}", csv_b, f"Abrechnung_3.5_{sku}.csv", "text/csv", key=f"dl_b_{sku}")
                     st.markdown("---")
 
+        # TAB 3: OHNE ZUORDNUNG
         with tab3:
             st.header("Ohne Zuordnung")
             df_none = df[df['Gruppe'] == 'Ohne Zuordnung']
             st.dataframe(df_none, use_container_width=True)
 
+        # TAB 4: ALLE DATEN
         with tab4:
             st.header("Alle Daten")
             st.dataframe(df, use_container_width=True)
