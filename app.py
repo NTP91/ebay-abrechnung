@@ -7,7 +7,7 @@ st.set_page_config(page_title="eBay Payout & Provision Tool", layout="wide")
 st.title("📦 eBay Payout & SKU-Abrechnungs Tool")
 st.write("Lade deine eBay Auszahlungsberichte (CSV) sowie optional deine Soll-Rechnung (Excel/CSV) hoch.")
 
-# 1. Zwei Upload-Felder nebeneinander (Mehrfachauswahl bei CSV aktiviert)
+# 1. Zwei Upload-Felder nebeneinander
 col1, col2 = st.columns(2)
 with col1:
     uploaded_payout = st.file_uploader(
@@ -34,7 +34,7 @@ def get_commission_rate(sku):
     sku_clean = str(sku).strip().upper()
     prefix = sku_clean.split('/')[0].strip()
     
-    # 0,5 % Regel für Spezial-SKUs
+    # 0,5 % Regel für BA, MK, PP und 001/001C
     if prefix in ['BA', 'MK', 'PP', '001'] or prefix.startswith('001'):
         return 0.005
     
@@ -44,6 +44,7 @@ def get_commission_rate(sku):
 if uploaded_payout:
     try:
         all_dfs = []
+        num_files = len(uploaded_payout)
         
         # Alle hochgeladenen CSV-Dateien einlesen und verbinden
         for file in uploaded_payout:
@@ -72,7 +73,8 @@ if uploaded_payout:
         if duplicates_removed > 0:
             st.warning(f"⚠️ Dublettenprüfung: Es wurden {duplicates_removed} doppelte Transaktionen automatisch herausgefiltert!")
         
-        st.success(f"✅ Auszahlungsbericht geladen: {len(df_payout)} eindeutige Transaktionen gefunden.")
+        # ERWEITERTE ANZEIGE: Zeigt jetzt auch die Anzahl der Dateien an!
+        st.success(f"✅ Auszahlungsberichte geladen: {num_files} Datei(en) mit insgesamt {len(df_payout)} eindeutigen Transaktionen verarbeitet.")
         
         # Spalten und Beträge aufbereiten
         df_payout['Auszahlung_Netto_eBay'] = df_payout['Betrag abzügl. Kosten'].apply(parse_german_float)
