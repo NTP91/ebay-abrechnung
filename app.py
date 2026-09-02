@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import hashlib
-import os
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="eBay Payout & Lexoffice Manager", layout="wide")
@@ -17,7 +16,7 @@ def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # 1. Tabelle für Artikelnamen aus allen Bestellberichten (August Gesamt)
+    # 1. Artikel-Datenbank (Bestellberichte August)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS artikel_db (
             bestellnummer TEXT PRIMARY KEY,
@@ -26,7 +25,7 @@ def init_db():
         )
     """)
     
-    # 2. Tabelle für importierte Payout-Dateien (Hash-Duplikatschutz)
+    # 2. Payout-Dateien Duplikatschutz
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS processed_files (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -36,7 +35,7 @@ def init_db():
         )
     """)
     
-    # 3. Tabelle für Payout-Transaktionen (Dauerhafte Speicherung)
+    # 3. Payouts Tabelle
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS payouts (
             transaction_id TEXT PRIMARY KEY,
@@ -56,13 +55,11 @@ init_db()
 
 # --- HELFERFUNKTIONEN ---
 def calculate_file_hash(uploaded_file):
-    """Erstellt eindeutigen Fingerabdruck des Dateiinhalts (ignoriert Dateinamen-Zusätze wie (1))"""
     file_bytes = uploaded_file.getvalue()
     return hashlib.md5(file_bytes).hexdigest()
 
 def normalize_dataframe(df):
-    """Sucht automatisch die Zeile mit den echten Überschriften (Bestellnummer etc.)"""
-    # Falls Überschrift erst weiter unten steht (z.B. bei Excel-Dateien von eBay)
+    """Sucht automatisch die Kopfzeile mit 'Bestellnummer'"""
     if not any('Bestellnummer' in str(col) for col in df.columns):
         for idx, row in df.iterrows():
             if row.astype(str).str.contains('Bestellnummer').any():
@@ -71,19 +68,32 @@ def normalize_dataframe(df):
                 break
     return df
 
-def save_orders_to_db(df):
-    """Liest Bestellungen flexibel ein – klappt für CSV und Excel"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    df = normalize_dataframe(df)
+def save_single_order_file(uploaded_file):
+    """Verarbeitet eine einzelne Bestellbericht-Datei (CSV oder XLSX)"""
+    try:
+        uploaded_file.seek(0)
+        if uploaded_file.name.lower().endswith('.xlsx'):
+            df = pd.read_excel(uploaded_file, engine='openpyxl')
+        else:
+            try:
+                df = pd.read_csv(uploaded_file, sep=';', header=1)
+            except:
+                uploaded_file.seek(0)
+                df = pd.read_csv(uploaded_file, sep=None, engine='python')
 
-    col_order = next((c for c in df.columns if 'Bestellnummer' in str(c)), None)
-    col_title = next((c for c in df.columns if 'Angebotstitel' in str(c) or 'Title' in str(c)), None)
-    col_sku = next((c for c in df.columns if 'Bestandseinheit' in str(c) or 'SKU' in str(c)), None)
+        df = normalize_dataframe(df)
 
-    count = 0
-    if col_order and col_title:
+        col_order = next((c for c in df.columns if 'Bestellnummer' in str(c)), None)
+        col_title = next((c for c in df.columns if 'Angebotstitel' in str(c) or 'Title' in str(c)), None)
+        col_sku = next((c for c in df.columns if 'Bestandseinheit' in str(c) or 'SKU' in str(c)), None)
+
+        if not col_order or not col_title:
+            return 0, f"❌ `{uploaded_file.name}`: Spalten 'Bestellnummer'/'Angebotstitel' nicht gefunden."
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        count = 0
+        
         for _, row in df.iterrows():
             order_id = str(row[col_order]).strip() if pd.notna(row[col_order]) else None
             title = str(row[col_title]).strip() if pd.notna(row[col_title]) else ""
@@ -98,12 +108,15 @@ def save_orders_to_db(df):
                         sku=excluded.sku
                 """, (order_id, title, sku))
                 count += 1
+                
         conn.commit()
-    conn.close()
-    return count
+        conn.close()
+        return count, f"✅ `{uploaded_file.name}`: {count} Artikel verarbeitet."
+    except Exception as e:
+        return 0, f"❌ Fehler bei `{uploaded_file.name}`: {str(e)}"
 
 def process_payout_files(uploaded_files):
-    """Verarbeitet Payout-CSVs und filtert Duplikate zuverlässig aus"""
+    """Verarbeitet Payout-CSVs ohne Duplikate"""
     conn = get_db_connection()
     cursor = conn.cursor()
     messages = []
@@ -111,11 +124,10 @@ def process_payout_files(uploaded_files):
     for file in uploaded_files:
         file_hash = calculate_file_hash(file)
         
-        # Hash-Prüfung: Wurde diese Datei schon einmal hochgeladen?
         cursor.execute("SELECT filename FROM processed_files WHERE file_hash = ?", (file_hash,))
         already_processed = cursor.fetchone()
         if already_processed:
-            messages.append(f"⚠️ **{file.name}**: Diese Datei wurde früher schon importiert (`{already_processed[0]}`). Übersprungen.")
+            messages.append(f"⚠️ **{file.name}**: Wurde früher schon importiert (`{already_processed[0]}`). Übersprungen.")
             continue
             
         file.seek(0)
@@ -138,7 +150,6 @@ def process_payout_files(uploaded_files):
         added_tx = 0
         skipped_tx = 0
         
-        # Abgleich mit gespeicherten Artikeln
         art_df = pd.read_sql("SELECT * FROM artikel_db", conn)
         art_map = dict(zip(art_df['bestellnummer'], art_df['artikelname']))
         sku_map = dict(zip(art_df['bestellnummer'], art_df['sku']))
@@ -148,7 +159,6 @@ def process_payout_files(uploaded_files):
                 tx_id = str(row[col_tx]).strip() if col_tx else hashlib.md5(str(row).encode()).hexdigest()
                 order_id = str(row[col_order]).strip() if pd.notna(row[col_order]) else ""
                 
-                # Prüfen, ob einzelne Transaktion schon in DB existiert
                 cursor.execute("SELECT transaction_id FROM payouts WHERE transaction_id = ?", (tx_id,))
                 if cursor.fetchone():
                     skipped_tx += 1
@@ -179,21 +189,20 @@ with st.sidebar:
     st.header("⚙️ Einstellungen & Datenbank")
     
     st.subheader("📌 Bestellberichte importieren")
-    st.caption("Lade hier deine Excel- und CSV-Bestellberichte hoch.")
-    order_file = st.file_uploader("Bestellbericht (CSV oder XLSX)", type=["csv", "xlsx"], key="orders_up")
+    st.caption("Wähle hier beide Dateien (CSV & XLSX) gleichzeitig aus:")
     
-    if order_file:
-        if order_file.name.endswith('.xlsx'):
-            df_ord = pd.read_excel(order_file)
-        else:
-            try:
-                df_ord = pd.read_csv(order_file, sep=';', header=1)
-            except:
-                file_seek = order_file.seek(0)
-                df_ord = pd.read_csv(order_file)
-        
-        imported_count = save_orders_to_db(df_ord)
-        st.success(f"{imported_count} Artikel aus `{order_file.name}` in DB gespeichert!")
+    # JETZT MIT accept_multiple_files=True!
+    order_files = st.file_uploader("Bestellberichte (CSV & XLSX)", type=["csv", "xlsx"], accept_multiple_files=True, key="orders_up")
+    
+    if order_files:
+        total_imp = 0
+        for f in order_files:
+            c, msg = save_single_order_file(f)
+            total_imp += c
+            if c > 0:
+                st.success(msg)
+            else:
+                st.error(msg)
 
     st.divider()
     
@@ -228,7 +237,7 @@ if payout_files:
     for msg in results:
         st.info(msg)
 
-# --- ANZEIGE DER DAUERHAFT GESPEICHERTEN DATEN ---
+# --- ANZEIGE DER DATEN ---
 conn = get_db_connection()
 df_payouts_db = pd.read_sql("SELECT * FROM payouts", conn)
 conn.close()
