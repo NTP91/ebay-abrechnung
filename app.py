@@ -12,7 +12,7 @@ st.title("⚡ eBay Payout & Lexoffice Direct-Upload")
 
 # Lexoffice API Konfiguration
 lexoffice_api_key = "Wciy230Sw_pNI7.yFDyNsWuvvXIB2sxJ2MKLk2jfMowyWJKU"
-TARGET_CUSTOMER_NUMBER = "16335"  # Feste Kundennummer für Evelyn
+TARGET_CUSTOMER_NUMBER = "16335"
 
 # Uploads
 col1, col2 = st.columns(2)
@@ -49,13 +49,16 @@ def extract_partner_prefix(sku):
         return match.group(1)
     return raw_prefix
 
-# Lexoffice API Funktionen
-def get_lexoffice_contact_id_by_number(api_key, customer_number):
+# Präzise Kontaktsuche in Lexoffice
+def get_lexoffice_contact_id_exact(api_key, customer_number):
     headers = {"Authorization": f"Bearer {api_key}"}
     res = requests.get(f"https://api.lexoffice.io/v1/contacts?customerNumber={customer_number}", headers=headers)
     if res.status_code == 200:
         data = res.json()
         if data.get('content'):
+            for contact in data['content']:
+                if str(contact.get('roles', {}).get('customer', {}).get('number')) == str(customer_number):
+                    return contact['id']
             return data['content'][0]['id']
     return None
 
@@ -110,14 +113,17 @@ if uploaded_payout:
             df_temp = pd.read_csv(io.StringIO("\n".join(lines[header_idx:])), sep=';')
             all_dfs.append(df_temp)
         
-        df_payout = pd.concat(all_dfs, ignore_ignore_index=True) if hasattr(pd.concat, 'ignore_ignore_index') else pd.concat(all_dfs, ignore_index=True)
+        df_payout = pd.concat(all_dfs, ignore_index=True)
         
         df_payout['Bestellnummer_Match'] = df_payout['Bestellnummer'].apply(clean_order_number)
         df_payout = df_payout.drop_duplicates(subset=['Bestellnummer_Match', 'Datum der Transaktionserstellung', 'Betrag abzügl. Kosten'])
         
         df_payout['eBay_Brutto'] = df_payout['Betrag abzügl. Kosten'].apply(parse_german_float)
-        df_payout['eBay_Netto'] = (df_payout['eBay_Brutto'] / 1.19).round(2)
         
+        # 1. Gutschriften / Rückerstattungen herausfiltern
+        df_payout = df_payout[df_payout['eBay_Brutto'] > 0].copy()
+        
+        df_payout['eBay_Netto'] = (df_payout['eBay_Brutto'] / 1.19).round(2)
         df_payout['SKU'] = df_payout['Bestandseinheit'].fillna('OHNE_SKU').astype(str).str.strip()
         df_payout['SKU_Prefix'] = df_payout['SKU'].apply(extract_partner_prefix)
         df_payout['Menge'] = 1
@@ -125,37 +131,35 @@ if uploaded_payout:
         df_payout['Gruppe'] = df_payout['SKU_Prefix'].apply(
             lambda p: 'Gruppe A (Direkt)' if p in GROUP_A_PREFIXES else ('Ohne Zuordnung' if p == 'OHNE_SKU' else 'Gruppe B (Über Dich)')
         )
-        
-        df_payout['Evelyn_Prov_EUR'] = (df_payout['eBay_Brutto'] * 0.005).round(2)
-        df_payout['Auszahlung_Evelyn_Brutto'] = (df_payout['eBay_Brutto'] - df_payout['Evelyn_Prov_EUR']).round(2)
 
         df_grp_b = df_payout[df_payout['Gruppe'] == 'Gruppe B (Über Dich)'].copy()
 
         if not df_grp_b.empty:
             st.markdown("---")
-            st.subheader("📊 Vorschau der Einzelpositionen für Lexoffice")
-            st.dataframe(df_grp_b[['Datum der Transaktionserstellung', 'Bestellnummer', 'SKU', 'eBay_Netto', 'Auszahlung_Evelyn_Brutto']], use_container_width=True)
+            st.subheader("📊 Vorschau der Einzelpositionen (nur Verkäufe)")
+            st.dataframe(df_grp_b[['Datum der Transaktionserstellung', 'Bestellnummer', 'SKU', 'eBay_Netto']], use_container_width=True)
 
             st.markdown("---")
             if st.button("🚀 JETZT AUTOMATISCH IN LEXOFFICE ANLEGEN", type="primary"):
-                with st.spinner(f"Suche Kundennummer {TARGET_CUSTOMER_NUMBER} in Lexoffice..."):
-                    contact_id = get_lexoffice_contact_id_by_number(lexoffice_api_key, TARGET_CUSTOMER_NUMBER)
+                with st.spinner(f"Suche exakte Kundennummer {TARGET_CUSTOMER_NUMBER} in Lexoffice..."):
+                    contact_id = get_lexoffice_contact_id_exact(lexoffice_api_key, TARGET_CUSTOMER_NUMBER)
                 
                 if not contact_id:
-                    st.error(f"Kunde mit Kundennummer '{TARGET_CUSTOMER_NUMBER}' wurde in Lexoffice nicht gefunden! Bitte Prüfen, ob die Kundennummer existiert.")
+                    st.error(f"Kunde mit Kundennummer '{TARGET_CUSTOMER_NUMBER}' wurde nicht in Lexoffice gefunden!")
                 else:
                     line_items = []
                     for _, r in df_grp_b.iterrows():
-                        # Produkttitel als Hauptzeile
-                        title_str = str(r.get('Artikelbezeichnung', f"Artikel {r['SKU']}"))
-                        
-                        # Zusatztext / Beschreibung unter der Artikelbezeichnung (mit KPIs)
+                        # Artikelbezeichnung ohne "Artikel"-Präfix
+                        title_str = str(r.get('Artikelbezeichnung', r['SKU']))
+                        if pd.isna(title_str) or title_str.strip() == '' or title_str == 'nan':
+                            title_str = r['SKU']
+
                         order_date = str(r.get('Datum der Transaktionserstellung', 'n/a'))
-                        payout_val = f"{r['Auszahlung_Evelyn_Brutto']:.2f} €".replace('.', ',')
                         
+                        # Beschreibungstext unter dem Artikel
                         description_str = (
                             f"eBay Bestellnummer: {r['Bestellnummer']}\n"
-                            f"SKU: {r['SKU']} | Transaktionsdatum: {order_date} | Auszahlung: {payout_val}"
+                            f"SKU: {r['SKU']} | Transaktionsdatum: {order_date}"
                         )
                         
                         line_items.append({
@@ -179,7 +183,7 @@ if uploaded_payout:
                     
                     if inv_id:
                         st.balloons()
-                        st.success(f"🎉 PERFEKT: Rechnung für Kundennummer {TARGET_CUSTOMER_NUMBER} erfolgreich mit allen Einzelpositionen und Beschreibungstext angelegt! (ID: {inv_id})")
+                        st.success(f"🎉 Erfolgreich angelegt unter Kundennummer {TARGET_CUSTOMER_NUMBER}! (ID: {inv_id})")
 
     except Exception as e:
         st.error(f"Fehler: {e}")
