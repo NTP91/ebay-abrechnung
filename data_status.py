@@ -38,7 +38,8 @@ def record_legacy_orders():
 
 
 def import_file(upload, kind):
-    result = dict(kind=kind, filename=upload.name, detected=0, added=0, present=0, issues=0, error='', payouts=[])
+    result = dict(kind=kind, filename=upload.name, detected=0, added=0, present=0, issues=0,
+                  historical_without_sku=0, error='', payouts=[])
     period = []
     try:
         if kind == 'orders':
@@ -72,7 +73,11 @@ def import_file(upload, kind):
                 else:
                     payout.update(status='Nicht übernommen – manuelle Prüfung', locked=True, invoice=None)
         else:
-            result['issues'] = int(((frame['Angebotstitel'] == '') | (frame['SKU'].str.split('/').str[0].str.strip() == '')).sum())
+            without_sku = frame['SKU'].str.split('/').str[0].str.strip() == ''
+            result['historical_without_sku'] = int(without_sku.sum())
+            # Missing SKU means there is deliberately no partner workflow.
+            # Other defects in assignable rows remain real review issues.
+            result['issues'] = int((~without_sku & (frame['Angebotstitel'] == '')).sum())
     except Exception as exc:
         result['error'] = str(exc)
     with core.ledger() as db:

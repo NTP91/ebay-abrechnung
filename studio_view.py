@@ -31,10 +31,13 @@ def partner_summary(rows):
 
 
 def open_positions(raw):
-    orders = core.read_master(core.ORDERS_DB_PATH)
+    all_orders = core.read_master(core.ORDERS_DB_PATH)
+    orders = all_orders[all_orders.SKU.str.split('/').str[0].str.strip() != ''].copy()
     records = []
     for _, row in raw[raw['Auszahlung Nr.'] == ''].iterrows():
-        match, issue = core.match_order(row, orders)
+        match, issue = core.match_order(row, all_orders)
+        if match is not None and not issue and not match.SKU.split('/')[0].strip():
+            continue
         sku = match['SKU'] if match is not None and not issue else ''
         partner = sku.split('/')[0].strip().upper()
         if partner.startswith('MH'):
@@ -60,7 +63,8 @@ def order_metrics(raw):
 
 def order_catalogue(raw, business):
     """Union of order-report positions and unmatched order transactions; no invented payouts."""
-    orders = core.read_master(core.ORDERS_DB_PATH)
+    all_orders = core.read_master(core.ORDERS_DB_PATH)
+    orders = all_orders[all_orders.SKU.str.split('/').str[0].str.strip() != ''].copy()
     records = {}
     for index, row in orders.iterrows():
         records[('order',index)] = dict(Bestellnummer=row['Bestellnummer'], Datum=next((core.clean(row.get(k,'')) for k in ('Verkauft am','Bestelldatum','Datum') if core.clean(row.get(k,''))),''),
@@ -73,13 +77,15 @@ def order_catalogue(raw, business):
                 continue
         except ValueError:
             pass
-        match, issue = core.match_order(row, orders)
+        match, issue = core.match_order(row, all_orders)
+        if match is not None and not issue and not match.SKU.split('/')[0].strip():
+            continue
         key = ('order',match.name) if match is not None and not issue else ('raw',index)
         entry = records.setdefault(key, dict(Bestellnummer=row['Bestellnummer'], Datum=row.Datum, SKU='', Produkttitel='Bestellbericht noch nicht zugeordnet', payout=False,closed=False,keys=[]))
         entry['payout'] = entry['payout'] or bool(row['Auszahlung Nr.'])
     if not business.empty:
         for _, row in business[business.Art!='Gebühr'].iterrows():
-            match, issue = core.match_order(row, orders)
+            match, issue = core.match_order(row, all_orders)
             if match is not None and not issue:
                 records[('order',match.name)]['keys'].append(bool(row['closed_at']))
         for entry in records.values():

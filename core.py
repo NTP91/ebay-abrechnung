@@ -281,6 +281,10 @@ def load_master_data():
             if match is not None:
                 sku = match['SKU']
                 title = match['Angebotstitel']
+                # Historical orders from before partner SKUs existed remain in
+                # the source archive, but can never be assigned or settled.
+                if not sku:
+                    continue
         if not fee and (not order_id or not sku or not title):
             issue = issue or 'Bestellnummer, SKU oder Produktname im Bestellbericht fehlt'
         if issue:

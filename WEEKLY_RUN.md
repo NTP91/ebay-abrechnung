@@ -1,5 +1,20 @@
 # Recovery-Version für Patricks Wochenlauf
 
+## Historische Bestellungen ohne SKU
+
+Die Prüfung des 90-Tage-Berichts ergab 23 unvollständige Bestellpositionen. Alle
+23 haben eindeutige Bestell-, Transaktions- und Artikelnummern sowie einen Titel;
+ausschließlich die SKU fehlt. Sie bleiben für historische Datenabgleiche im
+Bestellbericht erhalten, werden operativ aber vollständig ignoriert: kein Dashboard-
+Zähler, keine offene Partnerposition, keine Gruppe, kein Prüfstatus, kein Export und
+keine Lexware-Auswahl. Importmeldungen weisen sie neutral als „historisch ohne SKU
+archiviert“ aus. Gültige SKU-Werte bleiben unverändert.
+
+Die eine aktuelle Prüfposition des Payouts 7714928937 hat eine andere Ursache: Es
+handelt sich um die Payout-Summen-/Auszahlungszeile ohne Bestell-, Transaktions- und
+Artikelreferenz. Sie bleibt deshalb sichtbar und gesperrt. Nach der Bereinigung
+verbleibt genau eine echte Prüfposition. 62 lokale Tests bestanden.
+
 ## Positionsstatus und Abschluss
 
 Der fachliche Status wird je Position dauerhaft und getrennt von der technischen

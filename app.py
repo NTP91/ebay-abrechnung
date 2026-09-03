@@ -131,6 +131,8 @@ with st.sidebar:
                         st.warning(f"{receipt['issues']} Zuordnungen prüfen")
                 else:
                     st.caption(f"{receipt['added']} neu · {receipt['present']} bereits vorhanden · {receipt['issues']} unvollständig")
+                    if receipt.get('historical_without_sku'):
+                        st.caption(f"{receipt['historical_without_sku']} historische Positionen ohne SKU archiviert · nicht abrechnungsrelevant")
     st.divider()
     with st.expander('Lexware-Verbindung'):
         api_key=st.text_input('API-Key',type='password')
