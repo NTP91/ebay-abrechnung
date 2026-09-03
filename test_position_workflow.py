@@ -7,6 +7,7 @@ import core
 import position_workflow as workflow
 import studio_view
 from test_recovery import payout
+from test_invoice_support import review_positions
 
 
 class PositionWorkflowTests(unittest.TestCase):
@@ -37,7 +38,7 @@ class PositionWorkflowTests(unittest.TestCase):
         self.assertEqual(row.Bearbeitungsstatus,'abrechnungsbereit')
         self.assertTrue(row.partner_ready)
         today=date.today()
-        workflow.confirm([row.position_key],'review',today)
+        review_positions([row.position_key])
         business=workflow.positions(); row=business.iloc[0]
         self.assertEqual(row.Bearbeitungsstatus,'Rechnung/Abrechnung geprüft')
         workflow.confirm([row.position_key],'partner_paid',today)
@@ -59,7 +60,7 @@ class PositionWorkflowTests(unittest.TestCase):
     def test_group_b_requires_both_independent_payment_paths(self):
         self.seed('NB / 1',invoice=True)
         row=workflow.positions().iloc[0]; today=date.today()
-        workflow.confirm([row.position_key],'review',today)
+        review_positions([row.position_key])
         workflow.confirm([row.position_key],'partner_paid',today)
         row=workflow.positions().iloc[0]
         self.assertFalse(row.closed_at)
@@ -89,7 +90,7 @@ class PositionWorkflowTests(unittest.TestCase):
     def test_workflow_sidecar_restores_completed_state(self):
         self.seed('BA / 1')
         row=workflow.positions().iloc[0]; today=date.today()
-        workflow.confirm([row.position_key],'review',today)
+        review_positions([row.position_key])
         workflow.confirm([row.position_key],'partner_paid',today)
         self.assertTrue((self.root/'Settlement_Workflow.json').exists())
         (self.root/'Settlement_State.sqlite3').unlink()
@@ -100,7 +101,7 @@ class PositionWorkflowTests(unittest.TestCase):
         for frame in (first,second): frame['Auszahlungsstatus']='Betrag überwiesen'
         core.import_reports([first,second],core.ORDERS_DB_PATH,'orders'); core.import_reports([first,second],core.PAYOUTS_DB_PATH,'payout')
         rows=workflow.positions(); today=date.today(); key=rows.iloc[0].position_key
-        workflow.confirm([key],'review',today); workflow.confirm([key],'partner_paid',today)
+        review_positions([key]); workflow.confirm([key],'partner_paid',today)
         self.assertEqual(workflow.payout_status(workflow.positions())['p1'],'teilweise in Bearbeitung')
 
 

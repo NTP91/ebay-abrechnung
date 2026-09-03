@@ -79,13 +79,15 @@ def payout_status(positions):
     return result
 
 
-def confirm(keys, action, event_date, expected_sources=None):
-    """Manual evidence only. No network calls and no payout-wide status changes."""
+def confirm(keys, action, event_date, expected_sources=None, invoice_id=None, actor='', override_reason='', override_confirmed=False):
+    """Invoice-backed review and explicit payments; no network or payout-wide changes."""
     if action not in ('review', 'partner_paid', 'evelyn_received', 'refund_settled'):
         raise ValueError('Unbekannte Bestätigung.')
     value = date.fromisoformat(str(event_date))
     if value > date.today():
         raise ValueError('Ein zukünftiges Zahlungs-/Prüfdatum ist nicht zulässig.')
+    if action=='review' and not invoice_id:
+        raise ValueError('Partnerrechnung hochladen und erfolgreich abgleichen; beleglose Prüfbestätigung ist gesperrt.')
     keys = set(keys)
     if not keys:
         raise ValueError('Keine Positionen ausgewählt.')
@@ -98,6 +100,9 @@ def confirm(keys, action, event_date, expected_sources=None):
             raise ValueError('Abrechnungsdaten verändert. Bitte erneut prüfen.')
         with core.ledger() as db:
             db.execute('BEGIN IMMEDIATE')
+            if action=='review':
+                import partner_invoices
+                partner_invoices.authorize_review(db,invoice_id,chosen,actor,override_reason,override_confirmed)
             for _, row in chosen.iterrows():
                 if row['Prüfhinweis'] or row.Quellenpruefung or row.Gruppe not in ('Gruppe A','Gruppe B') or row.Art=='Gebühr':
                     raise ValueError('Ungeklärte Positionen können nicht bestätigt werden.')
@@ -130,5 +135,6 @@ def confirm(keys, action, event_date, expected_sources=None):
                     saved['closed_at'] = max(saved['reviewed_at'], saved['paid_at'], saved['received_at'] or '')
                 db.execute('INSERT OR REPLACE INTO position_workflow(position_key,reviewed_at,paid_at,received_at,closed_at,source) VALUES(?,?,?,?,?,?)',
                            (row.position_key, *(saved[f] for f in FIELDS), source_snapshot(row)))
-                core.audit(db, row['Auszahlung Nr.'], f"Positionsbestätigung {action}: {row.position_key}; Datum {value.isoformat()}; manuell durch Nutzer")
+                proof=f'Eingangsrechnung {invoice_id}; bestätigt durch {actor}' if action=='review' else 'manuell durch Nutzer'
+                core.audit(db, row['Auszahlung Nr.'], f"Positionsbestätigung {action}: {row.position_key}; Datum {value.isoformat()}; {proof}")
             db.commit()

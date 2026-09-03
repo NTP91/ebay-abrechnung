@@ -11,6 +11,7 @@ import draft_correction
 import position_workflow as workflow
 import studio_view
 from test_recovery import payout
+from test_invoice_support import review_positions, create_matching_invoice
 
 
 class WeeklyFinishTests(unittest.TestCase):
@@ -68,7 +69,7 @@ class WeeklyFinishTests(unittest.TestCase):
     def test_discard_preserves_partner_status_history_and_restore(self):
         http=self.draft()
         rows=workflow.positions()
-        workflow.confirm(rows.position_key.tolist(),'review',date.today())
+        review_positions(rows.position_key.tolist())
         before={r.position_key:r.reviewed_at for _,r in workflow.positions().iterrows()}
         old_guard=(self.root/'Settlement_Locks.json').read_bytes()
         self.assertEqual(draft_correction.discard('mock-key','draft',True,http),1)
@@ -117,17 +118,17 @@ class WeeklyFinishTests(unittest.TestCase):
         self.assertFalse(app.exception)
         self.assertIn('Dashboard',[t.label for t in app.tabs])
         self.assertNotIn('Prüfung & Zahlungen manuell bestätigen',[e.label for e in app.expander])
-        review=next(b for b in app.button if b.label=='Partnerrechnung geprüft bestätigen')
-        review.click().run()
+        create_matching_invoice('BA')
+        app.run()
         self.assertFalse(workflow.positions().reviewed_at.astype(bool).any())
-        next(b for b in app.button if b.label=='Verbindlich bestätigen').click().run()
+        next(b for b in app.button if b.label=='Geprüfte Rechnung freigeben').click().run()
         self.assertTrue(workflow.positions().reviewed_at.astype(bool).all())
         next(b for b in app.button if b.label=='Bezahlt / abgeschlossen').click().run()
         next(b for b in app.button if b.label=='Verbindlich bestätigen').click().run()
         self.assertFalse(app.exception)
         self.assertTrue(workflow.positions().closed_at.astype(bool).all())
         self.assertNotIn('Bezahlt / abgeschlossen',[b.label for b in app.button])
-        self.assertFalse(list(app.get('download_button'))[1:]) # backup only
+        self.assertNotIn('Einzelabrechnung herunterladen',[b.label for b in app.get('download_button')])
         self.assertEqual(workflow.payout_status(workflow.positions())['p1'],'abgeschlossen')
 
     def test_ui_one_weekly_statement_for_partner_across_payouts(self):
@@ -137,7 +138,8 @@ class WeeklyFinishTests(unittest.TestCase):
         self.assertFalse(app.exception)
         self.assertEqual([b.label for b in app.get('download_button')].count('Einzelabrechnung herunterladen'),1)
         self.assertNotIn('Teilabrechnung herunterladen',[b.label for b in app.get('download_button')])
-        self.assertEqual([b.label for b in app.button].count('Partnerrechnung geprüft bestätigen'),1)
+        self.assertNotIn('Partnerrechnung geprüft bestätigen',[b.label for b in app.button])
+        self.assertEqual([b.label for b in app.button].count('Rechnung hochladen und abgleichen'),1)
         self.assertFalse([s.label for s in app.selectbox if s.label=='Payouts für die Gesamtrechnung'])
 
     def test_group_b_primary_action_stays_visible_without_authorization(self):

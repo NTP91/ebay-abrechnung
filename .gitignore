@@ -10,3 +10,5 @@ Settlement_State.sqlite3*
 Settlement_Locks.json*
 Settlement_Workflow.json*
 Settlement_Corrections.json*
+Settlement_Partner_Invoices.json*
+Partner_Invoices/

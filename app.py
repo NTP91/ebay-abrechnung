@@ -5,6 +5,7 @@ import data_status
 import studio_view
 import position_workflow
 import draft_correction
+import partner_invoices
 from datetime import date
 from partner_export import export_partner_excel, prepare_partner_export
 
@@ -89,6 +90,62 @@ def partner_panel(rows, rate, prefix):
                 download('Einzelabrechnung herunterladen', partner_block, prefix+'_'+partner)
             with action_col:
                 workflow_panel(partner_block,prefix+'_'+partner,action_only=True)
+            invoice_panel(partner_block,prefix+'_'+partner)
+
+
+def invoice_report(record, key, allow_approval=True):
+    status=record['report']['status']
+    title=record['invoice_number'] or record['file_name']
+    stamp=studio_view.local_datetime(core.pd.Series([record['uploaded_at']])).iloc[0]
+    st.write(f"**{title}** · {record['partner']} · hochgeladen {stamp}")
+    if record['approved_at']:
+        mode='manuelle Freigabe' if record['approval_mode']=='manual_override' else 'automatischer Abgleich erfolgreich'
+        st.success(f"Freigegeben: {mode} · {record['approved_by']}")
+        st.caption('Freigabe: '+studio_view.local_datetime(core.pd.Series([record['approved_at']])).iloc[0])
+        if record['override_reason']: st.caption('Begründung: '+record['override_reason'])
+    elif status=='matched': st.success('Vollständig geprüft · alle Positionen und Beträge stimmen überein.')
+    elif status=='deviation': st.error('Abweichung · keine Freigabe möglich.')
+    else: st.warning('Manuelle Prüfung erforderlich · der Beleg konnte nicht vollständig sicher ausgelesen werden.')
+    for message in record['report']['errors']: st.error(message)
+    for message in record['report']['warnings']: st.warning(message)
+    with st.expander('Rechnungsdetails und erkannte Positionen'):
+        st.caption(f"Rechnungsdatum: {record['invoice_date'] or 'nicht erkannt'} · Erwartet: {len(record['expected']['items'])} Positionen · {euros(float(record['expected']['total']))} brutto")
+        st.dataframe(core.pd.DataFrame(record['extracted']['items']).rename(columns={'order':'Bestellnummer','sku':'SKU','article':'Artikel','quantity':'Menge','net':'Netto vor Rabatt','net_after':'Netto nach Rabatt','gross':'Positionsbetrag brutto','rate':'Rabatt %','discount':'Rabatt netto'}),hide_index=True,use_container_width=True)
+        st.caption('Zugehöriger Sollbestand zum Upload-Zeitpunkt')
+        expected_table=core.pd.DataFrame(record['expected']['items'])
+        st.dataframe(expected_table[['order','sku','article','quantity','net','gross','rate','payout']].rename(columns={'order':'Bestellnummer','sku':'SKU','article':'Artikel','quantity':'Menge','net':'Netto vor Rabatt','gross':'Positionsbetrag brutto','rate':'Rabatt %','payout':'Payoutnummer'}),hide_index=True,use_container_width=True)
+        stored=Path(core.PAYOUTS_DB_PATH).parent/'Partner_Invoices'/record['file_ref']
+        if stored.name==record['file_ref'] and stored.is_file():
+            st.download_button('Originalrechnung herunterladen',stored.read_bytes(),record['file_name'],key=key+'-original',icon=':material/download:')
+    if allow_approval and not record['approved_at'] and status!='deviation':
+        actor=st.text_input('Freigebende Person',value='Patrick',key=key+'-actor')
+        reason=''; override=False
+        if status=='manual_required':
+            reason=st.text_area('Begründung der manuellen Freigabe',key=key+'-reason')
+            override=st.checkbox('Ich habe die Originalrechnung vollständig gegen den angezeigten Sollbestand geprüft und bestätige die manuelle Freigabe ausdrücklich.',key=key+'-override')
+        if st.button('Manuelle Freigabe speichern' if status=='manual_required' else 'Geprüfte Rechnung freigeben',key=key+'-approve',disabled=not actor.strip() or (status=='manual_required' and (not override or len(reason.strip())<10)),type='primary'):
+            try:
+                partner_invoices.approve(record['id'],actor,reason,override)
+                st.rerun()
+            except ValueError as exc: st.error(str(exc))
+
+
+def invoice_panel(rows, key, scope='Rechnung'):
+    if rows.empty: return
+    partner=rows.iloc[0].Partner
+    with st.expander('Partnerrechnung hochladen und prüfen'):
+        available_partners=sorted(business.loc[business.Gruppe.isin(['Gruppe A','Gruppe B']),'Partner'].unique())
+        selected=st.selectbox('Partner / Händler',available_partners,index=available_partners.index(partner),key=key+'-invoice-partner')
+        st.caption('PDF, XLSX oder CSV · höchstens 20 MB. Strukturierte Bestellnummern, SKU, Artikel, Menge, Beträge, Rabatt und Gesamtsumme werden geprüft. Unlesbare Felder bleiben prüfpflichtig.')
+        uploaded=st.file_uploader('Eingehende Partnerrechnung',type=['pdf','xlsx','csv'],key=key+'-invoice-file')
+        if st.button('Rechnung hochladen und abgleichen',disabled=uploaded is None,key=key+'-invoice-upload'):
+            try:
+                record,duplicate=partner_invoices.upload(selected,uploaded.name,uploaded.getvalue(),scope)
+                if duplicate: st.info('Datei bereits vorhanden. Keine erneute Verarbeitung oder Freigabe. Zugeordnet zu '+record['partner']+'.')
+            except ValueError as exc: st.error(str(exc))
+        for record in partner_invoices.list_invoices(selected):
+            if record['expected']['scope']==scope:
+                invoice_report(record,key+'-'+record['id'])
 
 
 @st.dialog('Vorgang bestätigen')
@@ -162,8 +219,8 @@ def workflow_panel(rows, key, mode='partner', action_only=False):
             if not action_only:
                 st.caption(f"{len(block)} {open_label} · "+('Partnerrechnung geprüft' if reviewed else f'{len(unreviewed)} {review_label}'))
             if not reviewed:
-                block=unreviewed
-                actions=[('Partnerrechnung geprüft bestätigen' if mode=='partner' else 'Erstattung geprüft bestätigen','review')]
+                st.caption('Freigabe erst nach Upload und erfolgreicher Prüfung der Partnerrechnung.')
+                actions=[]
             elif mode=='refund':
                 actions=[('Erstattung erledigt bestätigen','refund_settled')]
             else:
@@ -237,7 +294,7 @@ with st.expander('So läuft die Wochenabrechnung'):
 7. Zahlungseingang und Partnerzahlungen bestätigen.
 8. Erledigte Positionen werden abgeschlossen und bleiben in der Historie.
 9. In der nächsten Woche nur neue und noch offene Positionen bearbeiten.""")
-    st.caption('Der automatische Belegabgleich folgt im nächsten Ausbauschritt. Bis dahin nur tatsächlich geprüfte Partnerrechnungen bestätigen.')
+    st.caption('Partnerrechnung hochladen und automatisch abgleichen. Uneindeutige Belege benötigen eine dokumentierte manuelle Prüfung.')
 
 try:
     master=core.load_master_data()
@@ -405,6 +462,8 @@ with pending:
                     st.dataframe(block[['Bestellnummer','SKU','Angebotstitel','Erlös_Brutto','Auszahlung Nr.']].rename(columns={'Angebotstitel':'Produkttitel','Erlös_Brutto':'Payoutbetrag'}),hide_index=True,use_container_width=True)
                     download('Gutschriftenübersicht herunterladen',block,'Gutschriften_'+partner)
                     workflow_panel(business[(business.Partner==partner) & (business.Art=='Erstattung')],'refund-'+partner,'refund')
+                    if partner and block.Gruppe.isin(['Gruppe A','Gruppe B']).all():
+                        invoice_panel(block,'refund-invoice-'+partner,'Gutschriften')
     with holds_tab:
         st.caption('Einbehalte sind keine Abrechnungspositionen und kein Fehler. Die ursprünglichen Referenzen bleiben erhalten. Spätere Auszahlungen und Erstattungen werden als eigene Folgebewegungen verarbeitet.')
         st.dataframe(studio_view.holds(raw), hide_index=True, use_container_width=True)
@@ -420,7 +479,13 @@ with pending:
             st.dataframe(master[master.Art=='Gebühr'][['Datum','Auszahlung Nr.','Angebotstitel','Erlös_Brutto']],hide_index=True,use_container_width=True)
 
 with history:
-    ph,oh,lh=st.tabs(['Payouts','Bestellberichte','Lexware'])
+    ph,oh,lh,ih=st.tabs(['Payouts','Bestellberichte','Lexware','Eingangsrechnungen'])
+    with ih:
+        incoming=partner_invoices.list_invoices()
+        if not incoming: st.info('Noch keine Partnerrechnungen hochgeladen.')
+        for record in incoming:
+            with st.container(border=True):
+                invoice_report(record,'history-incoming-'+record['id'],allow_approval=False)
     with ph:
         table=core.pd.DataFrame(overview['history'])
         if not table.empty:

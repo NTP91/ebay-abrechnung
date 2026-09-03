@@ -377,6 +377,7 @@ def ledger():
         protected = json.loads(guard.read_text(encoding='utf-8')) if guard.exists() else []
         connection = sqlite3.connect(path, timeout=30)
         connection.row_factory = sqlite3.Row
+        invoice_store_ready = False
         try:
             connection.execute('PRAGMA synchronous=FULL')
             connection.execute('CREATE TABLE IF NOT EXISTS payouts (id TEXT PRIMARY KEY, status TEXT NOT NULL, fingerprint TEXT, invoice_id TEXT, attempt TEXT, snapshot TEXT)')
@@ -385,6 +386,9 @@ def ledger():
             connection.execute('CREATE TABLE IF NOT EXISTS import_warnings (id INTEGER PRIMARY KEY, payout TEXT, at TEXT, reason TEXT, snapshot TEXT)')
             connection.execute('CREATE TABLE IF NOT EXISTS position_workflow (position_key TEXT PRIMARY KEY, reviewed_at TEXT, paid_at TEXT, received_at TEXT, closed_at TEXT, source TEXT)')
             connection.execute('CREATE TABLE IF NOT EXISTS discarded_invoices (invoice_id TEXT PRIMARY KEY, label TEXT, discarded_at TEXT, snapshot TEXT)')
+            import invoice_store
+            invoice_store.initialize(connection, path.parent)
+            invoice_store_ready = True
             if correction_guard.exists():
                 for saved in json.loads(correction_guard.read_text(encoding='utf-8')):
                     connection.execute('INSERT OR IGNORE INTO discarded_invoices VALUES(?,?,?,?)', tuple(saved[k] for k in ('invoice_id','label','discarded_at','snapshot')))
@@ -418,6 +422,8 @@ def ledger():
             records = [dict(row) for row in connection.execute('SELECT * FROM payouts ORDER BY id')]
             workflow_records = [dict(row) for row in connection.execute('SELECT * FROM position_workflow ORDER BY position_key')]
             corrections = [dict(row) for row in connection.execute('SELECT * FROM discarded_invoices ORDER BY invoice_id')]
+            if invoice_store_ready:
+                invoice_store.mirror(connection, path.parent)
             connection.close()
             temporary = correction_guard.with_suffix('.json.tmp')
             with temporary.open('w', encoding='utf-8') as output:
@@ -585,6 +591,13 @@ def backup_data():
                 archive.write(workflow_guard, workflow_guard.name)
                 correction_guard = Path(PAYOUTS_DB_PATH).with_name('Settlement_Corrections.json')
                 archive.write(correction_guard, correction_guard.name)
+                incoming_guard = Path(PAYOUTS_DB_PATH).with_name('Settlement_Partner_Invoices.json')
+                archive.write(incoming_guard, incoming_guard.name)
+                incoming_dir = Path(PAYOUTS_DB_PATH).parent/'Partner_Invoices'
+                if incoming_dir.exists():
+                    for incoming_file in incoming_dir.iterdir():
+                        if incoming_file.is_file():
+                            archive.write(incoming_file, 'Partner_Invoices/'+incoming_file.name)
     return output.getvalue()
 
 
