@@ -130,6 +130,16 @@ class WeeklyFinishTests(unittest.TestCase):
         self.assertFalse(list(app.get('download_button'))[1:]) # backup only
         self.assertEqual(workflow.payout_status(workflow.positions())['p1'],'abgeschlossen')
 
+    def test_ui_one_weekly_statement_for_partner_across_payouts(self):
+        from streamlit.testing.v1 import AppTest
+        self.seed([payout('p1','a','a',sku='BA / 1'),payout('p2','b','b',sku='BA / 2')])
+        app=AppTest.from_file('app.py').run(timeout=30)
+        self.assertFalse(app.exception)
+        self.assertEqual([b.label for b in app.get('download_button')].count('Einzelabrechnung herunterladen'),1)
+        self.assertNotIn('Teilabrechnung herunterladen',[b.label for b in app.get('download_button')])
+        self.assertEqual([b.label for b in app.button].count('Partnerrechnung geprüft bestätigen'),1)
+        self.assertFalse([s.label for s in app.selectbox if s.label=='Payouts für die Gesamtrechnung'])
+
 
 if __name__=='__main__':
     unittest.main()

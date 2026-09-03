@@ -40,7 +40,7 @@ def eligible_rows(master, states):
     unlocked = set(states.loc[states.Sperre.isna() & states.Entwurf.isna() & ~states.Status.str.contains('Prüfung', na=False), 'Auszahlung'])
     bad = set(master.loc[master['Prüfhinweis'].astype(bool), 'Auszahlung Nr.'])
     business = position_workflow.positions(master, states)
-    return business[business['Auszahlung Nr.'].isin(unlocked - bad) & (business['Erlös_Brutto'] > 0) & (business.Art == 'Bestellung') & ~business['closed_at'].astype(bool)].copy()
+    return business[business['Auszahlung Nr.'].isin(unlocked - bad) & (business['Erlös_Brutto'] > 0) & (business.Art == 'Bestellung') & ~business['closed_at'].astype(bool) & ~business.Quellenpruefung.astype(bool)].copy()
 
 
 def partner_rows(business):

@@ -64,18 +64,17 @@ def partner_panel(rows, rate, prefix):
     except ValueError as exc:
         st.warning(str(exc))
         return
-    summary = summary.rename(columns={'Rabatt netto':f'Rabatt {rate} netto','Rechnungsbetrag':'Rechnungsbetrag brutto'})
-    st.dataframe(summary, hide_index=True, use_container_width=True,
-                 column_config={c:st.column_config.NumberColumn(c,format='%.2f €') for c in summary if c not in ('Partner','Positionen')})
-    st.markdown(f"**{int(summary.Positionen.sum())} Positionen · {euros(summary['Rechnungsbetrag brutto'].sum())} gesamt**")
+    summary = summary.set_index('Partner')
     for partner, partner_block in rows.groupby('Partner'):
         with st.container(border=True):
-            st.write(f'**{partner}** · {len(partner_block)} Positionen')
+            values=summary.loc[partner]
+            st.subheader(partner)
+            for col,label,value in zip(st.columns(4),['Offene Positionen','eBay-Brutto',f'Rabatt {rate} netto','Rechnungsbetrag brutto'],[str(len(partner_block)),euros(values['eBay-Brutto']),euros(values['Rabatt netto']),euros(values['Rechnungsbetrag'])]):
+                col.metric(label,value)
+            payout_ids=sorted(partner_block['Auszahlung Nr.'].unique())
+            st.caption(f"Kumulative Sammelabrechnung aus {len(payout_ids)} Payout{'s' if len(payout_ids)!=1 else ''}. Payoutnummern bleiben in Export und Historie nachvollziehbar.")
             download('Einzelabrechnung herunterladen', partner_block, prefix+'_'+partner)
-            for (pid,reviewed), block in partner_block.groupby(['Auszahlung Nr.','reviewed_at']):
-                st.caption(f'Konkrete Teilabrechnung · Payout {pid} · {len(block)} Positionen')
-                download('Teilabrechnung herunterladen',block,prefix+'_'+partner+'_'+pid+'_'+str(reviewed))
-                workflow_panel(block,prefix+'_'+partner+'_'+pid+'_'+str(reviewed))
+            workflow_panel(partner_block,prefix+'_'+partner)
 
 
 @st.dialog('Vorgang bestätigen')
@@ -128,16 +127,20 @@ def workflow_panel(rows, key, mode='partner'):
         active['invoice_scope']=active['Auszahlung Nr.'].map(invoice_map)
         groups=active.groupby('invoice_scope')
     else:
-        groups=active.groupby(['Partner','Auszahlung Nr.','reviewed_at'])
+        groups=[(rows.iloc[0].Partner,active)]
     for scope, block in groups:
         if mode=='evelyn':
             label='Zahlung von Evelyn erhalten'
             actions=[(label,'evelyn_received')]
             st.caption(f'Entwurf · {len(block)} Positionen · Payouts '+', '.join(sorted(block['Auszahlung Nr.'].unique())))
         else:
-            reviewed=block.reviewed_at.astype(bool).all()
-            st.caption(f"{block.iloc[0].Partner} · Payout {block.iloc[0]['Auszahlung Nr.']} · {len(block)} Positionen · "+('Partnerrechnung geprüft' if reviewed else 'Partnerrechnung noch nicht geprüft'))
+            unreviewed=block[~block.reviewed_at.astype(bool)]
+            reviewed=unreviewed.empty
+            open_label='offene Position' if len(block)==1 else 'offene Positionen'
+            review_label='Position noch nicht geprüft' if len(unreviewed)==1 else 'Positionen noch nicht geprüft'
+            st.caption(f"{len(block)} {open_label} · "+('Partnerrechnung geprüft' if reviewed else f'{len(unreviewed)} {review_label}'))
             if not reviewed:
+                block=unreviewed
                 actions=[('Partnerrechnung geprüft bestätigen' if mode=='partner' else 'Erstattung geprüft bestätigen','review')]
             elif mode=='refund':
                 actions=[('Erstattung erledigt bestätigen','refund_settled')]
@@ -272,14 +275,23 @@ with group_a:
 
 with group_b:
     b_ready=ready[ready.Gruppe=='Gruppe B'] if not ready.empty else ready
+    b_open=business[(business.Gruppe=='Gruppe B') & (business.Art=='Bestellung') & (business['Erlös_Brutto']>0) & ~business.closed_at.astype(bool) & ~business['Prüfhinweis'].astype(bool) & ~business.Quellenpruefung.astype(bool)] if not business.empty else business
     with st.container(border=True):
         st.subheader('Partner → Patrick')
         st.caption('Einzelabrechnungen für MH, NB und weitere zugeordnete Partner · 3,5 % Rabatt')
         partner_panel(partner_ready[partner_ready.Gruppe=='Gruppe B'] if not partner_ready.empty else partner_ready,'3,5 %','Partner_Patrick')
     with st.container(border=True):
-        st.subheader('Patrick → Evelyn')
+        st.subheader('Gesamtabrechnung Gruppe B an Evelyn')
         transmitted=sum(item['Positionen'] or 0 for item in invoices.values() if not item['discarded'])
-        st.caption(f'{len(b_ready)} neue Positionen für Lexware bereit · {transmitted} Positionen bereits früher übertragen')
+        if not b_open.empty:
+            try:
+                all_totals=prepare_partner_export(b_open,statement_type='group_b_evelyn')['totals']['Rechnung']
+                for col,label,value in zip(st.columns(4),['Offene Positionen','Netto vor Rabatt','Rabatt 0,5 % netto','Rechnungsbetrag brutto'],[str(len(b_open)),euros(all_totals['net']),euros(all_totals['discount']),euros(all_totals['gross'])]):
+                    col.metric(label,value)
+                download('Gesamtübersicht herunterladen',b_open,'Gruppe_B_Gesamt_Evelyn','group_b_evelyn')
+            except ValueError as exc:
+                st.warning('Gesamtübersicht benötigt Prüfung: '+str(exc))
+        st.caption(f'{len(b_ready)} davon neu für Lexware bereit · {transmitted} Positionen bereits früher übertragen und für einen weiteren Entwurf gesperrt')
         st.caption('Übertragen bedeutet nur: Entwurf erstellt. Zahlungseingang und Partnerzahlung werden getrennt bestätigt.')
         if not business.empty:
             workflow_panel(business[business.Lexware_uebertragen],'b-evelyn','evelyn')
@@ -288,8 +300,8 @@ with group_b:
             st.button('Lexware-Entwurf erstellen', type='primary', disabled=True, use_container_width=True)
         else:
             available=sorted(b_ready['Auszahlung Nr.'].unique())
-            selected=st.multiselect('Payouts für die Gesamtrechnung',available,default=available)
-            chosen=b_ready[b_ready['Auszahlung Nr.'].isin(selected)]
+            selected=available
+            chosen=b_ready
             totals=None
             if not chosen.empty:
                 try:
@@ -298,7 +310,7 @@ with group_b:
                         col.metric(label,value)
                     st.caption(f"Netto nach Rabatt: {euros(totals['net_after'])} · 19 % Umsatzsteuer: {euros(totals['tax'])}")
                     st.caption('eBay-Auszahlungsnummern: '+', '.join(selected))
-                    download('Gesamtabrechnung herunterladen',chosen,'Gruppe_B_Gesamt_Evelyn','group_b_evelyn')
+                    st.info(f"Der neue Lexware-Entwurf umfasst ausschließlich diese {len(chosen)} noch nicht übertragenen Positionen. Die vollständige offene Gesamtübersicht bleibt darüber sichtbar.")
                 except ValueError as exc:
                     st.warning(str(exc))
             received=st.checkbox('eBay-Geldeingang für alle ausgewählten Payouts geprüft')

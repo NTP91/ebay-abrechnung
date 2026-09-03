@@ -3,7 +3,7 @@
 - Tägliche Importe bleiben möglich. Am Abrechnungstag werden nur noch offene Positionen angeboten.
 - Dashboard: vorhandener eBay-Bruttoumsatz aus zugeordneten Payoutpositionen, einschließlich Erstattungen. Evelyn-Provision entspricht dem Netto-Rabatt von 0,5 %. Patrick erhält nur für Gruppe B die Differenz aus 3,5 % Partnerrabatt und 0,5 % Evelyn-Provision, mit der bestehenden Cent-Rundung. Die Kennzahlen sind keine Zahlungsbestätigungen.
 - `Einbehalten` bleibt unverändert im Rohdatenarchiv und erscheint separat unter „Einbehalte / Rücksendungen in Klärung“. Der Vorgang ist weder Rechnung noch Gutschrift oder Zuordnungsfehler. Echte spätere Zahlungs-/Erstattungsbewegungen werden weiterhin regulär importiert.
-- Prüf- und Zahlungsaktionen gelten für die angezeigte Partner-Teilabrechnung (Partner, Payout und Prüfstand). Evelyn-Zahlungen gelten für einen konkreten gespeicherten Entwurf. Ein Bestätigungsdialog zeigt Positionen, Abrechnungsbetrag und das aktuelle Datum. Bei zwischenzeitlich geänderten Quellen wird die Bestätigung abgelehnt.
+- Pro Partner gibt es eine kumulative offene Sammelabrechnung über alle importierten Payouts. Payoutnummern bleiben Herkunftsnachweis in Export und Historie, bilden aber keine operativen Teilabrechnungen. Prüf- und Zahlungsaktionen gelten für den gesamten noch offenen Partnerbestand; bereits bestätigte Positionen werden dabei nicht doppelt bestätigt. Evelyn-Zahlungen gelten für einen konkreten gespeicherten Entwurf. Ein Bestätigungsdialog zeigt Positionen, Abrechnungsbetrag und das aktuelle Datum. Bei zwischenzeitlich geänderten Quellen wird die Bestätigung abgelehnt.
 - Automatischer Belegabgleich folgt später. Das bestehende Positionsmodell hält Prüfdatum, Quelldaten-Snapshot, beide Zahlungswege und Abschluss getrennt; die manuelle Bestätigung ersetzt keinen automatischen Belegvergleich.
 - Gruppe A schließt nach Prüfung und Partnerzahlung. Gruppe B schließt erst nach Prüfung, Partnerzahlung und Evelyn-Zahlung. Abgeschlossene Positionen verschwinden aus Arbeitslisten und Downloads; ihre Daten und Zeitpunkte bleiben in der Historie.
 
@@ -15,7 +15,7 @@ Nur die betroffene Transfersperre wird freigegeben. Ursprüngliche Registereintr
 
 ## Lokale Validierung
 
-- 76 Tests ausgeführt: 68 bestanden, 8 separate Originaldatei-Tests ohne deren Dateivorlagen übersprungen.
+- 77 Tests ausgeführt: 69 bestanden, 8 separate Originaldatei-Tests ohne deren Dateivorlagen übersprungen.
 - Ursprüngliche Master-Daten aus dem vorhandenen Backup: BA, NB, MH und Gruppe-B-Gesamtabrechnung inklusive unveränderter 4.160,31 € geprüft.
 - Einbehalt neben gültigem Payout, spätere Zahlung/Erstattung, Dashboard-Provisionsabgrenzung, UI-Bestätigungsdialog und Abschluss ohne erneuten Download getestet.
 - Verwerfen nur mit simulierten HTTP-Antworten: vorhandener Beleg, falscher Kontakt, Fehler, Timeout und bestätigte Zahlung geben keine Sperre frei. Wiederherstellung aus Sidecars erhält Korrekturhistorie und Partnerstatus.
