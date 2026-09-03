@@ -10,27 +10,35 @@ from partner_export import export_partner_excel, prepare_partner_export
 
 st.set_page_config(page_title='Payout Studio', page_icon='💠', layout='wide')
 st.markdown('''<style>
-.stApp{background:#f5f7fb;color:#17243c}
-[data-testid="stHeader"]{background:transparent}
+:root{--navy:#0b2454;--ink:#15284a;--muted:#68758d;--line:#dce3ec;--surface:#fff;--page:#f7f9fc;--blue:#123f8c;--warn:#fff9e8}
+html,body,[class*="css"]{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.stApp{background:linear-gradient(180deg,#fbfcfe 0,#f5f7fb 100%);color:var(--ink)}
+[data-testid="stHeader"]{background:rgba(255,255,255,.94);border-bottom:1px solid #e3e8ef;backdrop-filter:blur(10px)}
 [data-testid="stToolbar"]{visibility:hidden}
-[data-testid="stSidebar"]{background:#fff;border-right:1px solid #e6eaf1}
-.block-container{max-width:1500px;padding-top:2rem;padding-bottom:3rem}
-h1,h2,h3{color:#17243c;letter-spacing:-.025em}h1{font-size:2rem!important}h3{font-size:1.15rem!important}
-[data-testid="stCaptionContainer"]{color:#69768d}
-[data-testid="stMetric"]{background:#fff;border:1px solid #e4e9f2;border-radius:14px;padding:18px;box-shadow:0 2px 5px #17243c04}
-[data-testid="stMetricLabel"]{color:#66738b;font-size:.82rem}
-[data-testid="stMetricValue"]{color:#15243d;font-size:1.8rem}
-[data-testid="stVerticalBlockBorderWrapper"]{background:#fff;border-radius:14px}
-[data-testid="stDataFrame"]{border:1px solid #edf0f5;border-radius:9px}
-button{border-radius:8px!important;font-weight:550!important}
-[data-testid="stBaseButton-primary"]{background:#246bfe;border-color:#246bfe;color:white}
-[data-testid="stBaseButton-primary"]:disabled{background:#e9eef8;border-color:#e9eef8;color:#8995ab}
-[data-baseweb="tab-list"]{gap:24px;border-bottom:1px solid #e5eaf2;margin-bottom:20px}
-[data-baseweb="tab"]{padding:12px 4px;color:#64718a}
-[data-baseweb="tab"][aria-selected="true"]{color:#2165eb}
-[data-baseweb="tab-highlight"]{background:#246bfe}
-[data-testid="stFileUploaderDropzone"]{background:#f6f8fc;border:1px dashed #dce3ef;border-radius:10px}
-[data-testid="stExpander"]{border-color:#e5eaf2;border-radius:10px}
+[data-testid="stSidebar"]{background:#fff;border-right:1px solid #e3e8ef;box-shadow:6px 0 24px #18345b08}
+.block-container{max-width:1580px;padding-top:2.5rem;padding-bottom:4rem}
+h1,h2,h3{color:var(--navy);letter-spacing:-.035em;font-weight:750!important}h1{font-size:2rem!important}h3{font-size:1.32rem!important}
+p{line-height:1.55}[data-testid="stCaptionContainer"]{color:var(--muted);font-size:.9rem}
+[data-testid="stMetric"]{background:var(--surface);border:1px solid var(--line);border-radius:13px;padding:22px 18px;min-height:126px;display:flex;justify-content:center;box-shadow:0 8px 24px #16335b08;text-align:center}
+[data-testid="stMetricLabel"]{color:#46536b;font-size:.92rem;justify-content:center}
+[data-testid="stMetricValue"]{color:var(--navy);font-size:1.85rem;font-weight:750;justify-content:center}
+[data-testid="stVerticalBlockBorderWrapper"]{background:var(--surface);border-color:var(--line)!important;border-radius:14px!important;box-shadow:0 8px 30px #18345b0a}
+[data-testid="stDataFrame"]{border:1px solid var(--line);border-radius:11px;overflow:hidden}
+[data-testid="stButton"] button,[data-testid="stDownloadButton"] button,[data-testid="stLinkButton"] a{min-height:48px;border-radius:9px!important;font-weight:650!important;border-color:var(--navy);transition:all .16s ease;box-shadow:none}
+[data-testid="stButton"] button:hover,[data-testid="stDownloadButton"] button:hover,[data-testid="stLinkButton"] a:hover{border-color:#164f9f;color:#164f9f;transform:translateY(-1px);box-shadow:0 5px 14px #173f7517}
+[data-testid="stBaseButton-primary"]{background:var(--navy);border-color:var(--navy);color:white}
+[data-testid="stBaseButton-primary"]:hover{background:#153b79;color:white}
+[data-testid="stBaseButton-primary"]:disabled{background:#e9edf3;border-color:#d8dee7;color:#7c8798;transform:none;box-shadow:none}
+[data-baseweb="tab-list"]{gap:28px;border-bottom:1px solid #dde4ed;margin-bottom:24px}
+[data-baseweb="tab"]{padding:13px 4px;color:#69758b;font-weight:600}
+[data-baseweb="tab"][aria-selected="true"]{color:var(--navy)}
+[data-baseweb="tab-highlight"]{background:var(--navy);height:3px}
+[data-testid="stFileUploaderDropzone"]{background:#f8fafd;border:1px dashed #cbd5e2;border-radius:11px}
+[data-testid="stExpander"]{background:#fff;border:1px solid var(--line);border-radius:11px;box-shadow:0 3px 14px #18345b06}
+[data-testid="stAlert"]{border-radius:12px;border:1px solid #e5bd46;background:var(--warn);color:#263957}
+[data-testid="stCheckbox"]{padding:.1rem 0;border-bottom:1px solid #e5e9ef}
+[data-testid="stCheckbox"] label{min-height:38px;color:var(--ink);font-weight:520}
+hr{border-color:#e5eaf0!important}
 </style>''', unsafe_allow_html=True)
 
 
@@ -50,7 +58,7 @@ def download(label, rows, key, kind='partner'):
             st.caption('Abgeschlossen · in der Historie archiviert; kein erneuter Export.')
             return
         blob = export_partner_excel(rows, statement_type=kind)
-        st.download_button(label, blob, key+'.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', key=key)
+        st.download_button(label, blob, key+'.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', key=key, icon=':material/download:', use_container_width=True)
     except ValueError as exc:
         st.warning(f'Export benötigt Prüfung: {exc}')
 
@@ -102,6 +110,12 @@ def confirm_dialog(rows, action, label):
     if st.button('Abbrechen',key='cancel-confirmation'):
         st.session_state.pop('confirmation_request',None)
         st.rerun()
+
+
+def checkbox_confirmation(key, rows, action, label):
+    if st.session_state.get(key):
+        st.session_state['confirmation_request']=(rows.copy(),action,label)
+        st.session_state[key]=False
 
 
 @st.dialog('Lexware-Entwurf verwerfen')
@@ -157,7 +171,7 @@ def workflow_panel(rows, key, mode='partner', action_only=False):
         if block.empty:
             continue
         for label, action in actions:
-            if st.button(label, key=key+str(scope)+action):
+            if st.button(label, key=key+str(scope)+action, icon=':material/check_circle:', use_container_width=True):
                 st.session_state['confirmation_request']=(block.copy(),action,label)
 
 
@@ -299,16 +313,50 @@ with group_b:
                 totals=prepare_partner_export(chosen,statement_type='group_b_evelyn')['totals']['Rechnung']
             except ValueError as exc:
                 st.warning(str(exc))
+        all_totals=None
+        if not b_open.empty:
+            try:
+                all_totals=prepare_partner_export(b_open,statement_type='group_b_evelyn')['totals']['Rechnung']
+            except ValueError as exc:
+                st.warning('Gesamtübersicht benötigt Prüfung: '+str(exc))
+
+        if all_totals:
+            for col,label,value in zip(st.columns(4),['Offene Positionen','Abrechnungsbasis netto','Rabatt 0,5 % netto','Auszahlungsbetrag brutto'],[str(len(b_open)),euros(all_totals['net']),euros(all_totals['discount']),euros(all_totals['gross'])]):
+                col.metric(label,value)
+
+        can_create=bool(selected and totals and api_key and st.session_state.get('lexware-received') and st.session_state.get('lexware-prior') and st.session_state.get('lexware-once'))
+        download_col,lexware_col,_=st.columns([1.25,1.75,1.5],vertical_alignment='center')
+        with download_col:
+            if all_totals:
+                download('Gesamtübersicht herunterladen',b_open,'Gruppe_B_Gesamt_Evelyn','group_b_evelyn')
+        with lexware_col:
+            create_clicked=st.button('An Lexware übermitteln',type='primary',disabled=not can_create,use_container_width=True,key='lexware-create',icon=':material/lock:')
+        st.caption('Die Gesamtübersicht enthält alle aktuell offenen Gruppe-B-Positionen. Der Lexware-Entwurf enthält ausschließlich noch nicht übertragene, fachlich freigegebene Positionen.')
+        if transmitted:
+            active_payouts=sorted(business.loc[business.Lexware_uebertragen,'Auszahlung Nr.'].unique()) if not business.empty else []
+            st.caption(f"Entwurf: {transmitted} Positionen · Payouts "+', '.join(active_payouts))
 
         with st.container(border=True):
-            action_col,status_col=st.columns([1.15,1.85],vertical_alignment='top')
-            with action_col:
-                st.markdown('**Lexware-Aktion**')
-                received=st.checkbox('eBay-Geldeingang geprüft',key='lexware-received')
-                prior_checked=st.checkbox('Kein bestehender Beleg in Lexware',key='lexware-prior')
-                confirmed=st.checkbox('Genau einen Entwurf erstellen',key='lexware-once')
-                can_create=bool(selected and totals and api_key and received and prior_checked and confirmed)
-                create_clicked=st.button('An Lexware übermitteln',type='primary',disabled=not can_create,use_container_width=True,key='lexware-create')
+            st.subheader('Lexware-Aktion')
+            check_col,status_col=st.columns([1.1,1.5],vertical_alignment='top')
+            with check_col:
+                st.checkbox('eBay-Geldeingang geprüft',key='lexware-received')
+                st.checkbox('Kein bestehender Beleg in Lexware',key='lexware-prior')
+                st.checkbox('Genau einen Entwurf erstellen',key='lexware-once')
+                transferred_rows=business[business.Lexware_uebertragen & (business.Art=='Bestellung') & (business['Erlös_Brutto']>0)] if not business.empty else business
+                if not transferred_rows.empty:
+                    invoice_map=dict(zip(states.Auszahlung,states.Entwurf))
+                    transferred_rows=transferred_rows.copy()
+                    transferred_rows['invoice_scope']=transferred_rows['Auszahlung Nr.'].map(invoice_map)
+                    for invoice_id,payment_rows in transferred_rows.groupby('invoice_scope'):
+                        outstanding=payment_rows[~payment_rows.received_at.astype(bool) & ~payment_rows.closed_at.astype(bool)]
+                        if outstanding.empty:
+                            st.checkbox('Zahlung von Evelyn erhalten',value=True,disabled=True,key='evelyn-paid-'+str(invoice_id))
+                        else:
+                            payment_key='evelyn-payment-'+str(invoice_id)
+                            st.checkbox('Zahlung von Evelyn erhalten',key=payment_key,on_change=checkbox_confirmation,args=(payment_key,outstanding,'evelyn_received','Zahlung von Evelyn erhalten'))
+                else:
+                    st.checkbox('Zahlung von Evelyn erhalten',value=False,disabled=True,key='evelyn-payment-none')
             with status_col:
                 if b_ready.empty:
                     st.warning('Aktuell sind keine neuen Positionen für Lexware freigegeben. Bereits übertragene Positionen bleiben gesperrt; weitere Positionen benötigen zuerst eine vollständig geklärte Payout-Zuordnung.')
@@ -316,32 +364,22 @@ with group_b:
                     st.info(f'{len(chosen)} Positionen sind fachlich bereit. Für die Übermittlung den API-Key unter „Lexware-Verbindung“ hinterlegen und die drei Sicherheitsprüfungen bestätigen.')
                 else:
                     st.success(f'{len(chosen)} Positionen sind fachlich bereit. Die Übermittlung wird erst nach allen drei Sicherheitsbestätigungen aktiv.')
-                st.caption(f'{len(b_ready)} neu für Lexware bereit · {transmitted} bereits früher übertragen. Button-Sichtbarkeit ändert keine fachliche Freigabe oder Sperre.')
+                st.caption(f'{len(b_ready)} neu für Lexware bereit · {transmitted} bereits früher übertragen.')
+                st.caption('Button-Sichtbarkeit ändert keine fachliche Freigabe oder Sperre.')
                 if totals:
                     st.write(f"**Neuer Entwurfsumfang:** {len(chosen)} Positionen · {euros(totals['gross'])} brutto")
                     st.caption('Payoutnachweise: '+', '.join(selected))
-            if create_clicked:
-                try:
-                    expected={pid:core.payout_fingerprint(master[master['Auszahlung Nr.']==pid]) for pid in selected}
-                    for pid in selected:
-                        core.confirm_received(pid)
-                    core.create_invoice_draft(api_key,selected,prior_checked,expected_fingerprints=expected)
-                    st.session_state['draft_created']=True
-                    st.rerun()
-                except ValueError as exc:
-                    st.error(str(exc))
 
-        if not b_open.empty:
+        if create_clicked:
             try:
-                all_totals=prepare_partner_export(b_open,statement_type='group_b_evelyn')['totals']['Rechnung']
-                for col,label,value in zip(st.columns(4),['Offene Positionen','Netto vor Rabatt','Rabatt 0,5 % netto','Rechnungsbetrag brutto'],[str(len(b_open)),euros(all_totals['net']),euros(all_totals['discount']),euros(all_totals['gross'])]):
-                    col.metric(label,value)
-                download('Gesamtübersicht herunterladen',b_open,'Gruppe_B_Gesamt_Evelyn','group_b_evelyn')
+                expected={pid:core.payout_fingerprint(master[master['Auszahlung Nr.']==pid]) for pid in selected}
+                for pid in selected:
+                    core.confirm_received(pid)
+                core.create_invoice_draft(api_key,selected,st.session_state.get('lexware-prior',False),expected_fingerprints=expected)
+                st.session_state['draft_created']=True
+                st.rerun()
             except ValueError as exc:
-                st.warning('Gesamtübersicht benötigt Prüfung: '+str(exc))
-        st.caption('Die Gesamtübersicht enthält alle aktuell offenen Gruppe-B-Positionen. Der Lexware-Entwurf enthält ausschließlich noch nicht übertragene, fachlich freigegebene Positionen.')
-        if not business.empty:
-            workflow_panel(business[business.Lexware_uebertragen],'b-evelyn','evelyn')
+                st.error(str(exc))
 
 
 with pending:

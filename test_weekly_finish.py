@@ -148,7 +148,23 @@ class WeeklyFinishTests(unittest.TestCase):
         action=next(button for button in app.button if button.label=='An Lexware übermitteln')
         self.assertTrue(action.disabled)
         self.assertEqual([b.label for b in app.button].count('An Lexware übermitteln'),1)
-        self.assertIn('**Lexware-Aktion**',[m.value for m in app.markdown])
+        self.assertIn('Lexware-Aktion',[heading.value for heading in app.subheader])
+        labels=[metric.label for metric in app.metric]
+        for label in ('Offene Positionen','Abrechnungsbasis netto','Rabatt 0,5 % netto','Auszahlungsbetrag brutto'):
+            self.assertIn(label,labels)
+
+    def test_evelyn_payment_is_checkbox_with_existing_confirmation(self):
+        from streamlit.testing.v1 import AppTest
+        self.draft()
+        app=AppTest.from_file('app.py').run(timeout=30)
+        self.assertFalse(app.exception)
+        self.assertNotIn('Zahlung von Evelyn erhalten',[button.label for button in app.button])
+        payment=next(box for box in app.checkbox if box.label=='Zahlung von Evelyn erhalten')
+        payment.set_value(True).run()
+        self.assertFalse(workflow.positions().received_at.astype(bool).any())
+        self.assertIn('Verbindlich bestätigen',[button.label for button in app.button])
+        next(button for button in app.button if button.label=='Verbindlich bestätigen').click().run()
+        self.assertTrue(workflow.positions().query("Gruppe == 'Gruppe B'").received_at.astype(bool).all())
 
 
 if __name__=='__main__':
