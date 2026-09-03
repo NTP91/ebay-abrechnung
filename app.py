@@ -5,6 +5,7 @@ from pathlib import Path
 
 import streamlit as st
 import core
+from partner_export import export_partner_excel
 
 st.set_page_config(page_title="Payout Studio", page_icon="€", layout="wide")
 st.markdown("""
@@ -41,6 +42,16 @@ def euros(value):
 
 def download(label, frame, filename, key):
     st.download_button(label, core.export_to_excel(frame), filename,
+                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=key)
+
+
+def partner_download(label, frame, filename, key):
+    try:
+        data = export_partner_excel(frame)
+    except ValueError as exc:
+        st.error(f"Partnerexport angehalten: {exc}")
+        return
+    st.download_button(label, data, filename,
                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=key)
 
 
@@ -94,9 +105,7 @@ with tab_a:
         st.dataframe(summary.style.format(precision=2), use_container_width=True, hide_index=True)
         download("Gesamtübersicht", summary, "Gruppe_A.xlsx", "a-summary")
         for partner, rows in master[master.Gruppe == "Gruppe A"].groupby("Partner"):
-            rows = rows.copy()
-            rows["Partnerbetrag"] = rows["Erlös_Brutto"] * .995
-            download(f"{partner} · Einzelabrechnung", rows, f"Partner_{partner}.xlsx", "a-" + partner)
+            partner_download(f"{partner} · Einzelabrechnung", rows, f"Partner_{partner}.xlsx", "a-" + partner)
 
 with tab_b:
     st.subheader("Payout einzeln abrechnen")
@@ -152,10 +161,8 @@ with tab_b:
         st.divider()
         st.subheader("Partnerabrechnungen · 96,5 %")
         for partner, rows in block[block.Gruppe == "Gruppe B"].groupby("Partner"):
-            rows = rows.copy()
-            rows["Partnerbetrag"] = rows["Erlös_Brutto"] * .965
             safe = re.sub(r"[^A-Za-z0-9_-]", "_", partner)
-            download(f"{partner} · Auszahlung {payout_id}", rows, f"{safe}_{payout_id}.xlsx", "b-" + payout_id + partner)
+            partner_download(f"{partner} · Auszahlung {payout_id}", rows, f"{safe}_{payout_id}.xlsx", "b-" + payout_id + partner)
         summary = core.get_group_b_summary(master)
         download("Evelyn-Gesamtübersicht (nur Export, kein Sammelupload)", summary, "Gruppe_B.xlsx", "b-summary")
 
