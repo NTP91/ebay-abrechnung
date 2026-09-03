@@ -152,17 +152,17 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(len(payload['lineItems']), 1)
         self.assertEqual(payload['lineItems'][0]['unitPrice']['netAmount'], 100)
 
-    def test_streamlit_with_saved_data_and_payload(self):
+    def test_streamlit_modules_without_debug_payload(self):
         self.seed_orders()
         from streamlit.testing.v1 import AppTest
         core.import_reports([payout()], self.payouts, 'payout')
         app = AppTest.from_file(str(Path(__file__).with_name('app.py'))).run()
         self.assertFalse(list(app.exception))
-        receipt = next(widget for widget in app.checkbox if 'Geldeingang' in widget.label)
-        receipt.check().run()
-        next(button for button in app.button if button.label == 'Test-Payload vorbereiten').click().run()
-        self.assertFalse(list(app.exception))
-        self.assertEqual(len(app.json), 1)
+        labels = [tab.label for tab in app.tabs]
+        self.assertTrue(all(name in labels for name in ['Übersicht','Gruppe A','Gruppe B','Offene Positionen','Historie']))
+        self.assertEqual(len(app.json), 0)
+        self.assertFalse(any('Payload' in button.label for button in app.button))
+        self.assertTrue(next(button for button in app.button if button.label=='Lexware-Entwurf erstellen').disabled)
 
 
 if __name__ == '__main__':

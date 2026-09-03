@@ -1,5 +1,30 @@
 # Recovery-Version für Patricks Wochenlauf
 
+## Aktuelle Oberfläche
+
+Helle Oberfläche mit Übersicht, Gruppe A, Gruppe B, Offene Positionen und Historie.
+Der Import liegt kompakt links; API-Key und Backup sind eingeklappt. Fachliche
+Tabellen zeigen nur relevante Spalten. Test-Payloads und Debug-Ausgaben wurden
+entfernt; Entwurfs-IDs stehen ausschließlich unter „Technische Details“.
+
+Gruppe A enthält neue positive Positionen vollständig zugeordneter, ungesperrter
+Payouts. Gruppe B trennt „Partner → Patrick“ (3,5 %) von „Patrick → Evelyn“ (0,5 %,
+19 % Umsatzsteuer). Die Beträge stammen aus dem unveränderten Export-Rechenweg.
+Die Gesamtrechnung kann mehrere ausgewählte neue Payouts enthalten. Dabei werden
+die bestehenden Einzel-Payloads zusammengeführt und alle Payouts vor einem einzigen
+Erstellungsaufruf gemeinsam dauerhaft reserviert. Eine Änderung gegenüber dem
+angezeigten Datenstand stoppt die Erstellung. Keine Finalisierung und kein Versand.
+
+Historische Downloads bleiben separat unter Historie zugänglich. Sie fließen nicht
+in neue Abrechnungsübersichten ein. Erstattungen/Gutschriften, partnerlose Gebühren
+und Transaktionen ohne Payout haben eigene Bereiche. Offene Produkttitel/SKU werden
+aus dem zugeordneten Bestellbericht angezeigt, ohne Änderungen am Quelldatenbestand.
+
+Prüfstand beim Umbau: 4 Payouts, 47 offene Transaktionen, 37 bereits übertragene
+Lexware-Positionen. Beim Payout 7714928937 fehlt eine eindeutige Bestellzuordnung;
+die bestehende Sicherheitssperre bleibt erhalten. 52 lokale Tests bestanden,
+einschließlich Originalsummen und ausschließlich simulierten Lexware-Aufrufen.
+
 Überlappende Transaktionsberichte: Jeder Payout wird unabhängig verarbeitet.
 Teilmengen bekannter Positionen gelten als bereits vorhanden. Neue Positionen
 können zu noch nicht gesperrten Payouts ergänzt werden. Zusätzliche unbekannte
@@ -72,8 +97,8 @@ können wie Lücken aussehen; Hinweise lösen keine Reparatur aus. Fehlende hist
 Importdaten werden als unbekannt ausgewiesen. Widersprüchliche bestehende Stammdaten
 benötigen eine fachliche Klärung. Der Verlust des gesamten Datenverzeichnisses erfordert
 ein vollständiges Backup; lokale Dateien ersetzen keine externe Sicherung.
-Die vorhandene UI erstellt weiterhin einen Gruppe-B-Entwurf je ausgewähltem Payout;
-die Gesamtübersicht über mehrere Payouts ist ein Excel-Export.
+Die Gruppe-B-Gesamtrechnung verwendet nur neue positive Positionen. Die bereits
+abgerechneten RE0089-Payouts und alle reservierten/unklaren Versuche bleiben ausgeschlossen.
 
 ## Prüfung
 

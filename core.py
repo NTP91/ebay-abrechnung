@@ -466,12 +466,14 @@ def advance_status(payout_id, target):
         db.commit()
 
 
-def create_invoice_draft(api_key, payout_id, prior_invoices_checked=False, http=None):
+def create_invoice_draft(api_key, payout_id, prior_invoices_checked=False, http=None, expected_fingerprints=None):
     """Single attempt per payout. Any uncertain POST outcome remains locked."""
     if not api_key or not prior_invoices_checked:
         raise ValueError('API-Key und Bestätigung der bisherigen Rechnungsprüfung erforderlich.')
     http = http or requests
-    payout_id = str(payout_id)
+    payout_ids = sorted({str(value) for value in payout_id}) if isinstance(payout_id, (list, tuple, set)) else [str(payout_id)]
+    if not payout_ids:
+        raise ValueError('Keine Payouts ausgewählt.')
     headers = {'Authorization': f'Bearer {api_key}', 'Accept': 'application/json'}
     # Protect against simultaneous imports while preparing the immutable snapshot.
     with FileLock(PAYOUTS_DB_PATH + '.lock'), FileLock(ORDERS_DB_PATH + '.lock'):
@@ -479,9 +481,12 @@ def create_invoice_draft(api_key, payout_id, prior_invoices_checked=False, http=
         sync_status(master)
         with ledger() as db:
             db.execute('BEGIN IMMEDIATE')
-            row = db.execute('SELECT * FROM payouts WHERE id=?', (payout_id,)).fetchone()
-            if not row or row['attempt'] or row['status'] != 'Geld eingegangen':
-                raise ValueError('Payout gesperrt oder Geldeingang/Zuordnung nicht bestätigt.')
+            for payout_id in payout_ids:
+                row = db.execute('SELECT * FROM payouts WHERE id=?', (payout_id,)).fetchone()
+                if not row or row['attempt'] or row['invoice_id'] or row['status'] != 'Geld eingegangen':
+                    raise ValueError('Payout gesperrt oder Geldeingang/Zuordnung nicht bestätigt.')
+                if expected_fingerprints is not None and expected_fingerprints.get(payout_id) != payout_fingerprint(master[master['Auszahlung Nr.'] == payout_id]):
+                    raise ValueError('Datenstand geändert. Übersicht aktualisieren und erneut prüfen; kein Entwurf erstellt.')
             try:
                 response = http.get(API_URL + '/contacts', params={'number': 16335, 'customer': 'true'}, headers=headers, timeout=20)
                 if response.status_code != 200:
@@ -490,15 +495,19 @@ def create_invoice_draft(api_key, payout_id, prior_invoices_checked=False, http=
                             str(c.get('roles', {}).get('customer', {}).get('number')) == '16335']
                 if len(contacts) != 1 or not contacts[0].get('id'):
                     raise ValueError('Kundennummer 16335 nicht eindeutig gefunden.')
-                payload = build_invoice_payload(master, payout_id, contacts[0]['id'], True)
+                parts = [build_invoice_payload(master, pid, contacts[0]['id'], True) for pid in payout_ids]
+                payload = dict(parts[0])
+                payload['lineItems'] = [item for part in parts for item in part['lineItems']]
+                payload['remark'] = invoice_payout_remark(payout_ids)
             except Exception:
                 raise ValueError('Kontakt/Payload-Prüfung fehlgeschlagen; kein Rechnungsaufruf erfolgt.') from None
             if len(payload['lineItems']) > 300:
                 raise ValueError('Mehr als 300 Positionen; manuelle Prüfung erforderlich.')
-            block = master[master['Auszahlung Nr.'] == payout_id]
-            db.execute("UPDATE payouts SET attempt='pending', fingerprint=?, snapshot=? WHERE id=?",
-                       (payout_fingerprint(block), json.dumps(payload, ensure_ascii=False), payout_id))
-            audit(db, payout_id, 'Entwurfsversuch reserviert; Altbestand manuell geprüft')
+            for payout_id in payout_ids:
+                block = master[master['Auszahlung Nr.'] == payout_id]
+                db.execute("UPDATE payouts SET attempt='pending', fingerprint=?, snapshot=? WHERE id=?",
+                           (payout_fingerprint(block), json.dumps(payload, ensure_ascii=False), payout_id))
+                audit(db, payout_id, 'Entwurfsversuch reserviert; Altbestand manuell geprüft')
             db.commit()  # durable BEFORE the network write; never automatically retry
     try:
         response = http.post(API_URL + '/invoices', params={'finalize': 'false'}, headers=headers, json=payload, timeout=30, allow_redirects=False)
@@ -509,13 +518,15 @@ def create_invoice_draft(api_key, payout_id, prior_invoices_checked=False, http=
             raise ValueError('Entwurfs-ID fehlt.')
     except Exception:
         with ledger() as db:
-            db.execute("UPDATE payouts SET attempt='unknown', status='Prüfung erforderlich' WHERE id=?", (payout_id,))
-            audit(db, payout_id, 'API-Ergebnis unklar; erneute Erstellung gesperrt, Lexoffice manuell prüfen')
+            for payout_id in payout_ids:
+                db.execute("UPDATE payouts SET attempt='unknown', status='Prüfung erforderlich' WHERE id=?", (payout_id,))
+                audit(db, payout_id, 'API-Ergebnis unklar; erneute Erstellung gesperrt, Lexoffice manuell prüfen')
             db.commit()
         raise ValueError('API-Ergebnis unklar. Payout bleibt gesperrt; in Lexoffice prüfen. Nicht erneut erstellen.') from None
     with ledger() as db:
-        db.execute("UPDATE payouts SET attempt='created', invoice_id=?, status='Lexoffice-Entwurf erstellt' WHERE id=?", (invoice_id, payout_id))
-        audit(db, payout_id, 'Lexoffice-Entwurf erstellt: ' + invoice_id)
+        for payout_id in payout_ids:
+            db.execute("UPDATE payouts SET attempt='created', invoice_id=?, status='Lexoffice-Entwurf erstellt' WHERE id=?", (invoice_id, payout_id))
+            audit(db, payout_id, 'Lexoffice-Entwurf erstellt: ' + invoice_id)
         db.commit()
     return invoice_id
 

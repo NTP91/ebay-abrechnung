@@ -235,7 +235,7 @@ class RealPartnerExportTests(unittest.TestCase):
                 from streamlit.testing.v1 import AppTest
                 app=AppTest.from_file(str(Path(__file__).with_name('app.py'))).run()
                 for pid in sorted(master['Auszahlung Nr.'].unique()):
-                    next(widget for widget in app.selectbox if widget.label=='Eine Auszahlung wählen').select(pid).run()
+                    next(widget for widget in app.selectbox if widget.label=='Payout').select(pid).run()
                     self.assertFalse(list(app.exception))
                     self.assertFalse(any('Partnerexport angehalten' in error.value for error in app.error))
         for name in filenames:
