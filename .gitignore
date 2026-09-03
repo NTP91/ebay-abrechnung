@@ -7,3 +7,4 @@ Master_*.csv.*
 *.bak
 .env
 Settlement_State.sqlite3*
+Settlement_Locks.json*

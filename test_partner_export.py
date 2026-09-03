@@ -125,7 +125,7 @@ class PartnerExportTests(unittest.TestCase):
 
     def test_all_groups_and_automatic_rates(self):
         for partner in ('PP', 'BA', 'MK', '001', 'NB', 'MH12', 'OTHER'):
-            with self.subTest(partner=partner), tempfile.TemporaryDirectory() as folder:
+            with self.subTest(partner=partner), tempfile.TemporaryDirectory() as folder, patch.object(core, 'known_group_b_partners', return_value={'NB', 'OTHER'}):
                 with patch.multiple(core, PAYOUTS_DB_PATH=str(Path(folder)/'Master_Payouts.csv'),
                                     ORDERS_DB_PATH=str(Path(folder)/'Master_Orders.csv')):
                     master = self.seed(sku=partner+' / TEST')
@@ -191,6 +191,10 @@ class RealPartnerExportTests(unittest.TestCase):
         filenames=['Master_Payouts.csv','Master_Orders.csv']
         before={name:hashlib.sha256((source/name).read_bytes()).hexdigest() for name in filenames}
         with tempfile.TemporaryDirectory() as folder:
+            # This isolated offline fixture intentionally starts with a fresh ledger.
+            with patch.object(core, 'PAYOUTS_DB_PATH', str(Path(folder)/filenames[0])):
+                with core.ledger():
+                    pass
             for name in filenames:
                 shutil.copyfile(source/name,Path(folder)/name)
             with patch.multiple(core,PAYOUTS_DB_PATH=str(Path(folder)/filenames[0]),ORDERS_DB_PATH=str(Path(folder)/filenames[1])), \

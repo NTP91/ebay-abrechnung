@@ -5,6 +5,7 @@ from pathlib import Path
 
 import streamlit as st
 import core
+import data_status
 from partner_export import export_partner_excel
 
 st.set_page_config(page_title="Payout Studio", page_icon="€", layout="wide")
@@ -61,13 +62,28 @@ with st.sidebar:
     orders = st.file_uploader("Bestellberichte", type=["csv", "xlsx"], accept_multiple_files=True)
     if st.button("Dateien sicher importieren", type="primary", disabled=not (payouts or orders)):
         try:
-            pf = [core.read_report(f, "payout") for f in payouts]
-            of = [core.read_report(f, "orders") for f in orders]
-            no = core.import_reports(of, core.ORDERS_DB_PATH, "orders")
-            np = core.import_reports(pf, core.PAYOUTS_DB_PATH, "payout")
-            st.success(f"{np} neue Payout-Zeilen · {no} neue Bestellpositionen")
+            receipts = []
+            for kind, files in [('orders', orders), ('payout', payouts)]:
+                for uploaded in files:
+                    receipts.append(data_status.import_file(uploaded, kind))
+            st.session_state['import_receipts'] = receipts
         except Exception as exc:
             st.error(f"Import angehalten: {exc}")
+    for receipt in st.session_state.get('import_receipts', []):
+        st.write(receipt['filename'])
+        st.caption(f"Erkannt: {receipt['detected']} · Neu: {receipt['added']} · Bereits vorhanden: {receipt['present']} · Nicht zuordenbar/unvollständig: {receipt['issues']}")
+        if receipt['error']:
+            st.error('Fehler: ' + receipt['error'])
+        else:
+            st.success('Import abgeschlossen · keine Fehler')
+        for payout in receipt['payouts']:
+            text = 'Payout ' + payout['number']
+            if payout['known']:
+                text += ' bereits vorhanden · keine neuen Daten übernommen'
+            text += ' · ' + payout.get('status', 'Import angehalten')
+            if payout.get('locked'):
+                text += ' · BEREITS ABGERECHNET / GESPERRT' if payout.get('invoice') else ' · GESPERRT'
+            st.info(text)
     st.divider()
     api_key = st.text_input("Lexware API-Key", type="password")
     st.caption("Kundennummer 16335 · ausschließlich Entwürfe · kein Versand")
@@ -81,10 +97,29 @@ with st.sidebar:
 
 try:
     master = core.load_master_data()
-    states = core.sync_status(master) if not master.empty else None
+    states = core.sync_status(master)
+    overview = data_status.overview(master, states)
 except Exception as exc:
     st.error(f"Datenprüfung angehalten: {exc}")
     st.stop()
+
+st.subheader('Datenstand')
+latest = overview['latest']
+st.caption('Letzter bekannter Payout: ' + (latest['Payoutnummer'] + ' · ' + latest['Datum / Zeitraum'] if latest else 'noch keiner'))
+st.caption('Bestelldaten vorhanden bis: ' + overview['order_end'] if overview['order_end'] else 'Bestelldatenstand: kein zuverlässig lesbares Bestelldatum vorhanden')
+st.caption(f"Noch nicht abgerechnete Payouts: {overview['unbilled']} · Reservierte/unklare Versuche bleiben gesperrt.")
+for gap in overview['gaps']:
+    st.warning(gap)
+with st.expander('Payout- und Importhistorie', expanded=False):
+    st.dataframe(core.pd.DataFrame(overview['history']), hide_index=True, use_container_width=True, height=220)
+    logs = overview['imports'].copy()
+    if not logs.empty:
+        logs = logs[logs.kind == 'orders'].head(20)
+        logs['at'] = core.pd.to_datetime(logs['at'], utc=True).dt.tz_convert('Europe/Berlin').dt.strftime('%d.%m.%Y %H:%M').fillna('nicht bekannt')
+        for column in ('start', 'end'):
+            logs[column] = core.pd.to_datetime(logs[column]).dt.strftime('%d.%m.%Y').fillna('nicht bekannt')
+        st.dataframe(logs[['filename', 'start', 'end', 'at', 'added', 'present', 'error']].rename(columns={'filename':'Bestellbericht', 'start':'Von', 'end':'Bis', 'at':'Importdatum', 'added':'Neue Positionen', 'present':'Bereits vorhanden', 'error':'Fehler'}), hide_index=True, use_container_width=True, height=220)
+    st.caption('Zeiträume beruhen auf lesbaren Datumsfeldern. Für Altimporte ohne Protokoll wird kein Importdatum erfunden. Ein letztes Bestelldatum belegt keine lückenlose Abdeckung.')
 
 if not master.empty:
     cols = st.columns(4)
@@ -118,6 +153,8 @@ with tab_b:
         locked = bool(state.Sperre)
         if block["Prüfhinweis"].astype(bool).any() or "Prüfung" in state.Status:
             st.error(state.Status + " — Lexoffice-Erstellung gesperrt.")
+            for reason in block.loc[block['Prüfhinweis'] != '', 'Prüfhinweis'].unique():
+                st.error(reason)
         elif locked:
             st.success(state.Status) if state.Entwurf else st.warning("Versuch reserviert / Ergebnis unklar. Nicht erneut senden; Lexoffice manuell prüfen.")
         else:

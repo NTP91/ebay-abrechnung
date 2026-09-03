@@ -168,6 +168,9 @@ def import_reports(frames, path, kind):
     """Append atomically, preserving old records; reject conflicting payout copies."""
     if not frames:
         return 0
+    # Initialize/check the register before the first CSV is written.
+    with ledger():
+        pass
     with FileLock(str(path) + '.lock'):
         existing = read_master(path)
         incoming = canonicalize(pd.concat(frames, ignore_index=True)).drop_duplicates()
@@ -184,19 +187,33 @@ def import_reports(frames, path, kind):
                     raise ValueError('Auszahlungsnummer fehlt.')
                 old = existing[existing['Auszahlung Nr.'] == payout_id]
                 if not old.empty and fingerprints(old) != fingerprints(block):
-                    raise ValueError(f'Auszahlung {payout_id} existiert mit abweichenden Daten. Manuelle Korrektur nötig.')
+                    raise ValueError(f'Payout {payout_id} bereits vorhanden, abweichende Daten: keine neuen Daten übernommen. Vorhandene Sperren bleiben erhalten.')
+            incoming = incoming[~incoming['Auszahlung Nr.'].isin(existing['Auszahlung Nr.'])]
         merged = pd.concat([existing, incoming], ignore_index=True).fillna('').drop_duplicates()
         if kind == 'orders':
-            keys = ['Bestellnummer', 'Transaktionsnummer', 'Artikelnummer']
             consolidated = []
-            for identity, block in merged.groupby(keys, dropna=False, sort=False):
-                record = block.iloc[0].copy()
+            for _, incoming_row in merged.iterrows():
+                require_identity = incoming_row['Bestellnummer'] and (incoming_row['Transaktionsnummer'] or incoming_row['Artikelnummer'])
+                if not require_identity:
+                    raise ValueError('Bestellposition ohne verwertbare Identität; keine Daten übernommen.')
+                matches = []
+                for record in consolidated:
+                    same_transaction = incoming_row['Transaktionsnummer'] and incoming_row['Transaktionsnummer'] == record['Transaktionsnummer']
+                    same_item = (incoming_row['Bestellnummer'] == record['Bestellnummer'] and incoming_row['Artikelnummer'] and incoming_row['Artikelnummer'] == record['Artikelnummer']
+                                 and not (incoming_row['Transaktionsnummer'] and record['Transaktionsnummer']))
+                    if same_transaction or same_item:
+                        matches.append(record)
+                if len(matches) > 1:
+                    raise ValueError('Uneindeutige Bestellposition; keine Daten übernommen.')
+                if not matches:
+                    consolidated.append(incoming_row.copy())
+                    continue
+                record = matches[0]
                 for col in merged.columns:
-                    values = list(dict.fromkeys(clean(v) for v in block[col] if clean(v)))
-                    if len(values) > 1:
-                        raise ValueError(f'Widersprüchliche Bestellposition {identity}, Spalte {col}; vorhandene Daten bleiben erhalten.')
-                    record[col] = values[0] if values else ''
-                consolidated.append(record)
+                    old, new = clean(record[col]), clean(incoming_row[col])
+                    if old and new and old != new and col in ('Bestellnummer', 'Transaktionsnummer', 'Artikelnummer', 'SKU', 'Angebotstitel'):
+                        raise ValueError(f'Widersprüchliche Bestellposition {incoming_row["Bestellnummer"]}, Spalte {col}; vorhandene Daten bleiben erhalten.')
+                    record[col] = old or new
             merged = pd.DataFrame(consolidated, columns=merged.columns)
         count = len(merged) - len(existing)
         if merged.equals(existing.reset_index(drop=True)):
@@ -250,6 +267,10 @@ def load_master_data():
         if issue:
             issue = 'Zuordnung fehlt: ' + issue
         partner = sku.split('/')[0].strip().upper()
+        if not fee and not re.fullmatch(r'[A-Z0-9]+', partner):
+            issue = issue or 'Zuordnung fehlt: SKU ohne verwertbaren Partner vor dem ersten Slash'
+        if not fee and partner and not (partner.startswith(('PP', 'BA', 'MK', '001', 'MH')) or partner in known_group_b_partners()):
+            issue = issue or 'Zuordnung fehlt: unbekannter Partner ' + partner
         if partner.startswith('MH'):
             partner = 'MH'
         if fee:
@@ -275,6 +296,10 @@ def invoice_payout_remark(payout_ids):
     return 'eBay-Auszahlungsnummern: ' + ', '.join(sorted({str(value) for value in payout_ids}))
 
 
+def known_group_b_partners():
+    return set(json.loads(Path(__file__).with_name('partners.json').read_text(encoding='utf-8'))['group_b'])
+
+
 def build_invoice_payload(master, payout_id, contact_id, money_received=False):
     """Dry-run builder: old per-transaction net calculation, no API side effects."""
     if not money_received:
@@ -285,7 +310,7 @@ def build_invoice_payload(master, payout_id, contact_id, money_received=False):
     related = payout[payout['Art'] != 'Gebühr']
     if not (related['Titelquelle'] == 'Bestellbericht').all():
         raise ValueError('Zuordnung fehlt: verbindlicher Bestellbericht-Titel fehlt.')
-    sales = payout[(payout['Gruppe'] == 'Gruppe B') & (payout['Art'] == 'Bestellung')]
+    sales = payout[(payout['Gruppe'] == 'Gruppe B') & (payout['Art'] == 'Bestellung') & (payout['Erlös_Brutto'] > 0)]
     if sales.empty:
         raise ValueError('Keine Gruppe-B-Bestellungen für diesen Payout.')
     now = datetime.now(timezone.utc).isoformat(timespec='milliseconds')
@@ -293,7 +318,7 @@ def build_invoice_payload(master, payout_id, contact_id, money_received=False):
     for _, row in sales.iterrows():
         items.append({
             'type': 'custom', 'name': row['Angebotstitel'],
-            'description': f"SKU: {row['SKU']}\n eBay-Bestellnummer: {row['Bestellnummer']}\n eBay-Auszahlungsnummer: {payout_id}",
+            'description': f"eBay-Bestellnummer: {row['Bestellnummer']}\nSKU: {row['SKU']}",
             'quantity': 1, 'unitName': 'Stück',
             'unitPrice': {'currency': 'EUR', 'netAmount': row['eBay_Netto'], 'taxRatePercentage': 19},
             'discountPercentage': 0.5,
@@ -316,17 +341,41 @@ FOLLOWUP = {
 
 @contextmanager
 def ledger():
+    """Mirror locks independently; rebuilding SQLite cannot release a reservation."""
     path = Path(PAYOUTS_DB_PATH).with_name('Settlement_State.sqlite3')
-    connection = sqlite3.connect(path, timeout=30)
-    connection.row_factory = sqlite3.Row
-    try:
-        connection.execute('PRAGMA synchronous=FULL')
-        connection.execute('CREATE TABLE IF NOT EXISTS payouts (id TEXT PRIMARY KEY, status TEXT NOT NULL, fingerprint TEXT, invoice_id TEXT, attempt TEXT, snapshot TEXT)')
-        connection.execute('CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, payout TEXT, at TEXT, event TEXT)')
-        connection.commit()
-        yield connection
-    finally:
-        connection.close()
+    guard = path.with_name('Settlement_Locks.json')
+    with FileLock(str(path) + '.guard.lock'):
+        if not path.exists() and not guard.exists() and Path(PAYOUTS_DB_PATH).exists():
+            raise ValueError('Rechnungsregister und Sperrensicherung fehlen bei vorhandenen Payouts. Vollständiges Backup wiederherstellen; Abrechnung gesperrt.')
+        protected = json.loads(guard.read_text(encoding='utf-8')) if guard.exists() else []
+        connection = sqlite3.connect(path, timeout=30)
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute('PRAGMA synchronous=FULL')
+            connection.execute('CREATE TABLE IF NOT EXISTS payouts (id TEXT PRIMARY KEY, status TEXT NOT NULL, fingerprint TEXT, invoice_id TEXT, attempt TEXT, snapshot TEXT)')
+            connection.execute('CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, payout TEXT, at TEXT, event TEXT)')
+            connection.execute('CREATE TABLE IF NOT EXISTS imports (id INTEGER PRIMARY KEY, kind TEXT, filename TEXT, at TEXT, start TEXT, end TEXT, detected INTEGER, added INTEGER, present INTEGER, issues INTEGER, error TEXT)')
+            for row in protected:
+                current = connection.execute('SELECT * FROM payouts WHERE id=?', (row['id'],)).fetchone()
+                if not current or (row['attempt'] and not current['attempt']):
+                    connection.execute('INSERT OR REPLACE INTO payouts(id,status,fingerprint,invoice_id,attempt,snapshot) VALUES(?,?,?,?,?,?)', tuple(row[k] for k in ('id','status','fingerprint','invoice_id','attempt','snapshot')))
+                    audit(connection, row['id'], 'Status/Sperre aus unabhängiger Sperrensicherung wiederhergestellt')
+            if not protected and not guard.exists() and Path(PAYOUTS_DB_PATH).exists():
+                # Existing legacy rows migrate normally. Missing rows have unknown history.
+                for payout in read_master(PAYOUTS_DB_PATH)['Auszahlung Nr.'].unique():
+                    connection.execute("INSERT OR IGNORE INTO payouts(id,status,attempt) VALUES(?, 'Prüfung erforderlich: Registerhistorie fehlt', 'unknown')", (str(payout),))
+            connection.commit()
+            yield connection
+        finally:
+            connection.rollback()  # never persist a caller's uncommitted partial operation
+            records = [dict(row) for row in connection.execute('SELECT * FROM payouts ORDER BY id')]
+            connection.close()
+            temporary = guard.with_suffix('.json.tmp')
+            with temporary.open('w', encoding='utf-8') as output:
+                json.dump(records, output, ensure_ascii=False)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, guard)
 
 
 def audit(db, payout_id, event):
@@ -430,7 +479,7 @@ def create_invoice_draft(api_key, payout_id, prior_invoices_checked=False, http=
             audit(db, payout_id, 'Entwurfsversuch reserviert; Altbestand manuell geprüft')
             db.commit()  # durable BEFORE the network write; never automatically retry
     try:
-        response = http.post(API_URL + '/invoices', params={'finalize': 'false'}, headers=headers, json=payload, timeout=30)
+        response = http.post(API_URL + '/invoices', params={'finalize': 'false'}, headers=headers, json=payload, timeout=30, allow_redirects=False)
         if response.status_code not in (200, 201):
             raise ValueError('Rechnungsantwort nicht erfolgreich.')
         invoice_id = response.json().get('id')
@@ -466,6 +515,8 @@ def backup_data():
                     if Path(filename).exists():
                         archive.write(filename, Path(filename).name)
                 archive.write(snapshot, snapshot.name)
+                guard = Path(PAYOUTS_DB_PATH).with_name('Settlement_Locks.json')
+                archive.write(guard, guard.name)
     return output.getvalue()
 
 
