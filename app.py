@@ -9,13 +9,12 @@ import partner_invoices
 from datetime import date
 from partner_export import export_partner_excel, prepare_partner_export
 
-st.set_page_config(page_title='Payout Studio', page_icon='💠', layout='wide')
+st.set_page_config(page_title='Payout Studio', page_icon='💠', layout='wide', initial_sidebar_state='expanded')
 st.markdown('''<style>
 :root{--navy:#0b2454;--ink:#15284a;--muted:#68758d;--line:#dce3ec;--surface:#fff;--page:#f7f9fc;--blue:#123f8c;--warn:#fff9e8}
 html,body,[class*="css"]{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
 .stApp{background:linear-gradient(180deg,#fbfcfe 0,#f5f7fb 100%);color:var(--ink)}
 [data-testid="stHeader"]{background:rgba(255,255,255,.94);border-bottom:1px solid #e3e8ef;backdrop-filter:blur(10px)}
-[data-testid="stToolbar"]{visibility:hidden}
 [data-testid="stSidebar"]{background:#fff;border-right:1px solid #e3e8ef;box-shadow:6px 0 24px #18345b08}
 .block-container{max-width:1580px;padding-top:2.5rem;padding-bottom:4rem}
 h1,h2,h3{color:var(--navy);letter-spacing:-.035em;font-weight:750!important}h1{font-size:2rem!important}h3{font-size:1.32rem!important}
@@ -130,10 +129,10 @@ def invoice_report(record, key, allow_approval=True):
             except ValueError as exc: st.error(str(exc))
 
 
-def invoice_panel(rows, key, scope='Rechnung'):
+def invoice_panel(rows, key, scope='Rechnung', expanded=False):
     if rows.empty: return
     partner=rows.iloc[0].Partner
-    with st.expander('Partnerrechnung hochladen und prüfen'):
+    with st.expander('Partnerrechnung hochladen und prüfen', expanded=expanded):
         available_partners=sorted(business.loc[business.Gruppe.isin(['Gruppe A','Gruppe B']),'Partner'].unique())
         selected=st.selectbox('Partner / Händler',available_partners,index=available_partners.index(partner),key=key+'-invoice-partner')
         st.caption('PDF, XLSX oder CSV · höchstens 20 MB. Strukturierte Bestellnummern, SKU, Artikel, Menge, Beträge, Rabatt und Gesamtsumme werden geprüft. Unlesbare Felder bleiben prüfpflichtig.')
@@ -238,38 +237,40 @@ with st.sidebar:
     st.caption('RECOVERY · PATRICKS ARBEITSBEREICH')
     st.divider()
     st.subheader('Import & Dateien')
-    payouts = st.file_uploader('Transaktionsberichte', type=['csv'], accept_multiple_files=True)
-    orders = st.file_uploader('Bestellberichte', type=['csv','xlsx'], accept_multiple_files=True)
-    if st.button('Dateien importieren', type='primary', disabled=not(payouts or orders), use_container_width=True):
-        try:
-            receipts=[]
-            for kind, files in [('orders',orders),('payout',payouts)]:
-                for uploaded in files:
-                    receipts.append(data_status.import_file(uploaded,kind))
-            st.session_state['import_receipts']=receipts
-        except Exception as exc:
-            st.error(f'Import angehalten: {exc}')
-    if st.session_state.get('import_receipts'):
-        with st.expander('Letzter Import', expanded=True):
-            for receipt in st.session_state['import_receipts']:
-                st.write(receipt['filename'])
-                if receipt['error']:
-                    st.error(receipt['error'])
-                elif receipt.get('transactions'):
-                    c=receipt['transactions']
-                    st.caption(f"{c['new_paid']} neu ausgezahlt · {c['known_paid']} bereits vorhanden")
-                    st.caption(f"{c['new_open']} neu offen · {c['still_open']} weiterhin offen · {c['assigned_open']} jetzt einem Payout zugeordnet")
-                    for p in receipt['payouts']:
-                        if p.get('warning'):
-                            st.warning(f"{p['number']}: {p['warning']}")
-                        elif p['known'] and not p.get('counts',{}).get('new_paid'):
-                            st.caption(f"{p['number']}: bereits vorhanden / keine neuen Daten"+(' · Lexware-Übertragung gesperrt' if p.get('locked') else ''))
-                    if receipt['issues']:
-                        st.warning(f"{receipt['issues']} Zuordnungen prüfen")
-                else:
-                    st.caption(f"{receipt['added']} neu · {receipt['present']} bereits vorhanden · {receipt['issues']} unvollständig")
-                    if receipt.get('historical_without_sku'):
-                        st.caption(f"{receipt['historical_without_sku']} historische Positionen ohne SKU archiviert · nicht abrechnungsrelevant")
+    with st.expander('eBay-Berichte hochladen', expanded=True):
+        payouts = st.file_uploader('Transaktionsberichte', type=['csv'], accept_multiple_files=True)
+        orders = st.file_uploader('Bestellberichte', type=['csv','xlsx'], accept_multiple_files=True)
+        if st.button('Dateien importieren', type='primary', disabled=not(payouts or orders), use_container_width=True):
+            try:
+                receipts=[]
+                for kind, files in [('orders',orders),('payout',payouts)]:
+                    for uploaded in files:
+                        receipts.append(data_status.import_file(uploaded,kind))
+                st.session_state['import_receipts']=receipts
+            except Exception as exc:
+                st.error(f'Import angehalten: {exc}')
+        if st.session_state.get('import_receipts'):
+            with st.expander('Letzter Import', expanded=True):
+                for receipt in st.session_state['import_receipts']:
+                    st.write(receipt['filename'])
+                    if receipt['error']:
+                        st.error(receipt['error'])
+                    elif receipt.get('transactions'):
+                        c=receipt['transactions']
+                        st.caption(f"{c['new_paid']} neu ausgezahlt · {c['known_paid']} bereits vorhanden")
+                        st.caption(f"{c['new_open']} neu offen · {c['still_open']} weiterhin offen · {c['assigned_open']} jetzt einem Payout zugeordnet")
+                        for p in receipt['payouts']:
+                            if p.get('warning'):
+                                st.warning(f"{p['number']}: {p['warning']}")
+                            elif p['known'] and not p.get('counts',{}).get('new_paid'):
+                                st.caption(f"{p['number']}: bereits vorhanden / keine neuen Daten"+(' · Lexware-Übertragung gesperrt' if p.get('locked') else ''))
+                        if receipt['issues']:
+                            st.warning(f"{receipt['issues']} Zuordnungen prüfen")
+                    else:
+                        st.caption(f"{receipt['added']} neu · {receipt['present']} bereits vorhanden · {receipt['issues']} unvollständig")
+                        if receipt.get('historical_without_sku'):
+                            st.caption(f"{receipt['historical_without_sku']} historische Positionen ohne SKU archiviert · nicht abrechnungsrelevant")
+    invoice_entry = st.empty()
     st.divider()
     with st.expander('Lexware-Verbindung'):
         api_key=st.text_input('API-Key',type='password')
@@ -312,6 +313,19 @@ try:
 except Exception as exc:
     st.error(f'Datenbestand benötigt Prüfung: {exc}')
     st.stop()
+@st.dialog('Händlerrechnung hochladen', width='large')
+def incoming_invoice_dialog():
+    st.caption('Partner auswählen und die Rechnung gegen die bestehende Einzelabrechnung prüfen.')
+    if partner_ready.empty:
+        st.info('Aktuell keine offenen Partnerabrechnungen. Vorhandene Belege findest du unter Historie → Eingangsrechnungen.')
+    else:
+        invoice_panel(partner_ready, 'import-invoice', expanded=True)
+
+with invoice_entry.container():
+    if st.button('Händlerrechnung hochladen', key='open-incoming-invoice', icon=':material/upload_file:', use_container_width=True):
+        incoming_invoice_dialog()
+    st.caption('PDF · XLSX · CSV. Auch direkt in den Partnerkarten unter Gruppe A und Gruppe B erreichbar.')
+
 if st.session_state.pop('draft_created',False):
     st.success('Lexware-Entwurf erstellt. Die enthaltenen Positionen sind jetzt dauerhaft gesperrt.')
 
