@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "recipients": {
+    "evelyn": {
+      "name": "Evelyn",
+      "address": {
+        "name_addition": "",
+        "street": "",
+        "postal_code": "",
+        "city": "",
+        "country": ""
+      }
+    },
+    "patrick": {
+      "name": "Patrick",
+      "address": {
+        "name_addition": "",
+        "street": "",
+        "postal_code": "",
+        "city": "",
+        "country": ""
+      }
+    }
+  }
+}

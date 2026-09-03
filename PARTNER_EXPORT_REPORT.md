@@ -1,95 +1,130 @@
-# Partner-Excel: Layoutprüfung vom 03.09.2026
+# Partnerexport und Lexoffice-Eingabe: Prüfstand 03.09.2026
 
-Branch: `codex/recover-payout-settlement`, Ausgangsstand `6e82d0d`.
-Nur die Partner-Einzelabrechnungen erhalten einen neuen Export. Gruppenübersichten,
-Import, Partnerzuordnung, Status und Lexoffice-Payload/API bleiben unverändert.
-Kein Merge, Push oder produktives Deployment.
+Repository `NTP91/ebay-abrechnung`, Branch `codex/recover-payout-settlement`.
+Dieser Stand ersetzt die Exportberechnung aus `764ab2f` ausdrücklich: Das
+Rechnungsbrutto wird jetzt aus den Lexoffice-Nettoeingaben berechnet. Ein
+unabhängiger Rabatt auf den eBay-Kontrollbetrag entfällt.
 
-## Inhalt und Quellen
+## Abrechnungsarten und Stammdaten
 
-- Zwei Blätter: Rechnung (Bestellungen), Gutschriften (alle vollständigen/teilweisen
-  Erstattungen, mit dem ursprünglichen negativen Vorzeichen). Keine Gebühren.
-- Acht fachliche Spalten, Menge immer 1. Titel, SKU und Bestelldatum stammen aus
-  dem eindeutig zugeordneten Bestellbericht (`Verkauft am`).
-- Ursprüngliches eBay-Brutto einschließlich Versand stammt aus
-  `Transaktionsbetrag (inkl. Kosten)`, das Auszahlungsdatum aus `Auszahlungsdatum`.
-  Fehlendes ursprüngliches Brutto wird nicht durch einen anderen Betrag ersetzt.
-- Beide Blätter enthalten Partner, Gruppe, Payoutnummer(n), zugehörige
-  Auszahlungsdaten, Provisionssatz, Positionshinweis und sechs Summen.
-- Datum als Excel-Datum, Euroformat mit zwei Nachkommastellen, Textumbruch,
-  abwechselnde Zeilenfarben, acht Spalten ohne technische Zusatzspalten,
-  fixierte Kopfzeilen und Filter auf der Positionstabelle.
-- Gruppe A behält den bisherigen Exportumfang über alle importierten Payouts;
-  Gruppe B wird weiterhin pro ausgewähltem Payout heruntergeladen.
+| Abrechnungsart | Rabatt | Rechnungsempfänger |
+|---|---:|---|
+| Gruppe-A-Einzelabrechnung (PP, BA, MK, 001) | 0,5 % | Evelyn |
+| Gruppe-B-Einzelabrechnung (NB, MH, weitere zugeordnete Partner) | 3,5 % | Patrick |
+| Gesamtübersicht Gruppe B | 0,5 % | Evelyn |
 
-## Unveränderter Rechenweg
+Die Rate folgt ausschließlich der Abrechnungsart. Es gibt keine manuelle
+Rabattsatzauswahl. Die bestehenden Gruppen und die MH-Zusammenfassung werden
+aus dem unveränderten Master übernommen; NB bleibt separat.
 
-Der bisherige Nettobetrag `eBay_Netto = round(Erlös_Brutto / 1.19, 2)` bleibt als
-verbindlicher Centbetrag erhalten. Partnerbrutto bleibt
-`Erlös_Brutto * 0.995` (Gruppe A) bzw. `Erlös_Brutto * 0.965` (Gruppe B).
-Die Anzeige mit zwei Nachkommastellen verändert die zugrunde liegenden Werte nicht.
-Die ursprüngliche Abrechnungsbasis ist in der Bruttoformel enthalten; sie wird
-nicht aus dem bereits gerundeten Netto zurückgerechnet oder durch das eventuell
-abweichende ursprüngliche eBay-Brutto vor Kosten ersetzt.
+`billing_recipients.json` enthält eine versionierte Stammdatenstruktur mit
+Empfängername und getrennten Feldern für Namenszusatz, Straße, Postleitzahl,
+Ort und Land. Die Adressfelder sind leer. Im Export steht entsprechend
+„Rechnungsadresse noch nicht hinterlegt“. Eine externe Stammdatendatei kann
+später über `PAYMENT_RECIPIENTS_PATH` eingebunden werden. Diese Datei definiert
+keine Rabattsätze. Es wurden keine realen Adressen ergänzt oder erfunden.
 
-Rabattbetrag = Netto vor Rabatt × Provisionssatz; Netto nach Rabatt = Netto minus
-Rabatt; Umsatzsteuer = Netto nach Rabatt × 19 %. Bereits im bisherigen Rechenweg
-entstehende Unterschiede gegenüber dem direkt berechneten Partnerbrutto werden
-unter den Summen ausdrücklich als Rundungsdifferenz ausgewiesen, nicht durch eine
-Änderung der Zahlungssumme ausgeglichen. Beispielsweise beträgt diese Differenz
-bei den MH-Verkäufen des Testpayouts 0,008492 EUR (im Hinweis 0,0085 EUR).
+## Einheitliche Ausgabe
 
-## Originaldaten und Vergleich
+Jede Datei enthält Rechnung und Gutschriften. Beide Blätter enthalten die
+elf angeforderten Spalten in ihrer vorgegebenen Reihenfolge. Menge = 1,
+Einheit = Stück. Artikelname stammt vollständig aus dem Bestellbericht;
+Zusatztext enthält separat eBay-Bestellnummer und SKU.
 
-Die sechs ursprünglichen Einzeldateien liegen nicht mehr am früher dokumentierten
-Downloads-Pfad. Verwendet wurden ihre bereits importierten, vollständigen
-Masterdaten aus der separaten lokalen Testinstanz: 50 Payout-Zeilen, 180
-Bestellpositionen, 3 Payouts, Gesamtsaldo 4.427,83 EUR. Diese stimmen in Umfang und
-Summen mit dem früheren Realtest überein. Für die UI-Prüfung wurden Kopien in einem
-temporären Verzeichnis verwendet. SHA-256-Prüfung: beide Quelldateien unverändert.
+Die Eingabespalten Artikelname bis Umsatzsteuer sind hellgrün, Bestelldatum,
+Bestellnummer und die beiden Bruttokontrollen hellgrau. Negative Geldbeträge
+sind rot. Kopfzeilen werden fixiert, Texte umbrochen und Geldwerte rechtsbündig
+mit zwei Nachkommastellen dargestellt. Zahlen bleiben numerisch; Datumszellen
+enthalten echte Excel-Daten. Vorschauen verwenden ausdrücklich deutsche
+Dezimal- und Tausendertrennzeichen.
 
-Alle 49 Partnertransaktionen (43 Bestellungen, 6 Erstattungen) wurden über alle
-Partnerdownloads geprüft, einschließlich BA, NB und zusammengefasstem MH.
-Jeder Nettobetrag ist unverändert; jeder Bruttobetrag und jede Blattsumme stimmen
-mit der bisherigen Partnerformel überein (Toleranz für binäre Fließkommadarstellung
-1e-10 EUR; keine Centabweichung). Die einzelne Gebühr bleibt außerhalb der Exporte.
+Im Header stehen Partner, Gruppe, Rabatt, Umsatzsteuer, Empfänger, Adressstatus,
+alle eindeutigen Payoutnummern und der Auszahlungszeitraum. Der vorgeschriebene
+Freitext-Hinweis steht rot über der Eingabehilfe. Der Begriff „Provision“ ist
+in den vier sichtbaren Exporten nicht vorhanden.
 
-Testdownloads für Auszahlung **7712804241**:
+## Berechnung und Rundung
 
-| Partner | Blatt | Positionen | Netto vor Rabatt | Partnerbrutto vorher = nachher | eBay-Brutto inkl. Versand |
-|---|---|---:|---:|---:|---:|
-| BA | Rechnung | 1 | 52,93 | 62,67505 | 62,99 |
-| BA | Gutschriften | 0 | 0,00 | 0,00 | 0,00 |
-| NB | Rechnung | 7 | 1.114,53 | 1.279,8795 | 1.326,30 |
-| NB | Gutschriften | 1 | -117,48 | -134,907 | -139,80 |
-| MH | Rechnung | 19 | 1.412,48 | 1.622,0299 | 1.680,86 |
-| MH | Gutschriften | 1 | -15,11 | -17,3507 | -17,98 |
+Grundlage: [Lexware-Spaltenmethode](https://developers.lexware.io/cookbooks/bookkeeping/#berechnung-der-steuerbeträge)
+und [Positionsrabatte](https://help.lexware.de/de-form/articles/547984-rabatte-in-ausgangsbelegen-hinterlegen).
+Die [API-Dokumentation](https://developers.lexware.io/docs/#invoices-endpoint)
+beschreibt Netto-Positionssummen mit zwei Nachkommastellen.
 
-Ungekürzte Bruttowerte dokumentieren die unveränderte Berechnung; in Excel werden
-Geldbeträge mit zwei Nachkommastellen angezeigt. Keine Kundendaten oder fertigen
-Originaldaten-Downloads werden eingecheckt.
+1. VK netto bleibt der bisherige Centwert aus `eBay_Netto`.
+2. Je Position: `ROUND(VK netto × Menge × (1 − Rabatt), 2)`.
+3. Die gerundeten Nettopositionen ergeben Netto nach Rabatt.
+4. Umsatzsteuer: `ROUND(Netto nach Rabatt × 19 %, 2)`.
+5. Rechnungsbrutto = Netto nach Rabatt + Umsatzsteuer.
+6. Rabatt netto = Summe VK netto vor Rabatt − Netto nach Rabatt.
+7. Rabatt brutto = eBay-Kontrollsumme − Rechnungsbrutto.
 
-## Validierung
+Kaufmännische Cent-Rundung wird in Python mit Decimal/ROUND_HALF_UP und in Excel
+mit ROUND abgebildet, auch für negative Korrekturen. Die Steuer der gesamten
+Nettorechnung wird als Differenz aufeinanderfolgender kumulierter Steuerbeträge
+auf die Positionsbruttos verteilt. Damit summieren sich auch die sichtbaren
+Positionsbruttos exakt zum Rechnungsbrutto. Diese Bruttospalte ist ein
+Kontrollwert; in Lexoffice werden die grünen Nettoeingabefelder übernommen.
+Der Rundungsweg wird unter den Summen kurz erklärt.
+
+Einfache Hilfsformeln liegen in ausgeblendeten Berechnungszeilen unterhalb des
+Druckbereichs, innerhalb derselben beiden Blätter. Es gibt keine zusätzlichen
+technischen Spalten. Der eBay-Kontrollbetrag kommt in keiner Formel zur
+Rechnungsberechnung vor.
+
+NB-Regression: VK netto **329,83 EUR**, Rabatt **3,5 %**, Nettoposition **318,29 EUR**,
+19 % Steuer **60,48 EUR**, Brutto **378,77 EUR**. Der frühere unabhängige Weg
+`392,50 × 0,965` zeigte 378,76 EUR. Dieser Fehler ist behoben.
+
+## Original-Testdaten und vier Testdateien
+
+Verwendet wurden die vorhandenen Original-Masterdaten der isolierten Testinstanz:
+50 Payoutzeilen, 180 Bestellpositionen, 3 Payouts, Gesamtsaldo 4.427,83 EUR.
+Die Quellen wurden für UI-Tests in ein temporäres Verzeichnis kopiert.
+SHA-256 vor/nach der Prüfung bestätigt unveränderte Quell-Masterdateien.
+
+Die vier neuen Testdateien enthalten jeweils **alle** vorhandenen Transaktionen
+des betreffenden Partners bzw. der Gruppe. Die Gruppe-B-Gesamtabrechnung ist
+eine alternative Abrechnungsart und keine zusätzliche Partnerauszahlung.
+
+| Datei | Payouts | Rechnung / Erstattung | Rechnungsbrutto | Gutschriftenbrutto |
+|---|---|---:|---:|---:|
+| BA | 7712804241 | 1 / 0 | 62,68 EUR | 0,00 EUR |
+| NB | 7700379513, 7710027297, 7712804241 | 12 / 2 | 2.007,68 EUR | -347,11 EUR |
+| MH | 7710027297, 7712804241 | 25 / 3 | 2.027,21 EUR | -92,58 EUR |
+| Gruppe B an Evelyn | 7700379513, 7710027297, 7712804241 | 37 / 5 | 4.160,31 EUR | -453,38 EUR |
+
+Je Excel-Datei ist eine PNG-Vorschau mit **beiden vollständigen Blättern** erzeugt.
+Die Originaldaten-Ausgaben und Vorschauen bleiben außerhalb des Repositorys.
+
+## Prüfung
+
+- **32 Tests bestanden**: Export-, Originaldaten-, Import-/Matching-/Dubletten-
+  Regressionen, UI-Interaktionen für alle drei Payouts und bestehende Mock-API-Tests.
+- Alle erwarteten Positionen enthalten, keine doppelten Masterpositionen.
+- Titel und Zusatztext gegen den zugeordneten Bestellbericht geprüft.
+- Empfänger, Gruppen, automatische Rabattsätze und sämtliche Payoutnummern geprüft.
+- Rechnung/Erstattungen getrennt, keine Gebühren in Partnerabrechnungen.
+- Alle sieben Summen mit einer unabhängigen Rational-/Ganzzahlberechnung geprüft.
+- **651 Formelzellen** nach einer erzwungenen Änderung/Rücksetzung der Eingabe
+  unabhängig neu berechnet und mit den Cent-Sollwerten verglichen: keine Abweichung.
+- Keine Formelfehler; alle acht Blätter visuell als deutsche PNG-Vorschau geprüft.
+
+Reproduktion:
 
 ```powershell
 $env:EBAY_REAL_MASTER_DIR='<Testinstanz>\test-data'
-$env:PARTNER_TEST_OUTPUT_DIR='<separates Ausgabeverzeichnis>'
+$env:PARTNER_TEST_OUTPUT_DIR='<separater Ausgabeordner>'
 python -B -m unittest test_partner_export test_recovery test_api_workflow -q
 ```
 
-31 Tests bestanden (inklusive Original-Masterdaten und UI-Interaktionen für alle
-drei Payouts). Zusätzlich unabhängiges Lesen aller erzeugten Excel-Dateien,
-Formelfehlerprüfung und visuelle Prüfung beider Blätter der drei Testdownloads.
-Geprüft: ursprüngliches Brutto abweichend vom Betrag nach Kosten, Menge unabhängig
-von Bestellmenge, lange Titel/SKU, negative Teilbeträge, leere Blätter, alle
-Partnergruppen und sprachunabhängige Datumsverarbeitung.
+Der Test erzeugt genau BA.xlsx, NB.xlsx, MH.xlsx und Gruppe_B_Evelyn.xlsx sowie
+eine Prüfdatei. `scripts/preview_partner_exports.mjs` prüft die Formeln erneut und
+erzeugt die vier PNGs im gebündelten artifact-tool/Sharp-Entwicklungsruntime.
+Die Streamlit-App benötigt unverändert nur ihre bisherigen Python-Abhängigkeiten.
 
-HTTP ist während der neuen Exporttests gesperrt. Bestehende API-Tests verwenden
-ausschließlich Mocks. Keine echte Lexoffice-Rechnung oder Gutschrift erzeugt.
-
-## Wartung
-
-`templates/partner.xlsx` enthält ausschließlich das datenfreie Layout. Der
-Entwicklungsbuilder `scripts/build_partner_template.mjs` nutzt artifact-tool.
-Der App-Export füllt das OpenXML-Template mit der Python-Standardbibliothek;
-keine neue Laufzeitabhängigkeit und kein Node-Prozess in der Streamlit-App.
+`core.py`, `importer.py` und die Abhängigkeiten sind unverändert. Der bestehende
+Lexoffice-Payload/API-Weg, Import, Matching, Gruppenbildung, Dubletten und Status
+wurden nicht angepasst. Keine reale Rechnung oder Entwurf erzeugt; kein Upload,
+keine automatische Eingangsrechnungsprüfung implementiert. Der Betragsvergleich
+erfolgte offline gegen den dokumentierten Eingabe-/Rundungsweg, ohne einen neuen
+Beleg im Lexoffice-Konto anzulegen. Kein Merge nach main und kein Push/Deployment.

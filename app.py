@@ -45,9 +45,9 @@ def download(label, frame, filename, key):
                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=key)
 
 
-def partner_download(label, frame, filename, key):
+def partner_download(label, frame, filename, key, statement_type='partner'):
     try:
-        data = export_partner_excel(frame)
+        data = export_partner_excel(frame, statement_type=statement_type)
     except ValueError as exc:
         st.error(f"Partnerexport angehalten: {exc}")
         return
@@ -163,8 +163,9 @@ with tab_b:
         for partner, rows in block[block.Gruppe == "Gruppe B"].groupby("Partner"):
             safe = re.sub(r"[^A-Za-z0-9_-]", "_", partner)
             partner_download(f"{partner} · Auszahlung {payout_id}", rows, f"{safe}_{payout_id}.xlsx", "b-" + payout_id + partner)
-        summary = core.get_group_b_summary(master)
-        download("Evelyn-Gesamtübersicht (nur Export, kein Sammelupload)", summary, "Gruppe_B.xlsx", "b-summary")
+        partner_download("Evelyn-Gesamtübersicht (nur Export, kein Sammelupload)",
+                         master[master.Gruppe == "Gruppe B"], "Gruppe_B.xlsx", "b-summary",
+                         statement_type='group_b_evelyn')
 
 with tab_check:
     st.subheader("Prüfung und Korrekturen")

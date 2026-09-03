@@ -1,82 +1,88 @@
-// Development-only template builder. The Streamlit app needs no Node runtime.
-import fs from 'node:fs/promises';
+// Development-only layout builder; no Node dependency in the Streamlit app.
 import { Workbook, SpreadsheetFile } from '@oai/artifact-tool';
 
 const workbook = Workbook.create();
-const euro = '#,##0.00 "€";[Red]-#,##0.00 "€"';
+const euro = '[$-407]#,##0.00 "€";[Red]-#,##0.00 "€"';
+const percent = '[$-407]0.0%';
 for (const name of ['Rechnung', 'Gutschriften']) {
   const sheet = workbook.worksheets.add(name);
   sheet.showGridLines = false;
-  const area = sheet.getRange('A1:H23');
-  area.format.font.name = 'Calibri';
-  area.format.font.size = 11;
-  area.format.font.color = '#24364B';
-  area.format.rowHeight = 23;
-  area.format.verticalAlignment = 'center';
-  const widths = [16, 23, 62, 9, 27, 22, 29, 31];
-  widths.forEach((width, i) => {
-    sheet.getRange(`${'ABCDEFGH'[i]}1:${'ABCDEFGH'[i]}23`).format.columnWidth = width;
+  const area = sheet.getRange('A1:K27');
+  area.format = {font:{name:'Calibri',size:11,color:'#233648'},rowHeight:23,verticalAlignment:'center'};
+  [16,23,48,42,9,11,24,13,16,27,28].forEach((width,i) => {
+    sheet.getRange(`${'ABCDEFGHIJK'[i]}1:${'ABCDEFGHIJK'[i]}27`).format.columnWidth=width;
   });
-  sheet.getRange('A1:H1').merge();
-  sheet.getRange('A1').values = [[name.toUpperCase() + ' · PARTNERABRECHNUNG']];
-  sheet.getRange('A1:H1').format = {
-    fill: '#142D45', font: { color: '#FFFFFF', size: 21, bold: true }, rowHeight: 46,
-  };
-  for (const range of ['A3:B3', 'A4:B4', 'C3:D3', 'C4:D4', 'E3:F3', 'E4:F4',
-    'G3:H3', 'A5:C5', 'A6:C6', 'D5:H5', 'D6:H6', 'A8:H8', 'A22:H22', 'A23:H23']) {
+  for (const range of ['A1:K1','A2:K2','A3:B3','A4:B4','C3:D3','C4:D4','E3:F3','E4:F4',
+    'G3:H3','G4:H4','I3:K3','I4:K4','A5:D5','A6:D7','E5:K5','E6:K6','E7:K7',
+    'A9:K9','A10:F10','G10:K10','A11:F11','G11:K11','A12:F12','G12:K12','A13:K13','A27:K27']) {
     sheet.getRange(range).merge();
   }
-  for (const [cell, label] of Object.entries({A3:'PARTNER', C3:'GRUPPE', E3:'UMSATZSTEUER', G3:'PROVISION / RABATT', A5:'EBAY-AUSZAHLUNGSNUMMER', D5:'AUSZAHLUNGSDATUM'})) {
-    sheet.getRange(cell).values = [[label]];
+  sheet.getRange('A1').values=[[name.toUpperCase()+' · ABRECHNUNG']];
+  sheet.getRange('A1:K1').format={fill:'#EAF2F8',font:{size:23,bold:true,color:'#173B53'},rowHeight:42};
+  sheet.getRange('A2').values=[['Partner-Einzelabrechnung']];
+  sheet.getRange('A2:K2').format={font:{size:12,color:'#52687A'},rowHeight:25};
+  sheet.getRange('A3:K7').format={fill:'#F5F8FB',horizontalAlignment:'left',wrapText:true};
+  for (const [cell,label] of Object.entries({A3:'PARTNER',C3:'GRUPPE',E3:'RECHNUNGSEMPFÄNGER',G3:'RABATT',I3:'UMSATZSTEUER',
+    A5:'RECHNUNGSADRESSE',E5:'EBAY-AUSZAHLUNGSNUMMERN'})) sheet.getRange(cell).values=[[label]];
+  sheet.getRange('A3:K3').format.font={size:10,bold:true,color:'#52687A'};
+  sheet.getRange('A5:K5').format.font={size:10,bold:true,color:'#52687A'};
+  sheet.getRange('A4:K4').format={font:{size:13,bold:true},rowHeight:30};
+  sheet.getRange('G4').values=[[.005]];
+  sheet.getRange('I4').values=[[.19]];
+  sheet.getRange('G4').setNumberFormat(percent);
+  sheet.getRange('I4').setNumberFormat(percent);
+  sheet.getRange('A6').values=[['Rechnungsadresse noch nicht hinterlegt']];
+  sheet.getRange('A6:D7').format.font.color='#8B4A18';
+  sheet.getRange('A9').values=[['Wichtig: Die oben aufgeführte(n) eBay-Auszahlungsnummer(n) müssen in Lexoffice als Freitext auf der Rechnung eingetragen werden.']];
+  sheet.getRange('A9:K9').format={fill:'#FFF0F0',font:{bold:true,color:'#B42318'},rowHeight:38,wrapText:true};
+  sheet.getRange('A10').values=[['HELLGRÜN · Diese Spalten in Lexoffice eintragen.']];
+  sheet.getRange('G10').values=[['HELLGRAU · Diese Spalten dienen nur zur Kontrolle.']];
+  sheet.getRange('A10:F10').format={fill:'#DDF0DF',font:{bold:true,color:'#245B32'},rowHeight:27};
+  sheet.getRange('G10:K10').format={fill:'#EAEDF0',font:{bold:true,color:'#475569'},rowHeight:27};
+  sheet.getRange('A11').values=[['Artikelname → oberes Lexoffice-Feld „Artikel“. Zusatztext → vollständig in das Feld darunter.']];
+  sheet.getRange('G11').values=[['VK netto → exakt in „VK (Netto)“ übernehmen.']];
+  sheet.getRange('A12').values=[['Menge immer 1 · Einheit „Stück“ · Rabatt und Umsatzsteuer je Position übernehmen.']];
+  sheet.getRange('G12').values=[['Nettorechnung verwenden; keinen zusätzlichen Gesamtrabatt setzen.']];
+  sheet.getRange('A11:K12').format={wrapText:true,rowHeight:29,font:{size:11,color:'#42576A'}};
+  sheet.getRange('A13').values=[['0 Positionen']];
+  sheet.getRange('A13:K13').format={font:{size:10,color:'#52687A'},rowHeight:27};
+  sheet.getRange('A14:K14').values=[['Bestelldatum','Bestellnummer','Artikelname','Zusatztext','Menge','Einheit',
+    'VK netto – in Lexoffice\neintragen','Rabatt','Umsatzsteuer','Rechnungsbetrag brutto\nnach Rabatt','eBay-Auszahlungsbetrag\nbrutto inklusive Versand']];
+  sheet.getRange('A14:K14').format={font:{bold:true},wrapText:true,rowHeight:58,horizontalAlignment:'left'};
+  for(const row of [14,15,16]) {
+    sheet.getRange(`A${row}:B${row}`).format.fill=row===14?'#E3E7EB':'#F2F4F6';
+    sheet.getRange(`C${row}:I${row}`).format.fill=row===14?'#CBE6CF':row===15?'#EFF8EF':'#E6F2E8';
+    sheet.getRange(`J${row}:K${row}`).format.fill=row===14?'#E3E7EB':'#F2F4F6';
   }
-  sheet.getRange('A3:H6').format.fill = '#EEF4F8';
-  sheet.getRange('A3:H6').format.horizontalAlignment = 'left';
-  sheet.getRange('A3:H3').format.font = {bold:true, size:10, color:'#54677A'};
-  sheet.getRange('A5:H5').format.font = {bold:true, size:10, color:'#54677A'};
-  sheet.getRange('A4:D4').format.font = {bold:true, size:14};
-  sheet.getRange('E4').values = [[0.19]];
-  sheet.getRange('E4').setNumberFormat('0%');
-  sheet.getRange('H4').values = [[0.005]];
-  sheet.getRange('H4').setNumberFormat('0.0%');
-  sheet.getRange('H4').format.horizontalAlignment = 'left';
-  sheet.getRange('A6:H6').format.wrapText = true;
-  sheet.getRange('A8').values = [['Jede Zeile entspricht einer eBay-Abrechnungstransaktion und wird in der Rechnung als eine Position mit Menge 1 verarbeitet.']];
-  sheet.getRange('A8:H8').format = {wrapText:true, rowHeight:36, font:{size:11, color:'#54677A'}};
-  sheet.getRange('A10:H10').values = [[
-    'Bestelldatum', 'Bestellnummer', 'Artikelname', 'Stück',
-    'Rechnungsbetrag netto\nvor Rabatt', 'Rabatt 0,5 %',
-    'Rechnungsbetrag brutto\nnach Rabatt', 'eBay-Abrechnungsbetrag\nbrutto inkl. Versand',
-  ]];
-  sheet.getRange('A10:H10').format = {
-    fill:'#1F5865', font:{bold:true, color:'#FFFFFF'}, wrapText:true, rowHeight:65,
-  };
-  // Rows 11/12 are the alternating body styles, 15..20 the summary styles.
-  for (const row of [11,12]) {
-    sheet.getRange(`A${row}:H${row}`).values = [[null, '', '', 1, 0, 0, 0, 0]];
-    sheet.getRange(`A${row}:H${row}`).format = {fill:row===11?'#FFFFFF':'#F1F6F8', rowHeight:64, wrapText:true};
+  for(const row of [15,16]) {
+    sheet.getRange(`A${row}:K${row}`).values=[[null,'','','',1,'Stück',0,.005,.19,0,0]];
+    sheet.getRange(`A${row}:K${row}`).format={wrapText:true,rowHeight:60,horizontalAlignment:'left'};
     sheet.getRange(`A${row}`).setNumberFormat('dd"."mm"."yyyy');
-    sheet.getRange(`A${row}:C${row}`).format.horizontalAlignment = 'left';
-    sheet.getRange(`B${row}:C${row}`).setNumberFormat('@');
-    sheet.getRange(`D${row}`).setNumberFormat('0');
-    sheet.getRange(`D${row}`).format.horizontalAlignment = 'center';
-    sheet.getRange(`E${row}:H${row}`).setNumberFormat(euro);
-    sheet.getRange(`E${row}:H${row}`).format.horizontalAlignment = 'right';
+    sheet.getRange(`B${row}:D${row}`).setNumberFormat('@');
+    sheet.getRange(`E${row}`).setNumberFormat('0');
+    sheet.getRange(`E${row}`).format.horizontalAlignment='center';
+    for(const col of ['G','J','K']) {
+      sheet.getRange(`${col}${row}`).setNumberFormat(euro);
+      sheet.getRange(`${col}${row}`).format.horizontalAlignment='right';
+    }
+    sheet.getRange(`H${row}:I${row}`).setNumberFormat(percent);
+    sheet.getRange(`H${row}:I${row}`).format.horizontalAlignment='right';
   }
-  const labels = ['Summe Rechnungsbetrag netto vor Rabatt','Rabattbetrag','Netto nach Rabatt',
-    '19 % Umsatzsteuer','Rechnungsbetrag brutto nach Rabatt','Summe eBay-Abrechnungsbetrag brutto inklusive Versand'];
-  labels.forEach((label,i) => {
-    const r=15+i;
-    sheet.getRange(`A${r}:G${r}`).merge();
-    sheet.getRange(`A${r}`).values=[[label]];
-    sheet.getRange(`H${r}`).values=[[0]];
-    sheet.getRange(`H${r}`).setNumberFormat(euro);
-    sheet.getRange(`A${r}:H${r}`).format.rowHeight=27;
-    if (i===4) sheet.getRange(`A${r}:H${r}`).format = {fill:'#142D45',font:{bold:true,color:'#FFFFFF'},rowHeight:34};
-    else sheet.getRange(`A${r}:H${r}`).format.fill='#EEF4F8';
+  sheet.getRange('E14').format.horizontalAlignment='center';
+  for(const col of ['G','H','I','J','K']) sheet.getRange(`${col}14`).format.horizontalAlignment='right';
+  const labels=['Summe VK netto vor Rabatt','Rabatt netto in Euro','Netto nach Rabatt','Umsatzsteuer 19 %',
+    'Rechnungsbetrag brutto nach Rabatt','eBay-Auszahlungsbetrag brutto','Rabatt brutto in Euro'];
+  labels.forEach((label,i)=>{
+    const row=19+i;
+    sheet.getRange(`A${row}:J${row}`).merge();
+    sheet.getRange(`A${row}`).values=[[label]];
+    sheet.getRange(`K${row}`).values=[[0]];
+    sheet.getRange(`K${row}`).setNumberFormat(euro);
+    sheet.getRange(`K${row}`).format.horizontalAlignment='right';
+    sheet.getRange(`A${row}:K${row}`).format={fill:i===4?'#D5EADB':'#F2F5F7',rowHeight:i===4?33:26,font:{bold:i===4,color:'#233648'}};
   });
-  sheet.getRange('A22:H23').format = {wrapText:true, font:{size:10,color:'#54677A'},rowHeight:32};
-  sheet.freezePanes.freezeRows(10);
+  sheet.getRange('A27:K27').format={wrapText:true,rowHeight:42,font:{size:10,color:'#52687A'}};
+  sheet.freezePanes.freezeRows(14);
 }
-const output = await SpreadsheetFile.exportXlsx(workbook);
-await output.save(process.argv[2]);
+await (await SpreadsheetFile.exportXlsx(workbook)).save(process.argv[2]);
 console.log('Partner template exported.');
