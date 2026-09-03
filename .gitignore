@@ -8,3 +8,4 @@ Master_*.csv.*
 .env
 Settlement_State.sqlite3*
 Settlement_Locks.json*
+Settlement_Workflow.json*

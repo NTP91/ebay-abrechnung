@@ -52,10 +52,10 @@ class ApiWorkflowTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.send()
         self.assertEqual(self.http.post.call_count, 1)
-        for status in core.FOLLOWUP.values():
-            core.advance_status('7700379513', status)
+        with self.assertRaisesRegex(ValueError, 'je Position'):
+            core.advance_status('7700379513', 'abgeschlossen')
         states = core.sync_status(core.load_master_data())
-        self.assertEqual(states.iloc[0].Status, 'abgeschlossen')
+        self.assertEqual(states.iloc[0].Status, 'Lexoffice-Entwurf erstellt')
         with core.ledger() as db:
             self.assertGreater(db.execute('SELECT count(*) FROM audit').fetchone()[0], 4)
 
@@ -120,7 +120,7 @@ class ApiWorkflowTests(unittest.TestCase):
         core.confirm_received('7700379513')
         self.send()
         with zipfile.ZipFile(io.BytesIO(core.backup_data())) as archive:
-            self.assertEqual(set(archive.namelist()), {'Master_Payouts.csv', 'Master_Orders.csv', 'Settlement_State.sqlite3', 'Settlement_Locks.json'})
+            self.assertEqual(set(archive.namelist()), {'Master_Payouts.csv', 'Master_Orders.csv', 'Settlement_State.sqlite3', 'Settlement_Locks.json', 'Settlement_Workflow.json'})
             target = Path(self.temp.name) / 'backup.sqlite3'
             target.write_bytes(archive.read('Settlement_State.sqlite3'))
         with sqlite3.connect(target) as db:

@@ -3,6 +3,8 @@ from pathlib import Path
 import core
 import data_status
 import studio_view
+import position_workflow
+from datetime import date
 from partner_export import export_partner_excel, prepare_partner_export
 
 st.set_page_config(page_title='Payout Studio', page_icon='💠', layout='wide')
@@ -47,7 +49,7 @@ def download(label, rows, key, kind='partner'):
 
 def partner_panel(rows, rate, prefix):
     if rows.empty:
-        st.info('Aktuell keine neuen abrechenbaren Positionen.')
+        st.info('Aktuell keine offenen Partnerabrechnungen für diese Auswahl.')
         return
     try:
         summary = studio_view.partner_summary(rows)
@@ -63,6 +65,35 @@ def partner_panel(rows, rate, prefix):
         label.write(f'**{partner}** · {len(block)} Positionen')
         with action:
             download('Einzelabrechnung herunterladen', block, prefix+'_'+partner)
+
+
+def workflow_panel(rows, key, mode='partner'):
+    if rows.empty:
+        return
+    columns=['Bestellnummer','Partner','SKU','Auszahlung Nr.','Bearbeitungsstatus','Partnerrechnung','Partnerzahlung','Evelyn_Zahlung','reviewed_at','paid_at','received_at','closed_at']
+    st.dataframe(rows[columns].rename(columns={'Auszahlung Nr.':'eBay-Payout','Evelyn_Zahlung':'Evelyn → Patrick','reviewed_at':'Prüfdatum','paid_at':'Partner-Zahlungsdatum','received_at':'Evelyn-Zahlungseingang','closed_at':'Abschlussdatum'}),hide_index=True,use_container_width=True)
+    active=rows[~rows['closed_at'].astype(bool)]
+    if active.empty:
+        st.success('Alle angezeigten Positionen sind abgeschlossen.')
+        return
+    with st.expander('Prüfung & Zahlungen manuell bestätigen'):
+        st.caption('Nur tatsächlich geprüfte Belege und erfolgte Zahlungen bestätigen. Der Belegupload folgt später.')
+        options={'Rechnung/Abrechnung geprüft':'review','Partner bezahlt':'partner_paid'}
+        if mode=='evelyn':
+            options={'Zahlung von Evelyn erhalten':'evelyn_received'}
+        elif mode=='refund':
+            options={'Erstattung geprüft':'review','Erstattung auf allen Zahlungswegen erledigt':'refund_settled'}
+        action=st.selectbox('Bestätigung',list(options),key=key+'-action')
+        labels={r.position_key:f"{r['Bestellnummer']} · {r.Partner} · Payout {r['Auszahlung Nr.']} · {r.Angebotstitel}" for _,r in active.iterrows()}
+        selected=st.multiselect('Positionen auswählen',list(labels),format_func=labels.get,key=key+'-positions')
+        event_date=st.date_input('Tatsächliches Prüf-/Zahlungsdatum',value=date.today(),max_value=date.today(),key=key+'-date')
+        checked=st.checkbox('Ich bestätige den ausgewählten Vorgang für diese Positionen.',key=key+'-confirm')
+        if st.button('Bestätigung speichern',disabled=not(selected and checked),key=key+'-save'):
+            try:
+                position_workflow.confirm(selected,options[action],event_date)
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
 
 
 with st.sidebar:
@@ -95,7 +126,7 @@ with st.sidebar:
                         if p.get('warning'):
                             st.warning(f"{p['number']}: {p['warning']}")
                         elif p['known'] and not p.get('counts',{}).get('new_paid'):
-                            st.caption(f"{p['number']}: bereits vorhanden / keine neuen Daten"+(' · gesperrt' if p.get('locked') else ''))
+                            st.caption(f"{p['number']}: bereits vorhanden / keine neuen Daten"+(' · Lexware-Übertragung gesperrt' if p.get('locked') else ''))
                     if receipt['issues']:
                         st.warning(f"{receipt['issues']} Zuordnungen prüfen")
                 else:
@@ -119,8 +150,13 @@ try:
     states=core.sync_status(master)
     overview=data_status.overview(master,states)
     ready=studio_view.eligible_rows(master,states)
+    business=position_workflow.positions(master,states)
+    partner_ready=studio_view.partner_rows(business)
+    business_payout_status=position_workflow.payout_status(business)
     raw=core.read_master(core.PAYOUTS_DB_PATH)
     open_rows=studio_view.open_positions(raw)
+    catalogue=studio_view.order_catalogue(raw,business)
+    open_orders=catalogue[~catalogue.payout] if not catalogue.empty else catalogue
     invoices=studio_view.invoice_history()
 except Exception as exc:
     st.error(f'Datenbestand benötigt Prüfung: {exc}')
@@ -130,11 +166,15 @@ if st.session_state.pop('draft_created',False):
 
 home, group_a, group_b, pending, history = st.tabs(['Übersicht','Gruppe A','Gruppe B','Offene Positionen','Historie'])
 with home:
-    total,assigned,without=studio_view.order_metrics(raw)
+    total=len(catalogue)
+    assigned=int(catalogue.payout.sum())
+    without=total-assigned
+    completed=int(catalogue.closed.sum())
     issue_count=int(master['Prüfhinweis'].astype(bool).sum()) if not master.empty else 0
-    for col,label,value in zip(st.columns(5),['Bestellungen gesamt','Einem Payout zugeordnet','Noch ohne Payout','Neu abrechenbare Positionen','Zuordnungen prüfen'],[total,assigned,without,len(ready),issue_count]):
+    for col,label,value in zip(st.columns(6),['Bestellpositionen gesamt','eBay-Payout vorhanden','Noch ohne Payout','Ausgezahlt, noch nicht abgeschlossen','Abgeschlossen','Prüfpositionen'],[total,assigned,without,assigned-completed,completed,issue_count]):
         col.metric(label,value)
-    st.caption('Bestelltransaktionen der importierten Transaktionsberichte; Erstattungen und Gebühren sind separat.')
+    st.progress(assigned/total if total else 0,text=f'{assigned} von {total} Bestellpositionen einem eBay-Payout zugeordnet · {without} noch ohne Payout')
+    st.caption('Bestellberichte und Bestelltransaktionen ohne Doppelzählung. „Ohne Payout“ bedeutet: im vorhandenen Datenbestand kein Payout bekannt. Ein Lexware-Entwurf ist keine Zahlung.')
     if issue_count:
         st.warning(f'{issue_count} Zuordnungen prüfen. Betroffene Payouts bleiben gesperrt.')
     if not overview['warnings'].empty:
@@ -148,29 +188,34 @@ with home:
         st.write('**Letzter bekannter Payout**')
         st.write(latest['Payoutnummer']+' · '+latest['Datum / Zeitraum'] if latest else 'Noch keine Payouts importiert')
         st.caption('Bestelldaten vorhanden bis: '+(overview['order_end'] or 'noch nicht bekannt'))
-        st.caption(f"{len(states)} Payouts im Bestand · {overview['unbilled']} noch nicht abgerechnet")
+        st.caption(f"{len(states)} Payouts im Bestand · {sum(s != 'abgeschlossen' for s in business_payout_status.values())} noch nicht abgeschlossen")
     with right,st.container(border=True):
         st.subheader('Nächster Schritt')
-        st.write('**Zuordnungen prüfen**' if issue_count else '**Abrechnungen prüfen**' if not ready.empty else '**Neue Berichte importieren**')
+        st.write('**Zuordnungen prüfen**' if issue_count else '**Abrechnungen prüfen**' if not partner_ready.empty else '**Neue Berichte importieren**')
         st.caption('Partnerübersichten findest du in Gruppe A und Gruppe B. Erstattungen und Transaktionen ohne Payout stehen unter Offene Positionen.')
-        st.write(f'{len(open_rows)} Transaktionen warten auf einen Payout.')
+        st.write(f'{len(open_orders)} Bestellpositionen ohne bekannten Payout.')
 
 with group_a:
     st.subheader('Gruppe A · Direktabrechnungen')
-    st.caption('PP · BA · MK · 001 — 0,5 % Rabatt. Neue positive Positionen ungesperrter Payouts.')
+    st.caption('PP · BA · MK · 001 — 0,5 % Rabatt. Unabhängig von Patrick → Evelyn. Abschluss erst nach Prüfung und bestätigter Partnerzahlung.')
     with st.container(border=True):
-        partner_panel(ready[ready.Gruppe=='Gruppe A'] if not ready.empty else ready,'0,5 %','Gruppe_A')
+        partner_panel(partner_ready[partner_ready.Gruppe=='Gruppe A'] if not partner_ready.empty else partner_ready,'0,5 %','Gruppe_A')
+        workflow_panel(business[(business.Gruppe=='Gruppe A') & (business.Art=='Bestellung')] if not business.empty else business,'a-workflow')
 
 with group_b:
     b_ready=ready[ready.Gruppe=='Gruppe B'] if not ready.empty else ready
     with st.container(border=True):
         st.subheader('Partner → Patrick')
         st.caption('Einzelabrechnungen für MH, NB und weitere zugeordnete Partner · 3,5 % Rabatt')
-        partner_panel(b_ready,'3,5 %','Partner_Patrick')
+        partner_panel(partner_ready[partner_ready.Gruppe=='Gruppe B'] if not partner_ready.empty else partner_ready,'3,5 %','Partner_Patrick')
+        workflow_panel(business[(business.Gruppe=='Gruppe B') & (business.Art=='Bestellung')] if not business.empty else business,'b-partner')
     with st.container(border=True):
         st.subheader('Patrick → Evelyn')
         transmitted=sum(item['Positionen'] or 0 for item in invoices.values())
         st.caption(f'{len(b_ready)} neue Positionen für Lexware bereit · {transmitted} Positionen bereits früher übertragen')
+        st.caption('Übertragen bedeutet nur: Entwurf erstellt. Zahlungseingang und Partnerzahlung werden getrennt bestätigt.')
+        if not business.empty:
+            workflow_panel(business[business.Lexware_uebertragen],'b-evelyn','evelyn')
         if b_ready.empty:
             st.info('Keine neuen Gruppe-B-Positionen für einen Lexware-Entwurf.')
             st.button('Lexware-Entwurf erstellen', type='primary', disabled=True, use_container_width=True)
@@ -189,7 +234,7 @@ with group_b:
                     download('Gesamtabrechnung herunterladen',chosen,'Gruppe_B_Gesamt_Evelyn','group_b_evelyn')
                 except ValueError as exc:
                     st.warning(str(exc))
-            received=st.checkbox('Geldeingang für alle ausgewählten Payouts geprüft')
+            received=st.checkbox('eBay-Geldeingang für alle ausgewählten Payouts geprüft')
             prior_checked=st.checkbox('In Lexware geprüft: Für diese Payouts besteht noch keine Rechnung.')
             confirmed=st.checkbox('Genau einen neuen Entwurf erstellen, nicht finalisieren oder versenden.')
             if not api_key:
@@ -210,10 +255,11 @@ with pending:
     with open_tab:
         st.subheader('Noch keinem Payout zugeordnet')
         st.caption('Offen, kein Fehler. Diese Positionen fließen noch in keine Abrechnung ein.')
-        if open_rows.empty:
+        if open_orders.empty:
             st.info('Keine offenen Transaktionen ohne Payout.')
         else:
-            st.dataframe(open_rows,hide_index=True,use_container_width=True)
+            st.dataframe(open_orders[['Bestellnummer','Datum','Partner','SKU','Produkttitel','Status']],hide_index=True,use_container_width=True)
+            st.caption(f'{len(open_rows)} davon als noch nicht ausgezahlte Transaktionszeilen importiert. Weitere Bestellungen sind nur im Bestellbericht vorhanden.')
     with refunds_tab:
         refunds=master[master.Art=='Erstattung'] if not master.empty else master
         if refunds.empty:
@@ -224,6 +270,7 @@ with pending:
                     st.subheader(partner or 'Ohne Partnerzuordnung')
                     st.dataframe(block[['Bestellnummer','SKU','Angebotstitel','Erlös_Brutto','Auszahlung Nr.']].rename(columns={'Angebotstitel':'Produkttitel','Erlös_Brutto':'Payoutbetrag'}),hide_index=True,use_container_width=True)
                     download('Gutschriftenübersicht herunterladen',block,'Gutschriften_'+partner)
+                    workflow_panel(business[(business.Partner==partner) & (business.Art=='Erstattung')],'refund-'+partner,'refund')
     with checks_tab:
         if not master.empty:
             issues=master[master['Prüfhinweis']!='']
@@ -241,24 +288,16 @@ with history:
         table=core.pd.DataFrame(overview['history'])
         if not table.empty:
             table['Positionen']=table.Payoutnummer.map(master.groupby('Auszahlung Nr.').size())
-            table['Abrechnung']=table.Payoutnummer.map({r.Auszahlung:'Bereits abgerechnet' if r.Entwurf else 'Gesperrt / prüfen' if r.Sperre else 'Noch offen' for r in states.itertuples()})
+            table['Status']=table.Payoutnummer.map(business_payout_status)
+            table['Abschluss']=table.Status.map(lambda value:'Abgeschlossen' if value=='abgeschlossen' else 'Noch offen')
             st.dataframe(table.drop(columns=['Sperre']),hide_index=True,use_container_width=True)
-            with st.expander('Historische Downloads & Statuspflege'):
+            with st.expander('Historische Downloads'):
                 pid=st.selectbox('Payout',sorted(master['Auszahlung Nr.'].unique()))
                 state=states[states.Auszahlung==pid].iloc[0]
                 block=master[master['Auszahlung Nr.']==pid]
                 st.caption('Historische Downloads für den gewählten Payout; keine erneute Lexware-Erstellung.')
                 for partner,rows in block[block.Gruppe.isin(['Gruppe A','Gruppe B'])].groupby('Partner'):
                     download(partner+' · Abrechnung herunterladen',rows,'Historie_'+pid+'_'+partner)
-                target=core.FOLLOWUP.get(state.Status)
-                if target:
-                    checked=st.checkbox('Manuell geprüft: '+target)
-                    if st.button('Status bestätigen',disabled=not checked):
-                        try:
-                            core.advance_status(pid,target)
-                            st.rerun()
-                        except ValueError as exc:
-                            st.error(str(exc))
         else:
             st.info('Noch keine Payouts importiert.')
         if not overview['warnings'].empty:

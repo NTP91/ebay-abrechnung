@@ -1,5 +1,31 @@
 # Recovery-Version für Patricks Wochenlauf
 
+## Positionsstatus und Abschluss
+
+Der fachliche Status wird je Position dauerhaft und getrennt von der technischen
+Lexware-Sperre gespeichert. Er unterscheidet Bestellbericht, Payout vorhanden,
+abrechnungsbereit, Abrechnung geprüft, Partner bezahlt, Zahlung von Evelyn erhalten
+und abgeschlossen. Manuelle Prüf-/Zahlungsbestätigungen speichern das tatsächliche
+Datum und können abgeschlossene Positionen nicht wieder freigeben. Die Statusdaten
+liegen in SQLite und zusätzlich in `Settlement_Workflow.json`; beide sind Bestandteil
+des vollständigen Backups.
+
+Gruppe A ist unabhängig von Patrick→Evelyn: Nach Payout bleibt sie sichtbar, bis
+Partnerrechnung geprüft und Partnerzahlung bestätigt sind. Gruppe B hat zwei Ebenen:
+RE0089 markiert ausschließlich 37 positive Positionen als an Lexware übertragen.
+Diese bleiben für Partner→Patrick offen. Erst Partnerrechnungsprüfung, Partnerzahlung
+und separat bestätigter Zahlungseingang von Evelyn schließen eine Gruppe-B-Position.
+Der Payoutstatus wird aus allen relevanten Positionen abgeleitet und nicht mehr über
+eine pauschale Payout-Schaltfläche fortgeschrieben.
+
+Das Dashboard vereinigt eindeutig zuordenbare Bestellberichtpositionen mit noch nicht
+zugeordneten Transaktionspositionen. Es zeigt den belegbaren Fortschritt „Payout
+vorhanden“, „noch ohne Payout“, „ausgezahlt, noch nicht abgeschlossen“, abgeschlossen
+und Prüfpositionen. Beim Abschluss dieses Umbaus: 253 Bestellpositionen im vereinigten
+Datenstand, davon 69 mit Payout, 184 ohne Payout, 0 abgeschlossen und 1 Prüfposition.
+Die drei RE0089-Payouts stehen fachlich auf „teilweise in Bearbeitung“; Payout
+7714928937 bleibt wegen einer fehlenden Bestellzuordnung „Prüfung erforderlich“.
+
 ## Aktuelle Oberfläche
 
 Helle Oberfläche mit Übersicht, Gruppe A, Gruppe B, Offene Positionen und Historie.
@@ -28,7 +54,7 @@ einschließlich Originalsummen und ausschließlich simulierten Lexware-Aufrufen.
 Überlappende Transaktionsberichte: Jeder Payout wird unabhängig verarbeitet.
 Teilmengen bekannter Positionen gelten als bereits vorhanden. Neue Positionen
 können zu noch nicht gesperrten Payouts ergänzt werden. Zusätzliche unbekannte
-Positionen eines gesperrten/abgerechneten Payouts oder widersprüchliche Beträge
+Positionen eines für Lexware gesperrten Payouts oder widersprüchliche Beträge
 werden für diesen Payout zurückgewiesen und mit Quelldaten dauerhaft zur manuellen
 Prüfung protokolliert. Andere Payouts derselben Datei werden weiter importiert.
 Der Import verändert keine bestehende Rechnungssperre. 48 lokale Tests bestanden,
@@ -98,7 +124,7 @@ Importdaten werden als unbekannt ausgewiesen. Widersprüchliche bestehende Stamm
 benötigen eine fachliche Klärung. Der Verlust des gesamten Datenverzeichnisses erfordert
 ein vollständiges Backup; lokale Dateien ersetzen keine externe Sicherung.
 Die Gruppe-B-Gesamtrechnung verwendet nur neue positive Positionen. Die bereits
-abgerechneten RE0089-Payouts und alle reservierten/unklaren Versuche bleiben ausgeschlossen.
+für RE0089 übertragenen Positionen und alle reservierten/unklaren Versuche bleiben von neuen Lexware-Entwürfen ausgeschlossen.
 
 ## Prüfung
 
