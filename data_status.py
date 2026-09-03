@@ -54,6 +54,8 @@ def import_file(upload, kind):
         result['added'] = core.import_reports([frame], path, kind, details=counters)
         result['transactions'] = counters
         result['present'] = result['detected'] - result['added']
+        if kind == 'payout':
+            result['present'] = counters['known_paid'] + counters['still_open']
         master = core.load_master_data()
         states = core.sync_status(master)
         if kind == 'payout':
@@ -61,8 +63,14 @@ def import_file(upload, kind):
                 relevant = master[master['Auszahlung Nr.'].isin(frame['Auszahlung Nr.'])]
                 result['issues'] = int(relevant['Prüfhinweis'].astype(bool).sum())
             for payout in result['payouts']:
-                state = states[states.Auszahlung == payout['number']].iloc[0]
-                payout.update(status=state.Status, locked=bool(state.Sperre), invoice=state.Entwurf)
+                payout['counts'] = counters['payouts'].get(payout['number'], {})
+                payout['warning'] = next((w['reason'] for w in counters['warnings'] if w['payout'] == payout['number']), '')
+                matching = states[states.Auszahlung == payout['number']]
+                if not matching.empty:
+                    state = matching.iloc[0]
+                    payout.update(status=state.Status, locked=bool(state.Sperre), invoice=state.Entwurf)
+                else:
+                    payout.update(status='Nicht übernommen – manuelle Prüfung', locked=True, invoice=None)
         else:
             result['issues'] = int(((frame['Angebotstitel'] == '') | (frame['SKU'].str.split('/').str[0].str.strip() == '')).sum())
     except Exception as exc:
@@ -83,6 +91,7 @@ def overview(master, states):
     with core.ledger() as db:
         imports = pd.read_sql_query('SELECT * FROM imports ORDER BY id DESC', db)
         events = pd.read_sql_query("SELECT payout, MIN(at) AS imported FROM audit WHERE event='importiert' GROUP BY payout", db)
+        warnings = pd.read_sql_query('SELECT payout, at, reason FROM import_warnings ORDER BY id DESC', db).drop_duplicates(['payout', 'reason'])
     history = []
     for _, state in states.iterrows():
         period = dates(raw[raw['Auszahlung Nr.'] == state.Auszahlung], 'payout')
@@ -107,5 +116,5 @@ def overview(master, states):
             gaps.append(f'Mögliche Datenlücke zwischen {display_date(end)} und {display_date(start)}. Aus beobachteten Berichtspositionen abgeleitet; verkaufsfreie Tage sind ebenfalls möglich.')
         end = max(end, finish) if end else finish
     return {'latest': latest, 'order_end': display_date(order_dates[-1]) if order_dates else None,
-            'history': history, 'imports': imports, 'gaps': gaps,
+            'history': history, 'imports': imports, 'gaps': gaps, 'warnings': warnings,
             'unbilled': int(states['Sperre'].isna().sum())}

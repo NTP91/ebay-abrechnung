@@ -70,8 +70,9 @@ class RecoveryTests(unittest.TestCase):
     def test_conflicting_payout_is_blocked(self):
         core.import_reports([payout()], self.payouts, 'payout')
         before = Path(self.payouts).read_bytes()
-        with self.assertRaises(ValueError):
-            core.import_reports([payout(amount='120,00')], self.payouts, 'payout')
+        details = {}
+        core.import_reports([payout(amount='120,00')], self.payouts, 'payout', details=details)
+        self.assertTrue(details['warnings'])
         self.assertEqual(before, Path(self.payouts).read_bytes())
 
     def test_refund_is_not_order_duplicate_and_fee_is_separate(self):

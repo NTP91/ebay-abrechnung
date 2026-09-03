@@ -80,11 +80,17 @@ with st.sidebar:
         if receipt['error']:
             st.error('Fehler: ' + receipt['error'])
         else:
-            st.success('Import abgeschlossen · keine Fehler')
+            st.success('Import abgeschlossen · Prüfhinweise beachten' if receipt.get('transactions', {}).get('warnings') else 'Import abgeschlossen · keine Fehler')
+        for warning in receipt.get('transactions', {}).get('warnings', []):
+            st.warning(f"Payout {warning['payout'] or 'offene Positionen'}: {warning['reason']} Andere Payouts werden unabhängig verarbeitet.")
         for payout in receipt['payouts']:
             text = 'Payout ' + payout['number']
-            if payout['known']:
-                text += ' bereits vorhanden · keine neuen Daten übernommen'
+            if payout.get('warning'):
+                text += ' · manuelle Prüfung · keine Daten dieses Payouts übernommen'
+            elif payout['known'] and not payout.get('counts', {}).get('new_paid'):
+                text += ' bereits vorhanden / keine neuen Daten'
+            else:
+                text += f" · {payout.get('counts', {}).get('new_paid', 0)} neu ausgezahlte Positionen"
             text += ' · ' + payout.get('status', 'Import angehalten')
             if payout.get('locked'):
                 text += ' · BEREITS ABGERECHNET / GESPERRT' if payout.get('invoice') else ' · GESPERRT'
@@ -121,6 +127,10 @@ if not open_transactions.empty:
         st.dataframe(open_transactions[['Datum', 'Bestellnummer', 'Transaktionsnummer', 'Artikelnummer', 'Typ']], hide_index=True, use_container_width=True)
 for gap in overview['gaps']:
     st.warning(gap)
+if not overview['warnings'].empty:
+    st.warning('Importhinweise zur manuellen Prüfung vorhanden. Gesperrte Payouts wurden nicht verändert; andere Payouts werden unabhängig verarbeitet.')
+    with st.expander('Payouts mit Importhinweisen'):
+        st.dataframe(overview['warnings'].rename(columns={'payout':'Payoutnummer', 'at':'Erfasst am', 'reason':'Prüfhinweis'}), hide_index=True, use_container_width=True)
 with st.expander('Payout- und Importhistorie', expanded=False):
     st.dataframe(core.pd.DataFrame(overview['history']), hide_index=True, use_container_width=True, height=220)
     logs = overview['imports'].copy()

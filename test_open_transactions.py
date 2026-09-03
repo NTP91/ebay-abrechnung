@@ -82,7 +82,7 @@ class OpenTransactionTests(unittest.TestCase):
         self.assertEqual(len(core.read_master(core.PAYOUTS_DB_PATH)),1)
         before=Path(core.PAYOUTS_DB_PATH).read_bytes()
         result=self.upload([payout('other')])
-        self.assertTrue(result['error'])
+        self.assertTrue(result['transactions']['warnings'])
         self.assertEqual(Path(core.PAYOUTS_DB_PATH).read_bytes(),before)
 
     def test_later_transaction_id_enriches_open_item(self):

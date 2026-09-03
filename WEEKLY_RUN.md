@@ -1,5 +1,15 @@
 # Recovery-Version für Patricks Wochenlauf
 
+Überlappende Transaktionsberichte: Jeder Payout wird unabhängig verarbeitet.
+Teilmengen bekannter Positionen gelten als bereits vorhanden. Neue Positionen
+können zu noch nicht gesperrten Payouts ergänzt werden. Zusätzliche unbekannte
+Positionen eines gesperrten/abgerechneten Payouts oder widersprüchliche Beträge
+werden für diesen Payout zurückgewiesen und mit Quelldaten dauerhaft zur manuellen
+Prüfung protokolliert. Andere Payouts derselben Datei werden weiter importiert.
+Der Import verändert keine bestehende Rechnungssperre. 48 lokale Tests bestanden,
+einschließlich drei alten plus viertem neuen Payout, Teilberichten, 71 erneut
+importierten Bestellpositionen, offenen Transaktionen und Original-Abrechnungssummen.
+
 Nachbesserung offene Transaktionen: Berichte dürfen ausgezahlte und noch offene
 Zeilen enthalten. Beide werden atomar im Transaktionsbestand gespeichert. Nur
 Zeilen mit Payoutnummer gelangen in die bestehende Abrechnungsverarbeitung.

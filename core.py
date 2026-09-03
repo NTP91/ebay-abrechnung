@@ -143,8 +143,8 @@ def read_report(file, kind='payout'):
         frame = frame[(frame['Auszahlung Nr.'] != '') | unidentified].copy()
         if frame.empty:
             raise ValueError('Keine Transaktionspositionen gefunden.')
-        for value in frame.loc[frame['Auszahlung Nr.'] != '', 'Betrag abzügl. Kosten']:
-            parse_money(value)
+        # Financial validation is performed per payout during import so that one
+        # rejected payout cannot prevent independent payouts from being imported.
     else:
         # Summary/footer rows without an item identity are not article positions.
         frame = frame[(frame['Bestellnummer'] != '') & (
@@ -174,20 +174,35 @@ def import_reports(frames, path, kind, details=None):
         incoming = canonicalize(pd.concat(frames, ignore_index=True)).drop_duplicates()
         if kind == 'payout':
             from payout_import import merge_transactions
-            for value in incoming.loc[incoming['Auszahlung Nr.'] != '', 'Betrag abzügl. Kosten']:
-                parse_money(value)
-            all_columns = sorted(set(existing.columns) | set(incoming.columns))
-
-            def fingerprints(frame):
-                return set(map(tuple, frame.reindex(columns=all_columns, fill_value='').fillna('').astype(str).values.tolist()))
-
-            for payout_id, block in incoming.groupby('Auszahlung Nr.'):
-                if not payout_id:
+            with ledger() as db:
+                locked = {row['id'] for row in db.execute('SELECT * FROM payouts') if row['attempt'] or row['invoice_id']}
+            merged = existing.copy()
+            counters = dict(new_paid=0, known_paid=0, new_open=0, still_open=0, assigned_open=0, warnings=[], payouts={})
+            # Paid groups precede open rows to prevent stale open copies from
+            # downgrading transactions. Each group is accepted or rejected alone.
+            payout_ids = sorted(set(incoming['Auszahlung Nr.']) - {''})
+            if (incoming['Auszahlung Nr.'] == '').any():
+                payout_ids.append('')
+            for payout_id in payout_ids:
+                block = incoming[incoming['Auszahlung Nr.'] == payout_id]
+                try:
+                    if payout_id:
+                        for value in block['Betrag abzügl. Kosten']:
+                            parse_money(value)
+                    candidate, counts = merge_transactions(merged, block, locked)
+                except ValueError as exc:
+                    warning = {'payout': payout_id, 'reason': str(exc), 'positions': len(block)}
+                    counters['warnings'].append(warning)
+                    with ledger() as db:
+                        db.execute('INSERT INTO import_warnings(payout,at,reason,snapshot) VALUES(?,?,?,?)',
+                                   (payout_id, datetime.now(timezone.utc).isoformat(), str(exc), block.to_json(orient='records',force_ascii=False)))
+                        audit(db, payout_id, 'Import zur manuellen Prüfung: ' + str(exc))
+                        db.commit()
                     continue
-                old = existing[existing['Auszahlung Nr.'] == payout_id]
-                if not old.empty and fingerprints(old) != fingerprints(block):
-                    raise ValueError(f'Payout {payout_id} bereits vorhanden, abweichende Daten: keine neuen Daten übernommen. Vorhandene Sperren bleiben erhalten.')
-            merged, counters = merge_transactions(existing, incoming)
+                merged = candidate
+                counters['payouts'][payout_id] = counts
+                for key, value in counts.items():
+                    counters[key] += value
             if details is not None:
                 details.update(counters)
         else:
@@ -359,6 +374,7 @@ def ledger():
             connection.execute('CREATE TABLE IF NOT EXISTS payouts (id TEXT PRIMARY KEY, status TEXT NOT NULL, fingerprint TEXT, invoice_id TEXT, attempt TEXT, snapshot TEXT)')
             connection.execute('CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, payout TEXT, at TEXT, event TEXT)')
             connection.execute('CREATE TABLE IF NOT EXISTS imports (id INTEGER PRIMARY KEY, kind TEXT, filename TEXT, at TEXT, start TEXT, end TEXT, detected INTEGER, added INTEGER, present INTEGER, issues INTEGER, error TEXT)')
+            connection.execute('CREATE TABLE IF NOT EXISTS import_warnings (id INTEGER PRIMARY KEY, payout TEXT, at TEXT, reason TEXT, snapshot TEXT)')
             for row in protected:
                 current = connection.execute('SELECT * FROM payouts WHERE id=?', (row['id'],)).fetchone()
                 if not current or (row['attempt'] and not current['attempt']):
