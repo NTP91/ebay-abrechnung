@@ -1,5 +1,16 @@
 # Recovery-Version für Patricks Wochenlauf
 
+Nachbesserung offene Transaktionen: Berichte dürfen ausgezahlte und noch offene
+Zeilen enthalten. Beide werden atomar im Transaktionsbestand gespeichert. Nur
+Zeilen mit Payoutnummer gelangen in die bestehende Abrechnungsverarbeitung.
+Eine spätere Payoutnummer ersetzt die passende offene Position anhand der
+Transaktionsidentität (ersatzweise Bestell-/Artikelnummer); ältere offene Berichte
+setzen ausgezahlte Positionen nicht zurück. Verkäufe und Erstattungen bleiben
+getrennt. Importmeldungen unterscheiden neue/bekannte ausgezahlte und neue/weiterhin
+offene Positionen. Offene Transaktionen sind kein Fehlerzustand und erscheinen in
+einer separaten Übersicht. 44 lokale Tests einschließlich ursprünglicher
+Abrechnungssummen bestanden; keine Live-Lexware-Aufrufe.
+
 Branch: `codex/recover-payout-settlement`. `main` und die produktive App bleiben unverändert.
 
 ## Öffnen und starten

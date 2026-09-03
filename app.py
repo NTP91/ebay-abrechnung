@@ -71,7 +71,12 @@ with st.sidebar:
             st.error(f"Import angehalten: {exc}")
     for receipt in st.session_state.get('import_receipts', []):
         st.write(receipt['filename'])
-        st.caption(f"Erkannt: {receipt['detected']} · Neu: {receipt['added']} · Bereits vorhanden: {receipt['present']} · Nicht zuordenbar/unvollständig: {receipt['issues']}")
+        if receipt.get('transactions'):
+            counts = receipt['transactions']
+            st.caption(f"Neu ausgezahlte Positionen: {counts['new_paid']} (davon zuvor offen: {counts['assigned_open']}) · Bereits bekannte ausgezahlte Positionen: {counts['known_paid']}")
+            st.caption(f"Neue offene Positionen: {counts['new_open']} · Weiterhin offene Positionen: {counts['still_open']} · Offene Zuordnungsfehler: {receipt['issues']}")
+        else:
+            st.caption(f"Erkannt: {receipt['detected']} · Neu: {receipt['added']} · Bereits vorhanden: {receipt['present']} · Nicht zuordenbar/unvollständig: {receipt['issues']}")
         if receipt['error']:
             st.error('Fehler: ' + receipt['error'])
         else:
@@ -108,6 +113,12 @@ latest = overview['latest']
 st.caption('Letzter bekannter Payout: ' + (latest['Payoutnummer'] + ' · ' + latest['Datum / Zeitraum'] if latest else 'noch keiner'))
 st.caption('Bestelldaten vorhanden bis: ' + overview['order_end'] if overview['order_end'] else 'Bestelldatenstand: kein zuverlässig lesbares Bestelldatum vorhanden')
 st.caption(f"Noch nicht abgerechnete Payouts: {overview['unbilled']} · Reservierte/unklare Versuche bleiben gesperrt.")
+raw_transactions = core.read_master(core.PAYOUTS_DB_PATH)
+open_transactions = raw_transactions[raw_transactions['Auszahlung Nr.'] == '']
+st.caption(f"Offen / noch keinem Payout zugeordnet: {len(open_transactions)} Positionen · kein Fehlerzustand, nicht Bestandteil der Abrechnung.")
+if not open_transactions.empty:
+    with st.expander('Offene Transaktionen ohne Payout'):
+        st.dataframe(open_transactions[['Datum', 'Bestellnummer', 'Transaktionsnummer', 'Artikelnummer', 'Typ']], hide_index=True, use_container_width=True)
 for gap in overview['gaps']:
     st.warning(gap)
 with st.expander('Payout- und Importhistorie', expanded=False):

@@ -140,12 +140,10 @@ def read_report(file, kind='payout'):
         unidentified = (frame['Auszahlung Nr.'] == '') & (
             (frame['Bestellnummer'] != '') | (frame['Transaktionsnummer'] != '')
         )
-        if unidentified.any():
-            raise ValueError('Transaktionszeilen ohne Auszahlungsnummer: Import zur Prüfung angehalten.')
-        frame = frame[frame['Auszahlung Nr.'] != ''].copy()
+        frame = frame[(frame['Auszahlung Nr.'] != '') | unidentified].copy()
         if frame.empty:
-            raise ValueError('Keine Auszahlung mit Auszahlungsnummer gefunden.')
-        for value in frame['Betrag abzügl. Kosten']:
+            raise ValueError('Keine Transaktionspositionen gefunden.')
+        for value in frame.loc[frame['Auszahlung Nr.'] != '', 'Betrag abzügl. Kosten']:
             parse_money(value)
     else:
         # Summary/footer rows without an item identity are not article positions.
@@ -164,7 +162,7 @@ def read_master(path):
     return canonicalize(pd.read_csv(path, sep=';', dtype=str, keep_default_na=False))
 
 
-def import_reports(frames, path, kind):
+def import_reports(frames, path, kind, details=None):
     """Append atomically, preserving old records; reject conflicting payout copies."""
     if not frames:
         return 0
@@ -175,7 +173,8 @@ def import_reports(frames, path, kind):
         existing = read_master(path)
         incoming = canonicalize(pd.concat(frames, ignore_index=True)).drop_duplicates()
         if kind == 'payout':
-            for value in incoming['Betrag abzügl. Kosten']:
+            from payout_import import merge_transactions
+            for value in incoming.loc[incoming['Auszahlung Nr.'] != '', 'Betrag abzügl. Kosten']:
                 parse_money(value)
             all_columns = sorted(set(existing.columns) | set(incoming.columns))
 
@@ -184,12 +183,15 @@ def import_reports(frames, path, kind):
 
             for payout_id, block in incoming.groupby('Auszahlung Nr.'):
                 if not payout_id:
-                    raise ValueError('Auszahlungsnummer fehlt.')
+                    continue
                 old = existing[existing['Auszahlung Nr.'] == payout_id]
                 if not old.empty and fingerprints(old) != fingerprints(block):
                     raise ValueError(f'Payout {payout_id} bereits vorhanden, abweichende Daten: keine neuen Daten übernommen. Vorhandene Sperren bleiben erhalten.')
-            incoming = incoming[~incoming['Auszahlung Nr.'].isin(existing['Auszahlung Nr.'])]
-        merged = pd.concat([existing, incoming], ignore_index=True).fillna('').drop_duplicates()
+            merged, counters = merge_transactions(existing, incoming)
+            if details is not None:
+                details.update(counters)
+        else:
+            merged = pd.concat([existing, incoming], ignore_index=True).fillna('').drop_duplicates()
         if kind == 'orders':
             consolidated = []
             for _, incoming_row in merged.iterrows():
@@ -249,6 +251,8 @@ def match_order(row, orders):
 def load_master_data():
     """Use order report as the authoritative product source, never the payout."""
     payouts = read_master(PAYOUTS_DB_PATH)
+    # Open transactions are persisted in the source store, never in settlement data.
+    payouts = payouts[payouts['Auszahlung Nr.'] != '']
     orders = read_master(ORDERS_DB_PATH)
     processed = []
     for _, row in payouts.iterrows():
@@ -363,6 +367,8 @@ def ledger():
             if not protected and not guard.exists() and Path(PAYOUTS_DB_PATH).exists():
                 # Existing legacy rows migrate normally. Missing rows have unknown history.
                 for payout in read_master(PAYOUTS_DB_PATH)['Auszahlung Nr.'].unique():
+                    if not payout:
+                        continue
                     connection.execute("INSERT OR IGNORE INTO payouts(id,status,attempt) VALUES(?, 'Prüfung erforderlich: Registerhistorie fehlt', 'unknown')", (str(payout),))
             connection.commit()
             yield connection

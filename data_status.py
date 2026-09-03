@@ -49,14 +49,17 @@ def import_file(upload, kind):
         path = core.PAYOUTS_DB_PATH if kind == 'payout' else core.ORDERS_DB_PATH
         before = core.read_master(path)
         if kind == 'payout':
-            result['payouts'] = [{'number': p, 'known': p in set(before['Auszahlung Nr.'])} for p in frame['Auszahlung Nr.'].unique()]
-        result['added'] = core.import_reports([frame], path, kind)
+            result['payouts'] = [{'number': p, 'known': p in set(before['Auszahlung Nr.'])} for p in frame['Auszahlung Nr.'].unique() if p]
+        counters = {}
+        result['added'] = core.import_reports([frame], path, kind, details=counters)
+        result['transactions'] = counters
         result['present'] = result['detected'] - result['added']
         master = core.load_master_data()
         states = core.sync_status(master)
         if kind == 'payout':
-            relevant = master[master['Auszahlung Nr.'].isin(frame['Auszahlung Nr.'])]
-            result['issues'] = int(relevant['Prüfhinweis'].astype(bool).sum())
+            if not master.empty:
+                relevant = master[master['Auszahlung Nr.'].isin(frame['Auszahlung Nr.'])]
+                result['issues'] = int(relevant['Prüfhinweis'].astype(bool).sum())
             for payout in result['payouts']:
                 state = states[states.Auszahlung == payout['number']].iloc[0]
                 payout.update(status=state.Status, locked=bool(state.Sperre), invoice=state.Entwurf)
