@@ -271,6 +271,10 @@ def load_master_data():
     return pd.DataFrame(processed)
 
 
+def invoice_payout_remark(payout_ids):
+    return 'eBay-Auszahlungsnummern: ' + ', '.join(sorted({str(value) for value in payout_ids}))
+
+
 def build_invoice_payload(master, payout_id, contact_id, money_received=False):
     """Dry-run builder: old per-transaction net calculation, no API side effects."""
     if not money_received:
@@ -298,7 +302,7 @@ def build_invoice_payload(master, payout_id, contact_id, money_received=False):
         'voucherDate': now, 'address': {'contactId': contact_id}, 'lineItems': items,
         'totalPrice': {'currency': 'EUR'}, 'taxConditions': {'taxType': 'net'},
         'shippingConditions': {'shippingDate': now, 'shippingType': 'service'},
-        'remark': f'eBay-Auszahlung {payout_id}; Erstattungen werden getrennt abgerechnet.',
+        'remark': invoice_payout_remark(sales['Auszahlung Nr.']),
     }
 
 
