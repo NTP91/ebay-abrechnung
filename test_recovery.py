@@ -162,7 +162,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertTrue(all(name in labels for name in ['Gruppe A','Gruppe B','Offene Positionen','Historie']))
         self.assertEqual(len(app.json), 0)
         self.assertFalse(any('Payload' in button.label for button in app.button))
-        self.assertTrue(next(button for button in app.button if button.label=='Lexware-Entwurf erstellen').disabled)
+        self.assertTrue(next(button for button in app.button if button.label=='An Lexware übermitteln').disabled)
 
 
 if __name__ == '__main__':

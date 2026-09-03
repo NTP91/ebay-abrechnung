@@ -140,6 +140,16 @@ class WeeklyFinishTests(unittest.TestCase):
         self.assertEqual([b.label for b in app.button].count('Partnerrechnung geprüft bestätigen'),1)
         self.assertFalse([s.label for s in app.selectbox if s.label=='Payouts für die Gesamtrechnung'])
 
+    def test_group_b_primary_action_stays_visible_without_authorization(self):
+        from streamlit.testing.v1 import AppTest
+        self.seed([payout('p1','a','a',sku='NB / 1')])
+        app=AppTest.from_file('app.py').run(timeout=30)
+        self.assertFalse(app.exception)
+        action=next(button for button in app.button if button.label=='An Lexware übermitteln')
+        self.assertTrue(action.disabled)
+        self.assertEqual([b.label for b in app.button].count('An Lexware übermitteln'),1)
+        self.assertIn('**Lexware-Aktion**',[m.value for m in app.markdown])
+
 
 if __name__=='__main__':
     unittest.main()

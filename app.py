@@ -72,9 +72,14 @@ def partner_panel(rows, rate, prefix):
             for col,label,value in zip(st.columns(4),['Offene Positionen','eBay-Brutto',f'Rabatt {rate} netto','Rechnungsbetrag brutto'],[str(len(partner_block)),euros(values['eBay-Brutto']),euros(values['Rabatt netto']),euros(values['Rechnungsbetrag'])]):
                 col.metric(label,value)
             payout_ids=sorted(partner_block['Auszahlung Nr.'].unique())
-            st.caption(f"Kumulative Sammelabrechnung aus {len(payout_ids)} Payout{'s' if len(payout_ids)!=1 else ''}. Payoutnummern bleiben in Export und Historie nachvollziehbar.")
-            download('Einzelabrechnung herunterladen', partner_block, prefix+'_'+partner)
-            workflow_panel(partner_block,prefix+'_'+partner)
+            unreviewed=int((~partner_block.reviewed_at.astype(bool)).sum())
+            status='Partnerrechnung geprüft' if not unreviewed else f'{unreviewed} '+('Position noch nicht geprüft' if unreviewed==1 else 'Positionen noch nicht geprüft')
+            st.caption(f"Kumulative Sammelabrechnung aus {len(payout_ids)} Payout{'s' if len(payout_ids)!=1 else ''} · {status}. Payoutnummern bleiben in Export und Historie nachvollziehbar.")
+            download_col,action_col,_=st.columns([1.3,1.5,2])
+            with download_col:
+                download('Einzelabrechnung herunterladen', partner_block, prefix+'_'+partner)
+            with action_col:
+                workflow_panel(partner_block,prefix+'_'+partner,action_only=True)
 
 
 @st.dialog('Vorgang bestätigen')
@@ -117,7 +122,7 @@ def discard_dialog(invoice_id):
         st.rerun()
 
 
-def workflow_panel(rows, key, mode='partner'):
+def workflow_panel(rows, key, mode='partner', action_only=False):
     if rows.empty:
         return
     active=rows[~rows['closed_at'].astype(bool) & ~rows['Prüfhinweis'].astype(bool) & ~rows.Quellenpruefung.astype(bool)]
@@ -132,13 +137,15 @@ def workflow_panel(rows, key, mode='partner'):
         if mode=='evelyn':
             label='Zahlung von Evelyn erhalten'
             actions=[(label,'evelyn_received')]
-            st.caption(f'Entwurf · {len(block)} Positionen · Payouts '+', '.join(sorted(block['Auszahlung Nr.'].unique())))
+            if not action_only:
+                st.caption(f'Entwurf · {len(block)} Positionen · Payouts '+', '.join(sorted(block['Auszahlung Nr.'].unique())))
         else:
             unreviewed=block[~block.reviewed_at.astype(bool)]
             reviewed=unreviewed.empty
             open_label='offene Position' if len(block)==1 else 'offene Positionen'
             review_label='Position noch nicht geprüft' if len(unreviewed)==1 else 'Positionen noch nicht geprüft'
-            st.caption(f"{len(block)} {open_label} · "+('Partnerrechnung geprüft' if reviewed else f'{len(unreviewed)} {review_label}'))
+            if not action_only:
+                st.caption(f"{len(block)} {open_label} · "+('Partnerrechnung geprüft' if reviewed else f'{len(unreviewed)} {review_label}'))
             if not reviewed:
                 block=unreviewed
                 actions=[('Partnerrechnung geprüft bestätigen' if mode=='partner' else 'Erstattung geprüft bestätigen','review')]
@@ -283,42 +290,37 @@ with group_b:
     with st.container(border=True):
         st.subheader('Gesamtabrechnung Gruppe B an Evelyn')
         transmitted=sum(item['Positionen'] or 0 for item in invoices.values() if not item['discarded'])
-        if not b_open.empty:
+        available=sorted(b_ready['Auszahlung Nr.'].unique()) if not b_ready.empty else []
+        selected=available
+        chosen=b_ready
+        totals=None
+        if not chosen.empty:
             try:
-                all_totals=prepare_partner_export(b_open,statement_type='group_b_evelyn')['totals']['Rechnung']
-                for col,label,value in zip(st.columns(4),['Offene Positionen','Netto vor Rabatt','Rabatt 0,5 % netto','Rechnungsbetrag brutto'],[str(len(b_open)),euros(all_totals['net']),euros(all_totals['discount']),euros(all_totals['gross'])]):
-                    col.metric(label,value)
-                download('Gesamtübersicht herunterladen',b_open,'Gruppe_B_Gesamt_Evelyn','group_b_evelyn')
+                totals=prepare_partner_export(chosen,statement_type='group_b_evelyn')['totals']['Rechnung']
             except ValueError as exc:
-                st.warning('Gesamtübersicht benötigt Prüfung: '+str(exc))
-        st.caption(f'{len(b_ready)} davon neu für Lexware bereit · {transmitted} Positionen bereits früher übertragen und für einen weiteren Entwurf gesperrt')
-        st.caption('Übertragen bedeutet nur: Entwurf erstellt. Zahlungseingang und Partnerzahlung werden getrennt bestätigt.')
-        if not business.empty:
-            workflow_panel(business[business.Lexware_uebertragen],'b-evelyn','evelyn')
-        if b_ready.empty:
-            st.info('Keine neuen Gruppe-B-Positionen für einen Lexware-Entwurf.')
-            st.button('Lexware-Entwurf erstellen', type='primary', disabled=True, use_container_width=True)
-        else:
-            available=sorted(b_ready['Auszahlung Nr.'].unique())
-            selected=available
-            chosen=b_ready
-            totals=None
-            if not chosen.empty:
-                try:
-                    totals=prepare_partner_export(chosen,statement_type='group_b_evelyn')['totals']['Rechnung']
-                    for col,label,value in zip(st.columns(4),['Positionen','Netto vor Rabatt','Rabatt 0,5 % netto','Rechnungsbetrag brutto'],[str(len(chosen)),euros(totals['net']),euros(totals['discount']),euros(totals['gross'])]):
-                        col.metric(label,value)
-                    st.caption(f"Netto nach Rabatt: {euros(totals['net_after'])} · 19 % Umsatzsteuer: {euros(totals['tax'])}")
-                    st.caption('eBay-Auszahlungsnummern: '+', '.join(selected))
-                    st.info(f"Der neue Lexware-Entwurf umfasst ausschließlich diese {len(chosen)} noch nicht übertragenen Positionen. Die vollständige offene Gesamtübersicht bleibt darüber sichtbar.")
-                except ValueError as exc:
-                    st.warning(str(exc))
-            received=st.checkbox('eBay-Geldeingang für alle ausgewählten Payouts geprüft')
-            prior_checked=st.checkbox('In Lexware geprüft: Für diese Payouts besteht noch keine Rechnung.')
-            confirmed=st.checkbox('Genau einen neuen Entwurf erstellen, nicht finalisieren oder versenden.')
-            if not api_key:
-                st.caption('API-Key bei Bedarf unter „Lexware-Verbindung“ hinterlegen.')
-            if st.button('Lexware-Entwurf erstellen',type='primary',disabled=not(selected and totals and api_key and received and prior_checked and confirmed),use_container_width=True):
+                st.warning(str(exc))
+
+        with st.container(border=True):
+            action_col,status_col=st.columns([1.15,1.85],vertical_alignment='top')
+            with action_col:
+                st.markdown('**Lexware-Aktion**')
+                received=st.checkbox('eBay-Geldeingang geprüft',key='lexware-received')
+                prior_checked=st.checkbox('Kein bestehender Beleg in Lexware',key='lexware-prior')
+                confirmed=st.checkbox('Genau einen Entwurf erstellen',key='lexware-once')
+                can_create=bool(selected and totals and api_key and received and prior_checked and confirmed)
+                create_clicked=st.button('An Lexware übermitteln',type='primary',disabled=not can_create,use_container_width=True,key='lexware-create')
+            with status_col:
+                if b_ready.empty:
+                    st.warning('Aktuell sind keine neuen Positionen für Lexware freigegeben. Bereits übertragene Positionen bleiben gesperrt; weitere Positionen benötigen zuerst eine vollständig geklärte Payout-Zuordnung.')
+                elif not api_key:
+                    st.info(f'{len(chosen)} Positionen sind fachlich bereit. Für die Übermittlung den API-Key unter „Lexware-Verbindung“ hinterlegen und die drei Sicherheitsprüfungen bestätigen.')
+                else:
+                    st.success(f'{len(chosen)} Positionen sind fachlich bereit. Die Übermittlung wird erst nach allen drei Sicherheitsbestätigungen aktiv.')
+                st.caption(f'{len(b_ready)} neu für Lexware bereit · {transmitted} bereits früher übertragen. Button-Sichtbarkeit ändert keine fachliche Freigabe oder Sperre.')
+                if totals:
+                    st.write(f"**Neuer Entwurfsumfang:** {len(chosen)} Positionen · {euros(totals['gross'])} brutto")
+                    st.caption('Payoutnachweise: '+', '.join(selected))
+            if create_clicked:
                 try:
                     expected={pid:core.payout_fingerprint(master[master['Auszahlung Nr.']==pid]) for pid in selected}
                     for pid in selected:
@@ -328,6 +330,19 @@ with group_b:
                     st.rerun()
                 except ValueError as exc:
                     st.error(str(exc))
+
+        if not b_open.empty:
+            try:
+                all_totals=prepare_partner_export(b_open,statement_type='group_b_evelyn')['totals']['Rechnung']
+                for col,label,value in zip(st.columns(4),['Offene Positionen','Netto vor Rabatt','Rabatt 0,5 % netto','Rechnungsbetrag brutto'],[str(len(b_open)),euros(all_totals['net']),euros(all_totals['discount']),euros(all_totals['gross'])]):
+                    col.metric(label,value)
+                download('Gesamtübersicht herunterladen',b_open,'Gruppe_B_Gesamt_Evelyn','group_b_evelyn')
+            except ValueError as exc:
+                st.warning('Gesamtübersicht benötigt Prüfung: '+str(exc))
+        st.caption('Die Gesamtübersicht enthält alle aktuell offenen Gruppe-B-Positionen. Der Lexware-Entwurf enthält ausschließlich noch nicht übertragene, fachlich freigegebene Positionen.')
+        if not business.empty:
+            workflow_panel(business[business.Lexware_uebertragen],'b-evelyn','evelyn')
+
 
 with pending:
     open_tab,refunds_tab,holds_tab,checks_tab=st.tabs(['Noch kein Payout','Gutschriften & Erstattungen','Einbehalte / Rücksendungen in Klärung','Zuordnungen & Gebühren'])
