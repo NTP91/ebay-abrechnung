@@ -150,7 +150,7 @@ class WeeklyFinishTests(unittest.TestCase):
         self.assertEqual([b.label for b in app.button].count('An Lexware übermitteln'),1)
         self.assertIn('Lexware-Aktion',[heading.value for heading in app.subheader])
         labels=[metric.label for metric in app.metric]
-        for label in ('Offene Positionen','Abrechnungsbasis netto','Rabatt 0,5 % netto','Auszahlungsbetrag brutto'):
+        for label in ('Offene Positionen','eBay-Auszahlungsbetrag brutto','Rabatt 0,5 % netto','Rechnungsbetrag brutto'):
             self.assertIn(label,labels)
 
     def test_evelyn_payment_is_checkbox_with_existing_confirmation(self):

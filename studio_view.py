@@ -7,6 +7,12 @@ from decimal import Decimal
 from partner_export import prepare_partner_export, cents
 
 
+def local_datetime(values):
+    """Presentation-only conversion of UTC register timestamps to local minutes."""
+    parsed = pd.to_datetime(values, utc=True, errors='coerce')
+    return parsed.dt.tz_convert('Europe/Berlin').dt.strftime('%d.%m.%Y %H:%M').fillna('nicht bekannt')
+
+
 def project_totals(master):
     """Cumulative settled revenue and actual net commission, including credits."""
     totals = dict(ebay=Decimal(0), evelyn=Decimal(0), patrick=Decimal(0))

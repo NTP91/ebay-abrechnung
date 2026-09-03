@@ -15,7 +15,7 @@ Nur die betroffene Transfersperre wird freigegeben. Ursprüngliche Registereintr
 
 ## Lokale Validierung
 
-- 79 Tests ausgeführt: 71 bestanden, 8 separate Originaldatei-Tests ohne deren Dateivorlagen übersprungen.
+- 80 Tests ausgeführt: 72 bestanden, 8 separate Originaldatei-Tests ohne deren Dateivorlagen übersprungen.
 - Ursprüngliche Master-Daten aus dem vorhandenen Backup: BA, NB, MH und Gruppe-B-Gesamtabrechnung inklusive unveränderter 4.160,31 € geprüft.
 - Einbehalt neben gültigem Payout, spätere Zahlung/Erstattung, Dashboard-Provisionsabgrenzung, UI-Bestätigungsdialog und Abschluss ohne erneuten Download getestet.
 - Verwerfen nur mit simulierten HTTP-Antworten: vorhandener Beleg, falscher Kontakt, Fehler, Timeout und bestätigte Zahlung geben keine Sperre frei. Wiederherstellung aus Sidecars erhält Korrekturhistorie und Partnerstatus.

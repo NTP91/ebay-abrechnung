@@ -8,6 +8,10 @@ from test_recovery import payout
 
 
 class StudioViewTests(unittest.TestCase):
+    def test_register_timestamp_is_rendered_in_berlin_without_iso_details(self):
+        values=core.pd.Series(['2026-09-03T14:03:19.099308+00:00','unlesbar'])
+        self.assertEqual(studio_view.local_datetime(values).tolist(),['03.09.2026 16:03','nicht bekannt'])
+
     def setUp(self):
         temp=tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)

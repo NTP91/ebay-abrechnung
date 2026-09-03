@@ -77,8 +77,9 @@ def partner_panel(rows, rate, prefix):
         with st.container(border=True):
             values=summary.loc[partner]
             st.subheader(partner)
-            for col,label,value in zip(st.columns(4),['Offene Positionen','eBay-Brutto',f'Rabatt {rate} netto','Rechnungsbetrag brutto'],[str(len(partner_block)),euros(values['eBay-Brutto']),euros(values['Rabatt netto']),euros(values['Rechnungsbetrag'])]):
+            for col,label,value in zip(st.columns(4),['Offene Positionen','eBay-Auszahlungsbetrag brutto',f'Rabatt {rate} netto','Rechnungsbetrag brutto'],[str(len(partner_block)),euros(values['eBay-Brutto']),euros(values['Rabatt netto']),euros(values['Rechnungsbetrag'])]):
                 col.metric(label,value)
+            st.caption('Rabatt wird auf den Nettobetrag berechnet und anschließend vom Bruttobetrag abgezogen.')
             payout_ids=sorted(partner_block['Auszahlung Nr.'].unique())
             unreviewed=int((~partner_block.reviewed_at.astype(bool)).sum())
             status='Partnerrechnung geprüft' if not unreviewed else f'{unreviewed} '+('Position noch nicht geprüft' if unreviewed==1 else 'Positionen noch nicht geprüft')
@@ -321,8 +322,9 @@ with group_b:
                 st.warning('Gesamtübersicht benötigt Prüfung: '+str(exc))
 
         if all_totals:
-            for col,label,value in zip(st.columns(4),['Offene Positionen','Abrechnungsbasis netto','Rabatt 0,5 % netto','Auszahlungsbetrag brutto'],[str(len(b_open)),euros(all_totals['net']),euros(all_totals['discount']),euros(all_totals['gross'])]):
+            for col,label,value in zip(st.columns(4),['Offene Positionen','eBay-Auszahlungsbetrag brutto','Rabatt 0,5 % netto','Rechnungsbetrag brutto'],[str(len(b_open)),euros(all_totals['ebay']),euros(all_totals['discount']),euros(all_totals['gross'])]):
                 col.metric(label,value)
+            st.caption('Rabatt wird auf den Nettobetrag berechnet und anschließend vom Bruttobetrag abgezogen.')
 
         can_create=bool(selected and totals and api_key and st.session_state.get('lexware-received') and st.session_state.get('lexware-prior') and st.session_state.get('lexware-once'))
         download_col,lexware_col,_=st.columns([1.25,1.75,1.5],vertical_alignment='center')
@@ -437,7 +439,9 @@ with history:
             st.info('Noch keine Payouts importiert.')
         if not overview['warnings'].empty:
             st.warning('Importpositionen zur manuellen Prüfung. Bestehende Payouts und Sperren wurden nicht verändert.')
-            st.dataframe(overview['warnings'].rename(columns={'payout':'Payoutnummer','at':'Importdatum','reason':'Prüfhinweis'}),hide_index=True,use_container_width=True)
+            warning_table=overview['warnings'].copy()
+            warning_table['at']=studio_view.local_datetime(warning_table['at'])
+            st.dataframe(warning_table.rename(columns={'payout':'Payoutnummer','at':'Importdatum','reason':'Prüfhinweis'}),hide_index=True,use_container_width=True)
     with oh:
         logs=overview['imports']
         logs=logs[logs.kind=='orders'].copy()
