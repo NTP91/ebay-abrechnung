@@ -4,6 +4,7 @@ import core
 import data_status
 import studio_view
 import position_workflow
+import draft_correction
 from datetime import date
 from partner_export import export_partner_excel, prepare_partner_export
 
@@ -41,6 +42,13 @@ def download(label, rows, key, kind='partner'):
     if rows.empty:
         return
     try:
+        current=position_workflow.positions()
+        if not current.empty:
+            forbidden=set(current.loc[current.closed_at.astype(bool), 'position_key'])
+            rows=rows[~rows.apply(position_workflow.position_key,axis=1).isin(forbidden)]
+        if rows.empty:
+            st.caption('Abgeschlossen · in der Historie archiviert; kein erneuter Export.')
+            return
         blob = export_partner_excel(rows, statement_type=kind)
         st.download_button(label, blob, key+'.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', key=key)
     except ValueError as exc:
@@ -60,40 +68,87 @@ def partner_panel(rows, rate, prefix):
     st.dataframe(summary, hide_index=True, use_container_width=True,
                  column_config={c:st.column_config.NumberColumn(c,format='%.2f €') for c in summary if c not in ('Partner','Positionen')})
     st.markdown(f"**{int(summary.Positionen.sum())} Positionen · {euros(summary['Rechnungsbetrag brutto'].sum())} gesamt**")
-    for partner, block in rows.groupby('Partner'):
-        label, action = st.columns([2,3], vertical_alignment='center')
-        label.write(f'**{partner}** · {len(block)} Positionen')
-        with action:
-            download('Einzelabrechnung herunterladen', block, prefix+'_'+partner)
+    for partner, partner_block in rows.groupby('Partner'):
+        with st.container(border=True):
+            st.write(f'**{partner}** · {len(partner_block)} Positionen')
+            download('Einzelabrechnung herunterladen', partner_block, prefix+'_'+partner)
+            for (pid,reviewed), block in partner_block.groupby(['Auszahlung Nr.','reviewed_at']):
+                st.caption(f'Konkrete Teilabrechnung · Payout {pid} · {len(block)} Positionen')
+                download('Teilabrechnung herunterladen',block,prefix+'_'+partner+'_'+pid+'_'+str(reviewed))
+                workflow_panel(block,prefix+'_'+partner+'_'+pid+'_'+str(reviewed))
+
+
+@st.dialog('Vorgang bestätigen')
+def confirm_dialog(rows, action, label):
+    st.write(f"**{label}** · {len(rows)} Positionen")
+    st.write('Partner: '+', '.join(sorted(rows.Partner.unique())))
+    st.write('Payouts: '+', '.join(sorted(rows['Auszahlung Nr.'].unique())))
+    model=prepare_partner_export(rows,statement_type='group_b_evelyn' if action=='evelyn_received' else 'partner')
+    st.write('Abrechnungsbetrag brutto: '+euros(sum(t['gross'] for t in model['totals'].values())))
+    st.caption('Datum: '+date.today().strftime('%d.%m.%Y')+'. Nur den tatsächlich geprüften bzw. bezahlten Vorgang bestätigen.')
+    st.dataframe(rows[['Bestellnummer','SKU','Angebotstitel','Erlös_Brutto']], hide_index=True)
+    if st.button('Verbindlich bestätigen', type='primary'):
+        try:
+            position_workflow.confirm(rows.position_key.tolist(), action, date.today(),
+                expected_sources={r.position_key:position_workflow.source_snapshot(r) for _,r in rows.iterrows()})
+            st.session_state.pop('confirmation_request',None)
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+    if st.button('Abbrechen',key='cancel-confirmation'):
+        st.session_state.pop('confirmation_request',None)
+        st.rerun()
+
+
+@st.dialog('Lexware-Entwurf verwerfen')
+def discard_dialog(invoice_id):
+    st.write('Den Entwurf zuerst in Lexware löschen. Danach prüft die App ausschließlich lesend, ob er nicht mehr vorhanden ist, und gibt seine Transfersperre frei. Partnerstatus und Historie bleiben erhalten.')
+    st.link_button('Entwurf in Lexware öffnen', 'https://app.lexware.de/permalink/invoices/view/'+invoice_id)
+    if st.button('Entwurf wurde in Lexware gelöscht – prüfen und freigeben', disabled=not api_key, type='primary'):
+        try:
+            draft_correction.discard(api_key, invoice_id, deleted_confirmed=True)
+            st.session_state.pop('discard_request',None)
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+    if not api_key:
+        st.caption('Für die Leseprüfung den API-Key unter Lexware-Verbindung hinterlegen.')
+    if st.button('Abbrechen',key='cancel-discard'):
+        st.session_state.pop('discard_request',None)
+        st.rerun()
 
 
 def workflow_panel(rows, key, mode='partner'):
     if rows.empty:
         return
-    columns=['Bestellnummer','Partner','SKU','Auszahlung Nr.','Bearbeitungsstatus','Partnerrechnung','Partnerzahlung','Evelyn_Zahlung','reviewed_at','paid_at','received_at','closed_at']
-    st.dataframe(rows[columns].rename(columns={'Auszahlung Nr.':'eBay-Payout','Evelyn_Zahlung':'Evelyn → Patrick','reviewed_at':'Prüfdatum','paid_at':'Partner-Zahlungsdatum','received_at':'Evelyn-Zahlungseingang','closed_at':'Abschlussdatum'}),hide_index=True,use_container_width=True)
-    active=rows[~rows['closed_at'].astype(bool)]
-    if active.empty:
-        st.success('Alle angezeigten Positionen sind abgeschlossen.')
-        return
-    with st.expander('Prüfung & Zahlungen manuell bestätigen'):
-        st.caption('Nur tatsächlich geprüfte Belege und erfolgte Zahlungen bestätigen. Der Belegupload folgt später.')
-        options={'Rechnung/Abrechnung geprüft':'review','Partner bezahlt':'partner_paid'}
+    active=rows[~rows['closed_at'].astype(bool) & ~rows['Prüfhinweis'].astype(bool) & ~rows.Quellenpruefung.astype(bool)]
+    if mode=='evelyn':
+        invoice_map=dict(zip(states.Auszahlung,states.Entwurf))
+        active=active[~active.received_at.astype(bool)].copy()
+        active['invoice_scope']=active['Auszahlung Nr.'].map(invoice_map)
+        groups=active.groupby('invoice_scope')
+    else:
+        groups=active.groupby(['Partner','Auszahlung Nr.','reviewed_at'])
+    for scope, block in groups:
         if mode=='evelyn':
-            options={'Zahlung von Evelyn erhalten':'evelyn_received'}
-        elif mode=='refund':
-            options={'Erstattung geprüft':'review','Erstattung auf allen Zahlungswegen erledigt':'refund_settled'}
-        action=st.selectbox('Bestätigung',list(options),key=key+'-action')
-        labels={r.position_key:f"{r['Bestellnummer']} · {r.Partner} · Payout {r['Auszahlung Nr.']} · {r.Angebotstitel}" for _,r in active.iterrows()}
-        selected=st.multiselect('Positionen auswählen',list(labels),format_func=labels.get,key=key+'-positions')
-        event_date=st.date_input('Tatsächliches Prüf-/Zahlungsdatum',value=date.today(),max_value=date.today(),key=key+'-date')
-        checked=st.checkbox('Ich bestätige den ausgewählten Vorgang für diese Positionen.',key=key+'-confirm')
-        if st.button('Bestätigung speichern',disabled=not(selected and checked),key=key+'-save'):
-            try:
-                position_workflow.confirm(selected,options[action],event_date)
-                st.rerun()
-            except ValueError as exc:
-                st.error(str(exc))
+            label='Zahlung von Evelyn erhalten'
+            actions=[(label,'evelyn_received')]
+            st.caption(f'Entwurf · {len(block)} Positionen · Payouts '+', '.join(sorted(block['Auszahlung Nr.'].unique())))
+        else:
+            reviewed=block.reviewed_at.astype(bool).all()
+            st.caption(f"{block.iloc[0].Partner} · Payout {block.iloc[0]['Auszahlung Nr.']} · {len(block)} Positionen · "+('Partnerrechnung geprüft' if reviewed else 'Partnerrechnung noch nicht geprüft'))
+            if not reviewed:
+                actions=[('Partnerrechnung geprüft bestätigen' if mode=='partner' else 'Erstattung geprüft bestätigen','review')]
+            elif mode=='refund':
+                actions=[('Erstattung erledigt bestätigen','refund_settled')]
+            else:
+                block=block[~block.paid_at.astype(bool)]
+                actions=[('Bezahlt / abgeschlossen' if block.empty or block.iloc[0].Gruppe=='Gruppe A' else 'Partner bezahlt','partner_paid')]
+        if block.empty:
+            continue
+        for label, action in actions:
+            if st.button(label, key=key+str(scope)+action):
+                st.session_state['confirmation_request']=(block.copy(),action,label)
 
 
 with st.sidebar:
@@ -147,6 +202,18 @@ with st.sidebar:
 
 st.title('Payout Studio')
 st.caption('Dein Payout- & Abrechnungstool für eBay')
+with st.expander('So läuft die Wochenabrechnung'):
+    st.markdown("""1. Unter der Woche neue Payouts und Bestellberichte importieren.
+2. Die App gleicht Bestellungen und Payouts automatisch ab.
+3. Noch nicht ausgezahlte Bestellungen bleiben offen.
+4. Am wöchentlichen Abrechnungstag Gruppe A und Gruppe B prüfen.
+5. Abrechnungsübersichten erstellen und bei Bedarf einen Lexware-Entwurf erzeugen.
+6. Partnerrechnungen gegen die konkrete Übersicht prüfen.
+7. Zahlungseingang und Partnerzahlungen bestätigen.
+8. Erledigte Positionen werden abgeschlossen und bleiben in der Historie.
+9. In der nächsten Woche nur neue und noch offene Positionen bearbeiten.""")
+    st.caption('Der automatische Belegabgleich folgt im nächsten Ausbauschritt. Bis dahin nur tatsächlich geprüfte Partnerrechnungen bestätigen.')
+
 try:
     master=core.load_master_data()
     states=core.sync_status(master)
@@ -158,7 +225,7 @@ try:
     raw=core.read_master(core.PAYOUTS_DB_PATH)
     open_rows=studio_view.open_positions(raw)
     catalogue=studio_view.order_catalogue(raw,business)
-    open_orders=catalogue[~catalogue.payout] if not catalogue.empty else catalogue
+    open_orders=catalogue[~catalogue.payout & (catalogue.Status!='Einbehalt / Rücksendung in Klärung')] if not catalogue.empty else catalogue
     invoices=studio_view.invoice_history()
 except Exception as exc:
     st.error(f'Datenbestand benötigt Prüfung: {exc}')
@@ -166,7 +233,7 @@ except Exception as exc:
 if st.session_state.pop('draft_created',False):
     st.success('Lexware-Entwurf erstellt. Die enthaltenen Positionen sind jetzt dauerhaft gesperrt.')
 
-home, group_a, group_b, pending, history = st.tabs(['Übersicht','Gruppe A','Gruppe B','Offene Positionen','Historie'])
+home, group_a, group_b, pending, history, dashboard = st.tabs(['Übersicht','Gruppe A','Gruppe B','Offene Positionen','Historie','Dashboard'])
 with home:
     total=len(catalogue)
     assigned=int(catalogue.payout.sum())
@@ -202,7 +269,6 @@ with group_a:
     st.caption('PP · BA · MK · 001 — 0,5 % Rabatt. Unabhängig von Patrick → Evelyn. Abschluss erst nach Prüfung und bestätigter Partnerzahlung.')
     with st.container(border=True):
         partner_panel(partner_ready[partner_ready.Gruppe=='Gruppe A'] if not partner_ready.empty else partner_ready,'0,5 %','Gruppe_A')
-        workflow_panel(business[(business.Gruppe=='Gruppe A') & (business.Art=='Bestellung')] if not business.empty else business,'a-workflow')
 
 with group_b:
     b_ready=ready[ready.Gruppe=='Gruppe B'] if not ready.empty else ready
@@ -210,10 +276,9 @@ with group_b:
         st.subheader('Partner → Patrick')
         st.caption('Einzelabrechnungen für MH, NB und weitere zugeordnete Partner · 3,5 % Rabatt')
         partner_panel(partner_ready[partner_ready.Gruppe=='Gruppe B'] if not partner_ready.empty else partner_ready,'3,5 %','Partner_Patrick')
-        workflow_panel(business[(business.Gruppe=='Gruppe B') & (business.Art=='Bestellung')] if not business.empty else business,'b-partner')
     with st.container(border=True):
         st.subheader('Patrick → Evelyn')
-        transmitted=sum(item['Positionen'] or 0 for item in invoices.values())
+        transmitted=sum(item['Positionen'] or 0 for item in invoices.values() if not item['discarded'])
         st.caption(f'{len(b_ready)} neue Positionen für Lexware bereit · {transmitted} Positionen bereits früher übertragen')
         st.caption('Übertragen bedeutet nur: Entwurf erstellt. Zahlungseingang und Partnerzahlung werden getrennt bestätigt.')
         if not business.empty:
@@ -253,7 +318,7 @@ with group_b:
                     st.error(str(exc))
 
 with pending:
-    open_tab,refunds_tab,checks_tab=st.tabs(['Noch kein Payout','Gutschriften & Erstattungen','Zuordnungen & Gebühren'])
+    open_tab,refunds_tab,holds_tab,checks_tab=st.tabs(['Noch kein Payout','Gutschriften & Erstattungen','Einbehalte / Rücksendungen in Klärung','Zuordnungen & Gebühren'])
     with open_tab:
         st.subheader('Noch keinem Payout zugeordnet')
         st.caption('Offen, kein Fehler. Diese Positionen fließen noch in keine Abrechnung ein.')
@@ -263,7 +328,7 @@ with pending:
             st.dataframe(open_orders[['Bestellnummer','Datum','Partner','SKU','Produkttitel','Status']],hide_index=True,use_container_width=True)
             st.caption(f'{len(open_rows)} davon als noch nicht ausgezahlte Transaktionszeilen importiert. Weitere Bestellungen sind nur im Bestellbericht vorhanden.')
     with refunds_tab:
-        refunds=master[master.Art=='Erstattung'] if not master.empty else master
+        refunds=business[(business.Art=='Erstattung') & ~business.closed_at.astype(bool)] if not business.empty else business
         if refunds.empty:
             st.info('Keine Erstattungen im Datenbestand.')
         else:
@@ -273,6 +338,9 @@ with pending:
                     st.dataframe(block[['Bestellnummer','SKU','Angebotstitel','Erlös_Brutto','Auszahlung Nr.']].rename(columns={'Angebotstitel':'Produkttitel','Erlös_Brutto':'Payoutbetrag'}),hide_index=True,use_container_width=True)
                     download('Gutschriftenübersicht herunterladen',block,'Gutschriften_'+partner)
                     workflow_panel(business[(business.Partner==partner) & (business.Art=='Erstattung')],'refund-'+partner,'refund')
+    with holds_tab:
+        st.caption('Einbehalte sind keine Abrechnungspositionen und kein Fehler. Die ursprünglichen Referenzen bleiben erhalten. Spätere Auszahlungen und Erstattungen werden als eigene Folgebewegungen verarbeitet.')
+        st.dataframe(studio_view.holds(raw), hide_index=True, use_container_width=True)
     with checks_tab:
         if not master.empty:
             issues=master[master['Prüfhinweis']!='']
@@ -322,6 +390,29 @@ with history:
             with st.container(border=True):
                 st.subheader(f"Entwurf {index} · {item['Positionen'] if item['Positionen'] is not None else 'Anzahl unbekannt'} Positionen")
                 st.write('Payouts: '+', '.join(item['Payouts']))
-                st.caption(item['Status']+' · dauerhaft von neuen Entwürfen ausgeschlossen')
+                st.caption(item['Status'])
+                if not item['discarded'] and item['Positionen']:
+                    if st.button('Lexware-Entwurf verwerfen', key='discard-'+invoice_id):
+                        st.session_state['discard_request']=invoice_id
                 with st.expander('Technische Details'):
                     st.code(invoice_id,language=None)
+
+    if not business.empty:
+        with st.expander('Positionshistorie · Prüfungen, Zahlungen und Abschlüsse'):
+            st.dataframe(business[['Bestellnummer','Partner','SKU','Auszahlung Nr.','Bearbeitungsstatus','reviewed_at','paid_at','received_at','closed_at']].rename(columns={'reviewed_at':'Geprüft am','paid_at':'Partner bezahlt am','received_at':'Evelyn erhalten am','closed_at':'Abgeschlossen am'}),hide_index=True,use_container_width=True)
+
+with dashboard:
+    st.subheader('Projektübersicht')
+    st.caption('Gesamter vorhandener Datenbestand · zugeordnete Payoutpositionen einschließlich Erstattungen. Einbehalte, offene Bestellungen, Gebühren und ungeklärte Zuordnungen sind ausgeschlossen.')
+    try:
+        counters=studio_view.project_totals(master)
+        for col,label,value in zip(st.columns(3),['eBay-Umsatz gesamt','Provision Evelyn netto · 0,5 %','Provision Patrick netto · 3,0 %'],[counters['ebay'],counters['evelyn'],counters['patrick']]):
+            col.metric(label,euros(value))
+        st.caption('Provisionen auf der bestehenden Netto-Abrechnungsbasis. Patrick: nur Gruppe B, Differenz zwischen 3,5 % Partnerrabatt und 0,5 % Evelyn-Provision; Cent-Rundung wie in den Abrechnungen. Keine Aussage über bereits bezahlte Provisionen.')
+    except ValueError as exc:
+        st.warning('Kennzahlen benötigen eindeutige Quelldaten: '+str(exc))
+
+if st.session_state.get('discard_request'):
+    discard_dialog(st.session_state['discard_request'])
+elif st.session_state.get('confirmation_request'):
+    confirm_dialog(*st.session_state['confirmation_request'])

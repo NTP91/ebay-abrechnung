@@ -271,6 +271,8 @@ def load_master_data():
     orders = read_master(ORDERS_DB_PATH)
     processed = []
     for _, row in payouts.iterrows():
+        if row['Typ'].strip().casefold() == 'einbehalten':
+            continue  # Retain raw references; a hold is neither a sale nor a credit.
         amount = float(parse_money(row['Betrag abzügl. Kosten']))
         order_id = row['Bestellnummer']
         fee = not order_id and any(word in row['Typ'].lower() for word in ('gebühr', 'fee', 'belastung'))
@@ -368,6 +370,7 @@ def ledger():
     path = Path(PAYOUTS_DB_PATH).with_name('Settlement_State.sqlite3')
     guard = path.with_name('Settlement_Locks.json')
     workflow_guard = path.with_name('Settlement_Workflow.json')
+    correction_guard = path.with_name('Settlement_Corrections.json')
     with FileLock(str(path) + '.guard.lock'):
         if not path.exists() and not guard.exists() and Path(PAYOUTS_DB_PATH).exists():
             raise ValueError('Rechnungsregister und Sperrensicherung fehlen bei vorhandenen Payouts. Vollständiges Backup wiederherstellen; Abrechnung gesperrt.')
@@ -381,6 +384,13 @@ def ledger():
             connection.execute('CREATE TABLE IF NOT EXISTS imports (id INTEGER PRIMARY KEY, kind TEXT, filename TEXT, at TEXT, start TEXT, end TEXT, detected INTEGER, added INTEGER, present INTEGER, issues INTEGER, error TEXT)')
             connection.execute('CREATE TABLE IF NOT EXISTS import_warnings (id INTEGER PRIMARY KEY, payout TEXT, at TEXT, reason TEXT, snapshot TEXT)')
             connection.execute('CREATE TABLE IF NOT EXISTS position_workflow (position_key TEXT PRIMARY KEY, reviewed_at TEXT, paid_at TEXT, received_at TEXT, closed_at TEXT, source TEXT)')
+            connection.execute('CREATE TABLE IF NOT EXISTS discarded_invoices (invoice_id TEXT PRIMARY KEY, label TEXT, discarded_at TEXT, snapshot TEXT)')
+            if correction_guard.exists():
+                for saved in json.loads(correction_guard.read_text(encoding='utf-8')):
+                    connection.execute('INSERT OR IGNORE INTO discarded_invoices VALUES(?,?,?,?)', tuple(saved[k] for k in ('invoice_id','label','discarded_at','snapshot')))
+            discarded = {r[0] for r in connection.execute('SELECT invoice_id FROM discarded_invoices')}
+            for invoice_id in discarded:
+                connection.execute("UPDATE payouts SET invoice_id=NULL, attempt=NULL, fingerprint=NULL, snapshot=NULL, status='vollständig zugeordnet' WHERE invoice_id=?", (invoice_id,))
             if workflow_guard.exists():
                 for saved in json.loads(workflow_guard.read_text(encoding='utf-8')):
                     connection.execute('INSERT OR IGNORE INTO position_workflow(position_key,reviewed_at,paid_at,received_at,closed_at,source) VALUES(?,?,?,?,?,?)',
@@ -389,6 +399,8 @@ def ledger():
                         if saved[field]:
                             connection.execute(f'UPDATE position_workflow SET {field}=COALESCE({field},?) WHERE position_key=?', (saved[field], saved['position_key']))
             for row in protected:
+                if row['invoice_id'] in discarded:
+                    continue
                 current = connection.execute('SELECT * FROM payouts WHERE id=?', (row['id'],)).fetchone()
                 if not current or (row['attempt'] and not current['attempt']):
                     connection.execute('INSERT OR REPLACE INTO payouts(id,status,fingerprint,invoice_id,attempt,snapshot) VALUES(?,?,?,?,?,?)', tuple(row[k] for k in ('id','status','fingerprint','invoice_id','attempt','snapshot')))
@@ -405,7 +417,14 @@ def ledger():
             connection.rollback()  # never persist a caller's uncommitted partial operation
             records = [dict(row) for row in connection.execute('SELECT * FROM payouts ORDER BY id')]
             workflow_records = [dict(row) for row in connection.execute('SELECT * FROM position_workflow ORDER BY position_key')]
+            corrections = [dict(row) for row in connection.execute('SELECT * FROM discarded_invoices ORDER BY invoice_id')]
             connection.close()
+            temporary = correction_guard.with_suffix('.json.tmp')
+            with temporary.open('w', encoding='utf-8') as output:
+                json.dump(corrections, output, ensure_ascii=False)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, correction_guard)
             temporary = guard.with_suffix('.json.tmp')
             with temporary.open('w', encoding='utf-8') as output:
                 json.dump(records, output, ensure_ascii=False)
@@ -564,6 +583,8 @@ def backup_data():
                 archive.write(guard, guard.name)
                 workflow_guard = Path(PAYOUTS_DB_PATH).with_name('Settlement_Workflow.json')
                 archive.write(workflow_guard, workflow_guard.name)
+                correction_guard = Path(PAYOUTS_DB_PATH).with_name('Settlement_Corrections.json')
+                archive.write(correction_guard, correction_guard.name)
     return output.getvalue()
 
 

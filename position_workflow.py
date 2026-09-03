@@ -79,7 +79,7 @@ def payout_status(positions):
     return result
 
 
-def confirm(keys, action, event_date):
+def confirm(keys, action, event_date, expected_sources=None):
     """Manual evidence only. No network calls and no payout-wide status changes."""
     if action not in ('review', 'partner_paid', 'evelyn_received', 'refund_settled'):
         raise ValueError('Unbekannte Bestätigung.')
@@ -94,6 +94,8 @@ def confirm(keys, action, event_date):
         chosen = current[current.position_key.isin(keys)] if not current.empty else current
         if len(chosen) != len(keys):
             raise ValueError('Positionen nicht mehr eindeutig vorhanden. Ansicht aktualisieren.')
+        if expected_sources is not None and any(expected_sources.get(row.position_key) != source_snapshot(row) for _, row in chosen.iterrows()):
+            raise ValueError('Abrechnungsdaten verändert. Bitte erneut prüfen.')
         with core.ledger() as db:
             db.execute('BEGIN IMMEDIATE')
             for _, row in chosen.iterrows():

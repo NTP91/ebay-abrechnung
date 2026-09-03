@@ -9,3 +9,4 @@ Master_*.csv.*
 Settlement_State.sqlite3*
 Settlement_Locks.json*
 Settlement_Workflow.json*
+Settlement_Corrections.json*

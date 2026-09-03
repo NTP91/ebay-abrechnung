@@ -120,7 +120,7 @@ class ApiWorkflowTests(unittest.TestCase):
         core.confirm_received('7700379513')
         self.send()
         with zipfile.ZipFile(io.BytesIO(core.backup_data())) as archive:
-            self.assertEqual(set(archive.namelist()), {'Master_Payouts.csv', 'Master_Orders.csv', 'Settlement_State.sqlite3', 'Settlement_Locks.json', 'Settlement_Workflow.json'})
+            self.assertEqual(set(archive.namelist()), {'Master_Payouts.csv', 'Master_Orders.csv', 'Settlement_State.sqlite3', 'Settlement_Locks.json', 'Settlement_Workflow.json', 'Settlement_Corrections.json'})
             target = Path(self.temp.name) / 'backup.sqlite3'
             target.write_bytes(archive.read('Settlement_State.sqlite3'))
         with sqlite3.connect(target) as db:

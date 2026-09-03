@@ -3,7 +3,35 @@ import json
 import pandas as pd
 import core
 import position_workflow
-from partner_export import prepare_partner_export
+from decimal import Decimal
+from partner_export import prepare_partner_export, cents
+
+
+def project_totals(master):
+    """Cumulative settled revenue and actual net commission, including credits."""
+    totals = dict(ebay=Decimal(0), evelyn=Decimal(0), patrick=Decimal(0))
+    if master.empty:
+        return totals
+    relevant = master[master.Gruppe.isin(['Gruppe A','Gruppe B']) & ~master['Prüfhinweis'].astype(bool) & master.Art.isin(['Bestellung','Erstattung'])]
+    for _, block in relevant.groupby('Partner'):
+        model = prepare_partner_export(block)
+        totals['ebay'] += sum(t['ebay'] for t in model['totals'].values())
+        for name in ('Rechnung','Gutschriften'):
+            for item in model[name]:
+                evelyn = item['net'] - cents(item['net'] * Decimal('.995'))
+                totals['evelyn'] += evelyn
+                if block.iloc[0].Gruppe == 'Gruppe B':
+                    totals['patrick'] += item['discount'] - evelyn
+    return totals
+
+
+def holds(raw):
+    """Keep held funds and references visible, without guessing their resolution."""
+    block = raw[raw.Typ.str.strip().str.casefold() == 'einbehalten'].copy()
+    columns = ['Datum','Auszahlung Nr.','Bestellnummer','Transaktionsnummer','Artikelnummer','Betrag abzügl. Kosten']
+    result = block[columns].copy()
+    result['Status'] = 'Einbehalt · Folgebewegung abwarten'
+    return result
 
 
 def eligible_rows(master, states):
@@ -35,6 +63,8 @@ def open_positions(raw):
     orders = all_orders[all_orders.SKU.str.split('/').str[0].str.strip() != ''].copy()
     records = []
     for _, row in raw[raw['Auszahlung Nr.'] == ''].iterrows():
+        if row.Typ.strip().casefold() == 'einbehalten':
+            continue
         match, issue = core.match_order(row, all_orders)
         if match is not None and not issue and not match.SKU.split('/')[0].strip():
             continue
@@ -90,21 +120,33 @@ def order_catalogue(raw, business):
                 records[('order',match.name)]['keys'].append(bool(row['closed_at']))
         for entry in records.values():
             entry['closed'] = bool(entry['payout'] and entry['keys'] and all(entry['keys']))
-    for entry in records.values():
+    held_orders = set()
+    for _, row in raw[raw.Typ.str.strip().str.casefold() == 'einbehalten'].iterrows():
+        match, issue = core.match_order(row, all_orders)
+        if match is not None and not issue:
+            held_orders.add(('order',match.name))
+    for key, entry in records.items():
         entry['Partner'] = entry['SKU'].split('/')[0].strip().upper()
         if entry['Partner'].startswith('MH'):
             entry['Partner'] = 'MH'
         entry['Status'] = 'abgeschlossen' if entry['closed'] else 'Payout vorhanden' if entry['payout'] else 'Bestellung vorhanden · noch kein Payout'
+        if key in held_orders and not entry['payout']:
+            entry['Status'] = 'Einbehalt / Rücksendung in Klärung'
     return pd.DataFrame(records.values(), columns=['Bestellnummer','Datum','Partner','SKU','Produkttitel','Status','payout','closed','keys'])
 
 
 def invoice_history():
     with core.ledger() as db:
         rows = [dict(row) for row in db.execute('SELECT * FROM payouts WHERE invoice_id IS NOT NULL ORDER BY id')]
+        discarded = [dict(row) for row in db.execute('SELECT * FROM discarded_invoices ORDER BY discarded_at')]
     grouped = {}
     for row in rows:
-        item = grouped.setdefault(row['invoice_id'], {'Payouts': [], 'Positionen': None, 'Status': 'Lexware-Entwurf erstellt · Zahlung separat bestätigen'})
+        item = grouped.setdefault(row['invoice_id'], {'Payouts': [], 'Positionen': None, 'discarded': False, 'Status': 'Lexware-Entwurf erstellt · Zahlung separat bestätigen'})
         item['Payouts'].append(row['id'])
         if row['snapshot']:
             item['Positionen'] = len(json.loads(row['snapshot']).get('lineItems', []))
+    for row in discarded:
+        previous = json.loads(row['snapshot'])
+        grouped[row['invoice_id']] = {'Payouts':[r['id'] for r in previous], 'Positionen':len(json.loads(previous[0]['snapshot'])['lineItems']),
+                                     'discarded':True, 'Status':row['label']+' · verworfen am '+row['discarded_at']}
     return grouped
