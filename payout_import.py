@@ -45,7 +45,15 @@ def merge_transactions(existing, incoming, locked_payouts=()):
                     raise ValueError('Transaktion ist bereits einem anderen Payout zugeordnet; keine Daten übernommen.')
                 if paid:
                     from core import parse_money
-                    if parse_money(old['Betrag abzügl. Kosten']) != parse_money(row['Betrag abzügl. Kosten']):
+                    from payout_structure import child_reference
+                    references = child_reference(old) and child_reference(row)
+                    if references:
+                        for field in ('Zwischensumme Artikel', 'Verpackung und Versand'):
+                            from core import clean
+                            a, b = clean(old.get(field, '')), clean(row.get(field, ''))
+                            if bool(a) != bool(b) or (a and parse_money(a) != parse_money(b)):
+                                raise ValueError('Bekannte Child-Position mit abweichender Zwischensumme; Payout unverändert.')
+                    if not references and parse_money(old['Betrag abzügl. Kosten']) != parse_money(row['Betrag abzügl. Kosten']):
                         raise ValueError('Bekannte Transaktion mit abweichendem Geldbetrag; Payout unverändert, manuelle Prüfung erforderlich.')
                 counters['known_paid'] += 1
                 continue  # An older open report must never downgrade a paid row.

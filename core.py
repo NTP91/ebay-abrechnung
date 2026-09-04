@@ -186,10 +186,10 @@ def import_reports(frames, path, kind, details=None):
             for payout_id in payout_ids:
                 block = incoming[incoming['Auszahlung Nr.'] == payout_id]
                 try:
-                    if payout_id:
-                        for value in block['Betrag abzügl. Kosten']:
-                            parse_money(value)
                     candidate, counts = merge_transactions(merged, block, locked)
+                    if payout_id:
+                        from payout_structure import validate
+                        validate(candidate[candidate['Auszahlung Nr.'] == payout_id])
                 except ValueError as exc:
                     warning = {'payout': payout_id, 'reason': str(exc), 'positions': len(block)}
                     counters['warnings'].append(warning)
@@ -268,9 +268,13 @@ def load_master_data():
     payouts = read_master(PAYOUTS_DB_PATH)
     # Open transactions are persisted in the source store, never in settlement data.
     payouts = payouts[payouts['Auszahlung Nr.'] != '']
+    from payout_structure import validate
+    child_indices = validate(payouts)
     orders = read_master(ORDERS_DB_PATH)
     processed = []
-    for _, row in payouts.iterrows():
+    for index, row in payouts.iterrows():
+        if index in child_indices:
+            continue  # Article identities remain in the raw store, not financial rows.
         if row['Typ'].strip().casefold() == 'einbehalten':
             continue  # Retain raw references; a hold is neither a sale nor a credit.
         amount = float(parse_money(row['Betrag abzügl. Kosten']))
