@@ -2,6 +2,7 @@ import streamlit as st
 from pathlib import Path
 import core
 import api_holds
+import ebay_sync
 import data_status
 import studio_view
 import position_workflow
@@ -332,6 +333,7 @@ try:
     catalogue=studio_view.order_catalogue(raw,business)
     open_orders=catalogue[~catalogue.payout & (catalogue.Status!='Einbehalt / Rücksendung in Klärung')] if not catalogue.empty else catalogue
     invoices=studio_view.invoice_history()
+    api_imports=ebay_sync.load(Path(core.PAYOUTS_DB_PATH).parent)
 except Exception as exc:
     st.error(f'Datenbestand benötigt Prüfung: {exc}')
     st.stop()
@@ -355,6 +357,17 @@ with invoice_entry.container():
         st.session_state['incoming_invoice_open']=True
     st.caption('Alternativer Einstieg zur Partnerkarte · Partner auswählen, dieselbe Rechnung hochladen und prüfen.')
 
+with st.sidebar:
+    def api_time(value):
+        return studio_view.local_datetime(core.pd.Series([value])).iloc[0] if value else 'noch kein Abruf'
+    automatic=[r for r in api_imports['runs'] if r['trigger']=='automatic' and r['status']=='success']
+    manual=[r for r in api_imports['runs'] if r['trigger']=='manual']
+    st.caption('Datenstand der eBay-API: '+api_time(api_imports['watermark']))
+    st.caption('Letzter erfolgreicher automatischer Abruf: '+api_time(automatic[-1]['at'] if automatic else None))
+    st.caption('Letzter manueller Abruf: '+api_time(manual[-1]['at'] if manual else None))
+    if api_imports['runs'] and api_imports['runs'][-1]['status']!='success':
+        st.warning('Letzter API-Import: '+api_imports['runs'][-1]['status']+'. Details in der Historie.')
+
 if st.session_state.pop('draft_created',False):
     st.success('Lexware-Entwurf erstellt. Die enthaltenen Positionen sind jetzt dauerhaft gesperrt.')
 
@@ -371,7 +384,11 @@ with st.expander('Payout-Abgleich · Bankbetrag und einzelne Positionen'):
             if locked: st.info(locked)
             st.caption('Ohne gespeicherten manuellen Abgleich bleibt der bisherige Ablauf bestehen. Nach Aktivierung sind nur freigegebene Positionen eines vollständig abgestimmten Payouts abrechnungsfähig; bestehende Zuordnungsprüfungen gelten weiterhin.')
             revision=f"manual-{manual_pid}-{check['version']}-{check['source_digest']}"
-            bank=st.text_input('Tatsächlicher Bank-/Auszahlungsbetrag in Euro',value=str(check['bank']).replace('.',',') if check['bank'] is not None else '',key=revision+'-bank',disabled=bool(locked))
+            api_control=api_imports['payouts'].get(manual_pid)
+            if api_control:
+                st.caption('Maßgeblicher API-Kontrollbetrag: '+euros(float(api_control['amount']['value'])))
+            bank_default=check['bank'] if check['bank'] is not None else ebay_sync.eur(api_control['amount']) if api_control else None
+            bank=st.text_input('Tatsächlicher Bank-/Auszahlungsbetrag in Euro',value=str(bank_default).replace('.',',') if bank_default is not None else '',key=revision+'-bank',disabled=bool(locked))
             financial=check['financial']
             editor=financial[['abgleich_key','Typ','Bestellnummer','Transaktionsnummer','SKU','Angebotstitel','Betrag abzügl. Kosten','Abgleichstatus','Quelle_geaendert']].copy()
             edited=st.data_editor(editor,hide_index=True,use_container_width=True,key=revision+'-rows',
@@ -585,6 +602,14 @@ with history:
             with st.container(border=True):
                 invoice_report(record,'history-incoming-'+record['id'],allow_approval=False)
     with ph:
+        if api_imports['runs']:
+            with st.expander('eBay API · Abrufhistorie'):
+                api_table=core.pd.DataFrame(api_imports['runs'])
+                for field in ('at','start','end'):
+                    api_table[field]=studio_view.local_datetime(api_table[field])
+                st.dataframe(api_table[['source','trigger','at','start','end','new_payouts','new_transactions','known','ledger_only','status','error']].rename(columns={'source':'Quelle','trigger':'Auslösung','at':'Abruf','start':'Von','end':'Bis','new_payouts':'Neue Payouts','new_transactions':'Neue Finanzpositionen','known':'Bereits bekannt','ledger_only':'Nur API-Bewegungsnachweis','status':'Status','error':'Fehler'}),hide_index=True,use_container_width=True)
+                controls=core.pd.DataFrame([{'Payout':pid,'API-Auszahlungsbetrag':euros(float(value['amount']['value'])),'API-Status':value['payoutStatus'],'Bewegungen':value['transactionCount']} for pid,value in api_imports['payouts'].items()])
+                st.dataframe(controls,hide_index=True,use_container_width=True)
         table=core.pd.DataFrame(overview['history'])
         if not table.empty:
             table['Positionen']=table.Payoutnummer.map(master.groupby('Auszahlung Nr.').size())

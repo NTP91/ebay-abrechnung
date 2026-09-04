@@ -21,21 +21,22 @@ def render(data_dir, catalogue, orders, raw):
     with st.container(border=True):
         left, right = st.columns([1, 2])
         refresh = left.button('eBay-Daten aktualisieren', type='primary', disabled=not configured, key='ebay-risk-refresh', use_container_width=True)
-        right.caption('Abruf nur auf Anforderung. API-Holds sperren betroffene Bestellpositionen; bestehende Rechnungen und Bestätigungen bleiben erhalten. Keine eBay-Schreibaktionen oder Lexware-Aufrufe.')
+        right.caption('Manueller Fallback zum täglichen Finances-Import. Neue Payouts und Bewegungen werden geprüft importiert; bestehende Belege und Holds bleiben geschützt. Keine Lexware-Aufrufe.')
     if refresh:
         if 'ebay_readonly_client' not in st.session_state:
             st.session_state.ebay_readonly_client = Client()
-        bar = st.progress(0, text='eBay-Verbindung prüfen')
-        payout_orders = raw.loc[raw['Auszahlung Nr.'] != '', 'Bestellnummer'].unique() if not raw.empty else []
         try:
-            snapshot = risk.collect(st.session_state.ebay_readonly_client, payout_orders,
-                                    lambda value, name: bar.progress(value, text='eBay-Daten werden gelesen · ' + name))
-            risk.save_snapshot(data_dir, snapshot)
+            import ebay_sync
+            with st.spinner('Payouts und Finanztransaktionen werden abgerufen und geprüft …'):
+                result=ebay_sync.run(data_dir,'manual',st.session_state.ebay_readonly_client)
+            st.session_state['ebay_sync_result']=result
             st.rerun()
         except (EbayError, OSError):
             st.error('API-Datenstand konnte nicht gespeichert werden. Bitte den Datenzugriff prüfen.')
-        finally:
-            bar.empty()
+    result=st.session_state.pop('ebay_sync_result',None)
+    if result:
+        if result['status']=='success':st.success('API-Import erfolgreich. Details unter Historie → Payouts.')
+        else:st.warning(result.get('error') or 'API-Import noch nicht vollständig.')
     try:
         snapshot = risk.load_snapshot(data_dir)
     except EbayError as exc:

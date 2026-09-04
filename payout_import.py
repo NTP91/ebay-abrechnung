@@ -1,14 +1,23 @@
 """Source transaction lifecycle, separate from all settlement calculations."""
 import pandas as pd
+import re
 
 
 def identity(row):
     # A refund and a sale may share the order/transaction reference.
     kind = row['Typ'].strip().lower()
+    reference = str(row.get('Referenznummer', '')).strip()
+    if kind == 'rückerstattung' and reference:
+        numbers = re.findall(r'\d+', reference)
+        return ('refund-reference', row['Bestellnummer'], numbers[-1] if numbers else reference, kind)
     if row['Transaktionsnummer']:
         return ('transaction', row['Transaktionsnummer'], kind)
     if row['Bestellnummer'] and row['Artikelnummer']:
         return ('item', row['Bestellnummer'], row['Artikelnummer'], kind)
+    if kind == 'andere gebühr' and reference:
+        return ('fee-reference', reference, kind)
+    if kind == 'bestellung' and row['Bestellnummer'] and str(row['Betrag abzügl. Kosten']).strip():
+        return ('order-parent', row['Bestellnummer'], kind)
     return None
 
 
@@ -23,6 +32,9 @@ def merge_transactions(existing, incoming, locked_payouts=()):
         def same_position(old):
             if key and identity(old) == key:
                 return True
+            old_key=identity(old)
+            if key and old_key and key[0]==old_key[0]=='refund-reference':
+                return False  # Separate partial refunds of one item remain separate movements.
             if old['Transaktionsnummer'] and row['Transaktionsnummer']:
                 return False
             if old['Typ'].strip().lower() != row['Typ'].strip().lower():

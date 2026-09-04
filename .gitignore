@@ -14,4 +14,5 @@ Settlement_Partner_Invoices.json*
 Partner_Invoices/
 Settlement_Payout_Reconciliation.json*
 Settlement_API_Holds.json*
+Settlement_Ebay_Sync.json*
 Ebay_Readonly/

@@ -103,6 +103,10 @@ def save(payout, bank, decisions, actor, note, expected_version, expected_source
     if not actor.strip() or not note.strip(): raise ValueError('Name und Beleg-/Prüfhinweis erforderlich.')
     amount=core.parse_money(bank)
     directory=Path(core.PAYOUTS_DB_PATH).parent
+    import ebay_sync
+    api_payout=ebay_sync.load(directory)['payouts'].get(str(payout))
+    if api_payout and amount!=ebay_sync.eur(api_payout['amount']):
+        raise ValueError('Bank-Kontrollbetrag weicht vom geprüften API-Payoutbetrag ab.')
     with core.FileLock(core.PAYOUTS_DB_PATH+'.lock'),core.FileLock(core.ORDERS_DB_PATH+'.lock'),core.FileLock(str(directory/FILE)+'.lock'):
         document=load();current=inspect(payout,document=document)
         if document['version']!=expected_version or current['source_digest']!=expected_source:

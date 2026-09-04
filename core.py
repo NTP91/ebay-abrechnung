@@ -625,6 +625,9 @@ def backup_data():
                 api_guard = Path(PAYOUTS_DB_PATH).with_name('Settlement_API_Holds.json')
                 if api_guard.exists():
                     archive.write(api_guard, api_guard.name)
+                sync_guard = Path(PAYOUTS_DB_PATH).with_name('Settlement_Ebay_Sync.json')
+                if sync_guard.exists():
+                    archive.write(sync_guard, sync_guard.name)
                 incoming_dir = Path(PAYOUTS_DB_PATH).parent/'Partner_Invoices'
                 if incoming_dir.exists():
                     for incoming_file in incoming_dir.iterdir():
