@@ -50,7 +50,7 @@ def rows(payout, raw=None):
     block = raw[raw['Auszahlung Nr.']==str(payout)].copy()
     if block.empty: raise ValueError('Payout nicht vorhanden.')
     children = validate(block)
-    financial = block.loc[~block.index.isin(children)].copy()
+    financial = block.loc[~block.index.isin(children) & (block.Typ.str.strip().str.casefold() != 'auszahlung')].copy()
     financial['abgleich_key'] = financial.apply(key,axis=1)
     if financial.abgleich_key.duplicated().any():
         raise ValueError('Payoutpositionen für manuellen Abgleich nicht eindeutig.')

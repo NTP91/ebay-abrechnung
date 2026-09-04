@@ -1,6 +1,7 @@
 import streamlit as st
 from pathlib import Path
 import core
+import api_holds
 import data_status
 import studio_view
 import position_workflow
@@ -54,7 +55,7 @@ def download(label, rows, key, kind='partner'):
     try:
         current=position_workflow.positions()
         if not current.empty:
-            forbidden=set(current.loc[current.closed_at.astype(bool), 'position_key'])
+            forbidden=set(current.loc[current.closed_at.astype(bool) | api_holds.mask(current), 'position_key'])
             rows=rows[~rows.apply(position_workflow.position_key,axis=1).isin(forbidden)]
         if rows.empty:
             st.caption('Abgeschlossen · in der Historie archiviert; kein erneuter Export.')
@@ -131,12 +132,19 @@ def invoice_report(record, key, allow_approval=True):
             except ValueError as exc: st.error(str(exc))
 
 
-def invoice_panel(rows, key, scope='Rechnung', expanded=False):
+def invoice_panel(rows, key, scope='Rechnung', expanded=False, choose_partner=False):
     if rows.empty: return
     partner=rows.iloc[0].Partner
     with st.expander('Partnerrechnung hochladen und prüfen', expanded=expanded):
-        available_partners=sorted(business.loc[business.Gruppe.isin(['Gruppe A','Gruppe B']),'Partner'].unique())
-        selected=st.selectbox('Partner / Händler',available_partners,index=available_partners.index(partner),key=key+'-invoice-partner')
+        if choose_partner:
+            available_partners=sorted(rows.Partner.unique())
+            selected=st.selectbox('Partner / Händler',available_partners,index=None,placeholder='Partner auswählen',key=key+'-invoice-partner')
+            if selected is None:
+                st.info('Bitte zuerst den Partner auswählen. Die Prüfung entspricht dem Upload in seiner Partnerkarte.')
+                return
+        else:
+            selected=partner
+            st.caption('Partner / Händler: '+selected)
         st.caption('PDF, XLSX oder CSV · höchstens 20 MB. Strukturierte Bestellnummern, SKU, Artikel, Menge, Beträge, Rabatt und Gesamtsumme werden geprüft. Unlesbare Felder bleiben prüfpflichtig.')
         uploaded=st.file_uploader('Eingehende Partnerrechnung',type=['pdf','xlsx','csv'],key=key+'-invoice-file')
         if st.button('Rechnung hochladen und abgleichen',disabled=uploaded is None,key=key+'-invoice-upload'):
@@ -198,7 +206,7 @@ def discard_dialog(invoice_id):
 def workflow_panel(rows, key, mode='partner', action_only=False):
     if rows.empty:
         return
-    active=rows[~rows['closed_at'].astype(bool) & ~rows['Prüfhinweis'].astype(bool) & ~rows.Quellenpruefung.astype(bool)]
+    active=rows[~rows['closed_at'].astype(bool) & ~rows['Prüfhinweis'].astype(bool) & ~rows.Quellenpruefung.astype(bool) & ~api_holds.mask(rows)]
     if mode=='evelyn':
         invoice_map=dict(zip(states.Auszahlung,states.Entwurf))
         active=active[~active.received_at.astype(bool)].copy()
@@ -221,6 +229,8 @@ def workflow_panel(rows, key, mode='partner', action_only=False):
                 st.caption(f"{len(block)} {open_label} · "+('Partnerrechnung geprüft' if reviewed else f'{len(unreviewed)} {review_label}'))
             if not reviewed:
                 st.caption('Freigabe erst nach Upload und erfolgreicher Prüfung der Partnerrechnung.')
+                if not block.empty and block.iloc[0].Gruppe=='Gruppe A':
+                    st.caption('Zahlungsabschluss erst möglich, wenn alle aktuell offenen Positionen dieses Partners geprüft sind.')
                 actions=[]
             elif mode=='refund':
                 actions=[('Erstattung erledigt bestätigen','refund_settled')]
@@ -315,18 +325,25 @@ try:
 except Exception as exc:
     st.error(f'Datenbestand benötigt Prüfung: {exc}')
     st.stop()
-@st.dialog('Händlerrechnung hochladen', width='large')
+def close_incoming_invoice():
+    st.session_state.pop('incoming_invoice_open',None)
+
+
+@st.dialog('Händlerrechnung hochladen', width='large', on_dismiss=close_incoming_invoice)
 def incoming_invoice_dialog():
     st.caption('Partner auswählen und die Rechnung gegen die bestehende Einzelabrechnung prüfen.')
     if partner_ready.empty:
         st.info('Aktuell keine offenen Partnerabrechnungen. Vorhandene Belege findest du unter Historie → Eingangsrechnungen.')
     else:
-        invoice_panel(partner_ready, 'import-invoice', expanded=True)
+        invoice_panel(partner_ready, 'import-invoice', expanded=True, choose_partner=True)
+    if st.button('Schließen',key='close-incoming-invoice'):
+        close_incoming_invoice()
+        st.rerun()
 
 with invoice_entry.container():
     if st.button('Händlerrechnung hochladen', key='open-incoming-invoice', icon=':material/upload_file:', use_container_width=True):
-        incoming_invoice_dialog()
-    st.caption('PDF · XLSX · CSV. Auch direkt in den Partnerkarten unter Gruppe A und Gruppe B erreichbar.')
+        st.session_state['incoming_invoice_open']=True
+    st.caption('Alternativer Einstieg zur Partnerkarte · Partner auswählen, dieselbe Rechnung hochladen und prüfen.')
 
 if st.session_state.pop('draft_created',False):
     st.success('Lexware-Entwurf erstellt. Die enthaltenen Positionen sind jetzt dauerhaft gesperrt.')
@@ -413,13 +430,14 @@ with home:
 
 with group_a:
     st.subheader('Gruppe A · Direktabrechnungen')
+    st.caption('Rechnung hochladen → automatisch prüfen → freigeben. Danach erscheint „Bezahlt / abgeschlossen“.')
     st.caption('PP · BA · MK · 001 — 0,5 % Rabatt. Unabhängig von Patrick → Evelyn. Abschluss erst nach Prüfung und bestätigter Partnerzahlung.')
     with st.container(border=True):
         partner_panel(partner_ready[partner_ready.Gruppe=='Gruppe A'] if not partner_ready.empty else partner_ready,'0,5 %','Gruppe_A')
 
 with group_b:
     b_ready=ready[ready.Gruppe=='Gruppe B'] if not ready.empty else ready
-    b_open=business[(business.Gruppe=='Gruppe B') & (business.Art=='Bestellung') & (business['Erlös_Brutto']>0) & ~business.closed_at.astype(bool) & ~business['Prüfhinweis'].astype(bool) & ~business.Quellenpruefung.astype(bool)] if not business.empty else business
+    b_open=business[(business.Gruppe=='Gruppe B') & (business.Art=='Bestellung') & (business['Erlös_Brutto']>0) & ~business.closed_at.astype(bool) & ~business['Prüfhinweis'].astype(bool) & ~business.Quellenpruefung.astype(bool) & ~api_holds.mask(business)] if not business.empty else business
     with st.container(border=True):
         st.subheader('Partner → Patrick')
         st.caption('Einzelabrechnungen für MH, NB und weitere zugeordnete Partner · 3,5 % Rabatt')
@@ -530,7 +548,10 @@ with pending:
                     if partner and block.Gruppe.isin(['Gruppe A','Gruppe B']).all():
                         invoice_panel(block,'refund-invoice-'+partner,'Gutschriften')
     with holds_tab:
-        st.caption('Einbehalte sind keine Abrechnungspositionen und kein Fehler. Die ursprünglichen Referenzen bleiben erhalten. Spätere Auszahlungen und Erstattungen werden als eigene Folgebewegungen verarbeitet.')
+        st.caption('API-Einbehalte sperren bestehende Bestellpositionen. Erstattungen bleiben getrennte Vorgänge. Bestehende manuelle Sperren und Rechnungszuordnungen bleiben erhalten.')
+        if not business.empty:
+            api_cases=business[api_holds.mask(business)]
+            st.dataframe(api_cases[['Auszahlung Nr.','Bestellnummer','Partner','SKU','Erlös_Brutto','API_Hold_Hinweis','API_Korrekturfall','Lexware_uebertragen','Bearbeitungsstatus']],hide_index=True,use_container_width=True)
         st.dataframe(studio_view.holds(raw), hide_index=True, use_container_width=True)
     with checks_tab:
         if not master.empty:
@@ -542,6 +563,8 @@ with pending:
             st.subheader('Partnerlose Gebühren')
             st.caption('Werden keinem Partner zugerechnet.')
             st.dataframe(master[master.Art=='Gebühr'][['Datum','Auszahlung Nr.','Angebotstitel','Erlös_Brutto']],hide_index=True,use_container_width=True)
+            st.subheader('Bank-/Payout-Summenzeilen · nur Kontrollwerte')
+            st.dataframe(raw[raw.Typ.str.strip().str.casefold()=='auszahlung'][['Auszahlung Nr.','Betrag abzügl. Kosten']],hide_index=True,use_container_width=True)
 
 with history:
     ph,oh,lh,ih=st.tabs(['Payouts','Bestellberichte','Lexware','Eingangsrechnungen'])
@@ -618,3 +641,5 @@ if st.session_state.get('discard_request'):
     discard_dialog(st.session_state['discard_request'])
 elif st.session_state.get('confirmation_request'):
     confirm_dialog(*st.session_state['confirmation_request'])
+elif st.session_state.get('incoming_invoice_open'):
+    incoming_invoice_dialog()

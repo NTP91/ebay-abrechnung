@@ -2,6 +2,7 @@
 import json
 import pandas as pd
 import core
+import api_holds
 import position_workflow
 from decimal import Decimal
 from partner_export import prepare_partner_export, cents
@@ -18,7 +19,7 @@ def project_totals(master):
     totals = dict(ebay=Decimal(0), evelyn=Decimal(0), patrick=Decimal(0))
     if master.empty:
         return totals
-    relevant = master[master.Gruppe.isin(['Gruppe A','Gruppe B']) & ~master['Prüfhinweis'].astype(bool) & master.Art.isin(['Bestellung','Erstattung'])]
+    relevant = master[master.Gruppe.isin(['Gruppe A','Gruppe B']) & ~master['Prüfhinweis'].astype(bool) & master.Art.isin(['Bestellung','Erstattung']) & ~api_holds.mask(master)]
     for _, block in relevant.groupby('Partner'):
         model = prepare_partner_export(block)
         totals['ebay'] += sum(t['ebay'] for t in model['totals'].values())
@@ -46,7 +47,7 @@ def eligible_rows(master, states):
     unlocked = set(states.loc[states.Sperre.isna() & states.Entwurf.isna() & ~states.Status.str.contains('Prüfung', na=False), 'Auszahlung'])
     bad = set(master.loc[master['Prüfhinweis'].astype(bool), 'Auszahlung Nr.'])
     business = position_workflow.positions(master, states)
-    return business[business['Auszahlung Nr.'].isin(unlocked - bad) & (business['Erlös_Brutto'] > 0) & (business.Art == 'Bestellung') & ~business['closed_at'].astype(bool) & ~business.Quellenpruefung.astype(bool)].copy()
+    return business[business['Auszahlung Nr.'].isin(unlocked - bad) & (business['Erlös_Brutto'] > 0) & (business.Art == 'Bestellung') & ~business['closed_at'].astype(bool) & ~business.Quellenpruefung.astype(bool) & ~api_holds.mask(business)].copy()
 
 
 def partner_rows(business):

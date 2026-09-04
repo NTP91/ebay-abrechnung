@@ -65,6 +65,9 @@ def load_snapshot(data_dir):
 
 
 def save_snapshot(data_dir, snapshot):
+    # Persist restrictive evidence before publishing the new UI cache.
+    import api_holds
+    api_holds.ingest(data_dir, snapshot)
     path = cache_path(data_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     with FileLock(str(path) + '.lock'):

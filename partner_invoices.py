@@ -8,6 +8,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 import core
+import api_holds
 import invoice_parser
 import position_workflow as workflow
 from partner_export import prepare_partner_export
@@ -136,7 +137,7 @@ def upload(partner, filename, content, scope='Rechnung'):
         business=workflow.positions()
         if business.empty: raise ValueError('Keine abrechenbaren Partnerpositionen vorhanden.')
         art='Erstattung' if scope=='Gutschriften' else 'Bestellung'
-        rows=business[(business.Partner==partner)&(business.Art==art)&~business.closed_at.astype(bool)&~business.paid_at.astype(bool)&~business['Prüfhinweis'].astype(bool)&~business.Quellenpruefung.astype(bool)]
+        rows=business[(business.Partner==partner)&(business.Art==art)&~business.closed_at.astype(bool)&~business.paid_at.astype(bool)&~business['Prüfhinweis'].astype(bool)&~business.Quellenpruefung.astype(bool)&~api_holds.mask(business)]
         if rows.empty: raise ValueError('Keine offenen abrechenbaren Positionen für diesen Partner.')
         expected=expected_statement(rows)
         extracted=invoice_parser.extract(content,filename)

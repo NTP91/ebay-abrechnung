@@ -4,6 +4,7 @@ import json
 from datetime import date, datetime, timezone
 import pandas as pd
 import core
+import api_holds
 
 FIELDS = ('reviewed_at', 'paid_at', 'received_at', 'closed_at')
 
@@ -24,6 +25,7 @@ def positions(master=None, states=None):
         return master.copy()
     with core.ledger() as db:
         saved = {r['position_key']: dict(r) for r in db.execute('SELECT * FROM position_workflow')}
+        snapshots = {r['id']: json.loads(r['snapshot']) for r in db.execute('SELECT id,snapshot FROM payouts WHERE snapshot IS NOT NULL AND snapshot != ""')}
     transport = {r.Auszahlung: r for r in states.itertuples()}
     result = master.copy()
     result['position_key'] = result.apply(position_key, axis=1)
@@ -35,10 +37,19 @@ def positions(master=None, states=None):
         record = {field: stored.get(field) or '' for field in FIELDS}
         state = transport.get(row['Auszahlung Nr.'])
         transferred = bool(state is not None and state.Entwurf and row.Gruppe == 'Gruppe B' and row.Art == 'Bestellung' and row['Erlös_Brutto'] > 0)
+        if transferred and row['Auszahlung Nr.'] in snapshots:
+            description = f"eBay-Bestellnummer: {row['Bestellnummer']}\nSKU: {row.SKU}"
+            transferred = any(item.get('description') == description for item in snapshots[row['Auszahlung Nr.']].get('lineItems', []))
         source_changed = bool(stored.get('source') and stored['source'] != source_snapshot(row))
-        valid = not row['Prüfhinweis'] and not source_changed and row.Gruppe in ('Gruppe A','Gruppe B')
+        held = bool(row.get('API_Hold', False))
+        correction = held and (transferred or any(record.values()) or row['Auszahlung Nr.'] in snapshots or bool(state is not None and state.Sperre))
+        valid = not row['Prüfhinweis'] and not source_changed and not held and row.Gruppe in ('Gruppe A','Gruppe B')
         if record['closed_at']:
             status = 'abgeschlossen'
+        elif correction:
+            status = 'Geschützter Korrekturfall · nachträglicher API-Hold'
+        elif held:
+            status = 'einbehalten · API-Nachweis'
         elif not valid:
             status = 'Prüfung erforderlich'
         elif record['paid_at'] or record['received_at']:
@@ -50,6 +61,7 @@ def positions(master=None, states=None):
         else:
             status = 'abrechnungsbereit' if row.Art == 'Bestellung' else 'Erstattung zu klären'
         record.update(Bearbeitungsstatus=status, Lexware_uebertragen=transferred,
+                      API_Korrekturfall='Geschützter Korrekturfall · nachträglicher Hold' if correction else '',
                       Partnerrechnung='geprüft' if record['reviewed_at'] else 'noch nicht geprüft',
                       Partnerzahlung='bezahlt' if record['paid_at'] else 'offen',
                       Evelyn_Zahlung=('erhalten' if record['received_at'] else 'offen') if row.Gruppe == 'Gruppe B' else 'nicht zutreffend',
@@ -71,6 +83,8 @@ def payout_status(positions):
             status = 'abgeschlossen'
         elif relevant['Prüfhinweis'].astype(bool).any() or relevant['Quellenpruefung'].astype(bool).any():
             status = 'Prüfung erforderlich'
+        elif api_holds.mask(relevant).any():
+            status = 'einbehalten' if api_holds.mask(relevant).all() else 'teilweise einbehalten'
         elif relevant['closed_at'].astype(bool).any() or relevant.Lexware_uebertragen.any() or relevant[list(FIELDS)].astype(bool).any().any():
             status = 'teilweise in Bearbeitung'
         else:
@@ -104,6 +118,8 @@ def confirm(keys, action, event_date, expected_sources=None, invoice_id=None, ac
                 import partner_invoices
                 partner_invoices.authorize_review(db,invoice_id,chosen,actor,override_reason,override_confirmed)
             for _, row in chosen.iterrows():
+                if row.get('API_Hold', False):
+                    raise ValueError('API-Einbehalt: Position gesperrt; bestehende Bestätigungen bleiben erhalten.')
                 if row['Prüfhinweis'] or row.Quellenpruefung or row.Gruppe not in ('Gruppe A','Gruppe B') or row.Art=='Gebühr':
                     raise ValueError('Ungeklärte Positionen können nicht bestätigt werden.')
                 old = db.execute('SELECT * FROM position_workflow WHERE position_key=?', (row.position_key,)).fetchone()

@@ -39,7 +39,9 @@ class HistoricalWithoutSkuTests(unittest.TestCase):
     def test_valid_sku_and_unrelated_payout_issue_remain_visible(self):
         valid=payout(transaction='valid',order='valid',sku='BA / 1')
         unknown=payout('p2',transaction='',order='',sku='',title='')
-        unknown['Typ']='Auszahlung'
+        # Bank payout totals are control rows now; a real unmatched refund must remain an issue.
+        unknown['Typ']='Rückerstattung'
+        unknown['Betrag abzügl. Kosten']='-119,00'
         core.import_reports([valid],core.ORDERS_DB_PATH,'orders')
         core.import_reports([valid,unknown],core.PAYOUTS_DB_PATH,'payout')
         master=core.load_master_data()

@@ -88,7 +88,7 @@ class TransportTests(unittest.TestCase):
 
 
 def snapshot(**data):
-    return {'version': 1, 'fetched_at': '2026-09-04T10:00:00+00:00', 'resources': {key: {'available': True, 'data': val} for key, val in data.items()}}
+    return {'version': 1, 'account': 'ebay_durchstart', 'fetched_at': '2026-09-04T10:00:00+00:00', 'resources': {key: {'available': True, 'data': val} for key, val in data.items()}}
 
 
 class AuditTests(unittest.TestCase):

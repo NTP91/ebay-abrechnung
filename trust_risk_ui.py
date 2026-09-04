@@ -21,17 +21,17 @@ def render(data_dir, catalogue, orders, raw):
     with st.container(border=True):
         left, right = st.columns([1, 2])
         refresh = left.button('eBay-Daten aktualisieren', type='primary', disabled=not configured, key='ebay-risk-refresh', use_container_width=True)
-        right.caption('Abruf nur auf Anforderung. Keine eBay-Schreibaktionen, Nachrichten oder Lexware-Aufrufe. Bestehende Freigaben und Sperren bleiben maßgeblich.')
+        right.caption('Abruf nur auf Anforderung. API-Holds sperren betroffene Bestellpositionen; bestehende Rechnungen und Bestätigungen bleiben erhalten. Keine eBay-Schreibaktionen oder Lexware-Aufrufe.')
     if refresh:
         if 'ebay_readonly_client' not in st.session_state:
             st.session_state.ebay_readonly_client = Client()
         bar = st.progress(0, text='eBay-Verbindung prüfen')
-        payout_orders = raw.loc[raw['Auszahlung Nr.'] == risk.PAYOUT, 'Bestellnummer'].unique() if not raw.empty else []
+        payout_orders = raw.loc[raw['Auszahlung Nr.'] != '', 'Bestellnummer'].unique() if not raw.empty else []
         try:
             snapshot = risk.collect(st.session_state.ebay_readonly_client, payout_orders,
                                     lambda value, name: bar.progress(value, text='eBay-Daten werden gelesen · ' + name))
             risk.save_snapshot(data_dir, snapshot)
-            st.success('Abruf gespeichert. Verfügbarkeit der einzelnen Bereiche siehe unten.')
+            st.rerun()
         except (EbayError, OSError):
             st.error('API-Datenstand konnte nicht gespeichert werden. Bitte den Datenzugriff prüfen.')
         finally:

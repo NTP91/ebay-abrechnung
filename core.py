@@ -277,6 +277,8 @@ def load_master_data():
     for index, row in payouts.iterrows():
         if index in child_indices:
             continue  # Article identities remain in the raw store, not financial rows.
+        if row['Typ'].strip().casefold() == 'auszahlung':
+            continue  # Bank control total remains in raw history, never a partner refund.
         if row['Typ'].strip().casefold() == 'einbehalten':
             continue  # Retain raw references; a hold is neither a sale nor a credit.
         amount = float(parse_money(row['Betrag abzügl. Kosten']))
@@ -322,7 +324,8 @@ def load_master_data():
             'Art': 'Gebühr' if fee else 'Erstattung' if amount < 0 else 'Bestellung',
             'Prüfhinweis': issue, 'Status': 'Prüfung erforderlich' if issue else 'vollständig zugeordnet',
         })
-    return pd.DataFrame(processed)
+    import api_holds
+    return api_holds.annotate(pd.DataFrame(processed), Path(PAYOUTS_DB_PATH).parent)
 
 
 def invoice_payout_remark(payout_ids):
@@ -343,7 +346,8 @@ def build_invoice_payload(master, payout_id, contact_id, money_received=False):
     related = payout[payout['Art'] != 'Gebühr']
     if not (related['Titelquelle'] == 'Bestellbericht').all():
         raise ValueError('Zuordnung fehlt: verbindlicher Bestellbericht-Titel fehlt.')
-    sales = payout[(payout['Gruppe'] == 'Gruppe B') & (payout['Art'] == 'Bestellung') & (payout['Erlös_Brutto'] > 0)]
+    import api_holds
+    sales = payout[(payout['Gruppe'] == 'Gruppe B') & (payout['Art'] == 'Bestellung') & (payout['Erlös_Brutto'] > 0) & ~api_holds.mask(payout)]
     if sales.empty:
         raise ValueError('Keine Gruppe-B-Bestellungen für diesen Payout.')
     now = datetime.now(timezone.utc).isoformat(timespec='milliseconds')
@@ -604,6 +608,9 @@ def backup_data():
                 manual_guard = Path(PAYOUTS_DB_PATH).with_name('Settlement_Payout_Reconciliation.json')
                 if manual_guard.exists():
                     archive.write(manual_guard, manual_guard.name)
+                api_guard = Path(PAYOUTS_DB_PATH).with_name('Settlement_API_Holds.json')
+                if api_guard.exists():
+                    archive.write(api_guard, api_guard.name)
                 incoming_dir = Path(PAYOUTS_DB_PATH).parent/'Partner_Invoices'
                 if incoming_dir.exists():
                     for incoming_file in incoming_dir.iterdir():
