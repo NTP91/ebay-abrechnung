@@ -348,6 +348,20 @@ def build_invoice_payload(master, payout_id, contact_id, money_received=False):
         raise ValueError('Zuordnung fehlt: verbindlicher Bestellbericht-Titel fehlt.')
     import api_holds
     sales = payout[(payout['Gruppe'] == 'Gruppe B') & (payout['Art'] == 'Bestellung') & (payout['Erlös_Brutto'] > 0) & ~api_holds.mask(payout)]
+    # Match the UI's completion/source gates without opening a nested write transaction.
+    import position_workflow
+    from contextlib import closing
+    database = Path(PAYOUTS_DB_PATH).with_name('Settlement_State.sqlite3')
+    if database.exists():
+        with closing(sqlite3.connect(database.resolve().as_uri()+'?mode=ro', uri=True)) as db:
+            db.row_factory = sqlite3.Row
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='position_workflow'").fetchone():
+                saved = {row['position_key']: dict(row) for row in db.execute('SELECT position_key,closed_at,source FROM position_workflow')}
+                allowed = []
+                for _, sale in sales.iterrows():
+                    previous = saved.get(position_workflow.position_key(sale), {})
+                    allowed.append(not previous.get('closed_at') and (not previous.get('source') or previous['source'] == position_workflow.source_snapshot(sale)))
+                sales = sales.loc[allowed]
     if sales.empty:
         raise ValueError('Keine Gruppe-B-Bestellungen für diesen Payout.')
     now = datetime.now(timezone.utc).isoformat(timespec='milliseconds')

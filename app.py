@@ -89,7 +89,13 @@ def partner_panel(rows, rate, prefix):
             st.caption(f"Kumulative Sammelabrechnung aus {len(payout_ids)} Payout{'s' if len(payout_ids)!=1 else ''} · {status}. Payoutnummern bleiben in Export und Historie nachvollziehbar.")
             download_col,action_col,_=st.columns([1.3,1.5,2])
             with download_col:
-                download('Einzelabrechnung herunterladen', partner_block, prefix+'_'+partner)
+                statement_block=partner_block[~partner_block.reviewed_at.astype(bool)]
+                if statement_block.empty:
+                    st.caption('Alle Positionen bereits auf freigegebenen Partnerbelegen. Originalbelege unten verfügbar.')
+                else:
+                    download('Einzelabrechnung herunterladen', statement_block, prefix+'_'+partner)
+                    if len(statement_block)!=len(partner_block):
+                        st.caption('Download enthält nur die noch nicht auf freigegebenen Partnerbelegen enthaltenen Positionen.')
             with action_col:
                 workflow_panel(partner_block,prefix+'_'+partner,action_only=True)
             invoice_panel(partner_block,prefix+'_'+partner)
@@ -162,8 +168,12 @@ def confirm_dialog(rows, action, label):
     st.write(f"**{label}** · {len(rows)} Positionen")
     st.write('Partner: '+', '.join(sorted(rows.Partner.unique())))
     st.write('Payouts: '+', '.join(sorted(rows['Auszahlung Nr.'].unique())))
-    model=prepare_partner_export(rows,statement_type='group_b_evelyn' if action=='evelyn_received' else 'partner')
-    st.write('Abrechnungsbetrag brutto: '+euros(sum(t['gross'] for t in model['totals'].values())))
+    if action in ('partner_paid','refund_settled'):
+        total=partner_invoices.confirmed_payment_total(rows)
+    else:
+        model=prepare_partner_export(rows,statement_type='group_b_evelyn' if action=='evelyn_received' else 'partner')
+        total=sum(t['gross'] for t in model['totals'].values())
+    st.write('Abrechnungsbetrag brutto: '+euros(total))
     st.caption('Datum: '+date.today().strftime('%d.%m.%Y')+'. Nur den tatsächlich geprüften bzw. bezahlten Vorgang bestätigen.')
     st.dataframe(rows[['Bestellnummer','SKU','Angebotstitel','Erlös_Brutto']], hide_index=True)
     if st.button('Verbindlich bestätigen', type='primary'):
@@ -543,7 +553,7 @@ with pending:
                 with st.container(border=True):
                     st.subheader(partner or 'Ohne Partnerzuordnung')
                     st.dataframe(block[['Bestellnummer','SKU','Angebotstitel','Erlös_Brutto','Auszahlung Nr.']].rename(columns={'Angebotstitel':'Produkttitel','Erlös_Brutto':'Payoutbetrag'}),hide_index=True,use_container_width=True)
-                    download('Gutschriftenübersicht herunterladen',block,'Gutschriften_'+partner)
+                    download('Gutschriftenübersicht herunterladen',block[~block.reviewed_at.astype(bool)],'Gutschriften_'+partner)
                     workflow_panel(business[(business.Partner==partner) & (business.Art=='Erstattung')],'refund-'+partner,'refund')
                     if partner and block.Gruppe.isin(['Gruppe A','Gruppe B']).all():
                         invoice_panel(block,'refund-invoice-'+partner,'Gutschriften')

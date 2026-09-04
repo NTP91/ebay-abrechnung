@@ -60,6 +60,13 @@ def partner_summary(rows):
         return pd.DataFrame(records)
     for partner, block in rows.groupby('Partner'):
         totals = prepare_partner_export(block)['totals']['Rechnung']
+        if 'reviewed_at' in block and block.reviewed_at.astype(bool).any():
+            import partner_invoices
+            reviewed = block[block.reviewed_at.astype(bool)]
+            pending = block[~block.reviewed_at.astype(bool)]
+            totals['gross'] = partner_invoices.confirmed_payment_total(reviewed)
+            if not pending.empty:
+                totals['gross'] += prepare_partner_export(pending)['totals']['Rechnung']['gross']
         records.append({'Partner': partner, 'Positionen': len(block), 'eBay-Brutto': float(totals['ebay']),
                         'Rabatt netto': float(totals['discount']), 'Rechnungsbetrag': float(totals['gross'])})
     return pd.DataFrame(records)

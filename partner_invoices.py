@@ -138,6 +138,7 @@ def upload(partner, filename, content, scope='Rechnung'):
         if business.empty: raise ValueError('Keine abrechenbaren Partnerpositionen vorhanden.')
         art='Erstattung' if scope=='Gutschriften' else 'Bestellung'
         rows=business[(business.Partner==partner)&(business.Art==art)&~business.closed_at.astype(bool)&~business.paid_at.astype(bool)&~business['Prüfhinweis'].astype(bool)&~business.Quellenpruefung.astype(bool)&~api_holds.mask(business)]
+        rows=rows[~rows.reviewed_at.astype(bool)]
         if rows.empty: raise ValueError('Keine offenen abrechenbaren Positionen für diesen Partner.')
         expected=expected_statement(rows)
         extracted=invoice_parser.extract(content,filename)
@@ -201,3 +202,19 @@ def approve(invoice_id, actor, reason='', override_confirmed=False):
     workflow.confirm([r['key'] for r in record['expected']['items']],'review',date.today(),
                      expected_sources={r['key']:r['source'] for r in record['expected']['items']},
                      invoice_id=invoice_id,actor=actor,override_reason=reason,override_confirmed=override_confirmed)
+
+
+def confirmed_payment_total(rows):
+    """Pay the allocated invoice amounts, not a newly rounded combined statement."""
+    keys=set(rows.position_key)
+    amounts={}
+    for record in list_invoices():
+        if record['approved_at']:
+            for item in record['expected']['items']:
+                if item['key'] in keys:
+                    if item['key'] in amounts:
+                        raise ValueError('Mehrdeutiger Rechnungsbezug; Zahlung gesperrt.')
+                    amounts[item['key']]=Decimal(item['gross'])
+    if set(amounts)!=keys:
+        raise ValueError('Freigegebener Rechnungsbezug fehlt; Zahlung gesperrt.')
+    return sum(amounts.values(),Decimal(0))
