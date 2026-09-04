@@ -6,6 +6,7 @@ import studio_view
 import position_workflow
 import draft_correction
 import partner_invoices
+import payout_reconciliation
 from datetime import date
 from partner_export import export_partner_excel, prepare_partner_export
 
@@ -328,6 +329,55 @@ with invoice_entry.container():
 
 if st.session_state.pop('draft_created',False):
     st.success('Lexware-Entwurf erstellt. Die enthaltenen Positionen sind jetzt dauerhaft gesperrt.')
+
+with st.expander('Payout-Abgleich · Bankbetrag und einzelne Positionen'):
+    payout_ids=sorted(set(raw['Auszahlung Nr.'])-{''},reverse=True)
+    if not payout_ids:
+        st.info('Noch keine Payouts vorhanden.')
+    else:
+        manual_pid=st.selectbox('Payout für Bankabgleich',payout_ids,key='manual-payout')
+        try:
+            check=payout_reconciliation.inspect(manual_pid,raw)
+            locked=payout_reconciliation.protected(manual_pid,check['financial'])
+            st.caption('Freigegeben bedeutet: diese Bewegung wird im Bankabgleich berücksichtigt. Negative Einbehalte/Gebühren werden mit ihrem Vorzeichen berücksichtigt und bleiben außerhalb der Partnerrechnung. Child-Zeilen werden nicht zusätzlich summiert.')
+            if locked: st.info(locked)
+            st.caption('Ohne gespeicherten manuellen Abgleich bleibt der bisherige Ablauf bestehen. Nach Aktivierung sind nur freigegebene Positionen eines vollständig abgestimmten Payouts abrechnungsfähig; bestehende Zuordnungsprüfungen gelten weiterhin.')
+            revision=f"manual-{manual_pid}-{check['version']}-{check['source_digest']}"
+            bank=st.text_input('Tatsächlicher Bank-/Auszahlungsbetrag in Euro',value=str(check['bank']).replace('.',',') if check['bank'] is not None else '',key=revision+'-bank',disabled=bool(locked))
+            financial=check['financial']
+            editor=financial[['abgleich_key','Typ','Bestellnummer','Transaktionsnummer','SKU','Angebotstitel','Betrag abzügl. Kosten','Abgleichstatus','Quelle_geaendert']].copy()
+            edited=st.data_editor(editor,hide_index=True,use_container_width=True,key=revision+'-rows',
+                disabled=True if locked else [c for c in editor.columns if c!='Abgleichstatus'],
+                column_config={'abgleich_key':None,'Abgleichstatus':st.column_config.SelectboxColumn('Status',options=list(payout_reconciliation.STATUSES),required=True)})
+            preview=sum((core.parse_money(r['Betrag abzügl. Kosten']) for _,r in edited.iterrows() if r.Abgleichstatus=='freigegeben'),core.Decimal(0))
+            col1,col2=st.columns(2)
+            col1.metric('Berücksichtigte Bewegungen',euros(preview))
+            if bank:
+                try: col2.metric('Differenz zum Bankbetrag',euros(preview-core.parse_money(bank)))
+                except ValueError: st.warning('Bankbetrag bitte als gültigen Eurobetrag eingeben.')
+            st.write('Gespeicherter Abgleich: **'+check['status']+'**')
+            st.caption(f"{sum(financial.Abgleichstatus=='freigegeben')} freigegebene Bewegungen · {sum(financial.Abgleichstatus=='einbehalten')} einbehalten · {check['unknown']} unklar. Differenz = berücksichtigte Bewegungen minus Bankbetrag.")
+            if not check['children'].empty:
+                st.caption('Zugehörige Artikelreferenzen: Status folgt der Parent-Zeile; keine eigene Finanzbuchung.')
+                st.dataframe(check['children'][['Bestellnummer','Transaktionsnummer','SKU','Angebotstitel','Zwischensumme Artikel']],hide_index=True,use_container_width=True)
+            actor=st.text_input('Prüfende Person',key=revision+'-actor',disabled=bool(locked))
+            note=st.text_input('Beleg / Begründung des Abgleichs',key=revision+'-note',disabled=bool(locked))
+            if st.button('Payout-Abgleich speichern',type='primary',disabled=bool(locked) or not bank or not actor.strip() or not note.strip(),key=revision+'-save'):
+                try:
+                    payout_reconciliation.save(manual_pid,bank,dict(zip(edited.abgleich_key,edited.Abgleichstatus)),actor,note,check['version'],check['source_digest'])
+                    st.rerun()
+                except ValueError as exc: st.error(str(exc))
+            document=payout_reconciliation.load()
+            events=[e for e in document['audit'] if e['payout']==manual_pid]
+            if events:
+                with st.expander('Bisherige manuelle Abgleiche'):
+                    for event in reversed(events):
+                        saved=event['after']
+                        stamp=studio_view.local_datetime(core.pd.Series([saved['at']])).iloc[0]
+                        st.write(f"{stamp} · {saved['actor']} · Bankbetrag {euros(core.parse_money(saved['bank']))}")
+                        st.caption(saved['note'])
+        except ValueError as exc:
+            st.error(str(exc))
 
 home, group_a, group_b, pending, history, dashboard = st.tabs(['Übersicht','Gruppe A','Gruppe B','Offene Positionen','Historie','Dashboard'])
 with home:

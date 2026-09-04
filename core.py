@@ -270,6 +270,8 @@ def load_master_data():
     payouts = payouts[payouts['Auszahlung Nr.'] != '']
     from payout_structure import validate
     child_indices = validate(payouts)
+    import payout_reconciliation
+    manual_gates = payout_reconciliation.gates(payouts)
     orders = read_master(ORDERS_DB_PATH)
     processed = []
     for index, row in payouts.iterrows():
@@ -306,6 +308,8 @@ def load_master_data():
             partner, sku, title = '', '', title or 'Sonstige eBay-Gebühr'
         group = ('Gebühren' if fee else 'Ohne Zuordnung' if issue else
                  'Gruppe A' if partner.startswith(('PP', 'BA', 'MK', '001')) else 'Gruppe B')
+        manual_issue = manual_gates.get(payout_reconciliation.key(row), '')
+        issue = '; '.join(filter(None, [issue, manual_issue]))
         processed.append({
             'Datum': row['Datum'], 'Auszahlung Nr.': row['Auszahlung Nr.'],
             'Transaktionsnummer': row['Transaktionsnummer'], 'Artikelnummer': row['Artikelnummer'],
@@ -597,6 +601,9 @@ def backup_data():
                 archive.write(correction_guard, correction_guard.name)
                 incoming_guard = Path(PAYOUTS_DB_PATH).with_name('Settlement_Partner_Invoices.json')
                 archive.write(incoming_guard, incoming_guard.name)
+                manual_guard = Path(PAYOUTS_DB_PATH).with_name('Settlement_Payout_Reconciliation.json')
+                if manual_guard.exists():
+                    archive.write(manual_guard, manual_guard.name)
                 incoming_dir = Path(PAYOUTS_DB_PATH).parent/'Partner_Invoices'
                 if incoming_dir.exists():
                     for incoming_file in incoming_dir.iterdir():
