@@ -7,6 +7,7 @@ import position_workflow
 import draft_correction
 import partner_invoices
 import payout_reconciliation
+import trust_risk_ui
 from datetime import date
 from partner_export import export_partner_excel, prepare_partner_export
 
@@ -379,7 +380,7 @@ with st.expander('Payout-Abgleich · Bankbetrag und einzelne Positionen'):
         except ValueError as exc:
             st.error(str(exc))
 
-home, group_a, group_b, pending, history, dashboard = st.tabs(['Übersicht','Gruppe A','Gruppe B','Offene Positionen','Historie','Dashboard'])
+home, group_a, group_b, pending, history, dashboard, trust_risk_tab = st.tabs(['Übersicht','Gruppe A','Gruppe B','Offene Positionen','Historie','Dashboard','Trust / Risk'])
 with home:
     total=len(catalogue)
     assigned=int(catalogue.payout.sum())
@@ -609,6 +610,9 @@ with dashboard:
         st.caption('Provisionen auf der bestehenden Netto-Abrechnungsbasis. Patrick: nur Gruppe B, Differenz zwischen 3,5 % Partnerrabatt und 0,5 % Evelyn-Provision; Cent-Rundung wie in den Abrechnungen. Keine Aussage über bereits bezahlte Provisionen.')
     except ValueError as exc:
         st.warning('Kennzahlen benötigen eindeutige Quelldaten: '+str(exc))
+
+with trust_risk_tab:
+    trust_risk_ui.render(Path(core.PAYOUTS_DB_PATH).parent, catalogue, core.read_master(core.ORDERS_DB_PATH), raw)
 
 if st.session_state.get('discard_request'):
     discard_dialog(st.session_state['discard_request'])
