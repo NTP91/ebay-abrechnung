@@ -2,6 +2,11 @@
 
 Stand: 04.09.2026. Ausschließlich Branch `codex/recover-payout-settlement`.
 
+Aktualisierung: OAuth und digitale Signaturen wurden inzwischen live eingerichtet
+und geprüft. Der Payoutbetrag 491,80 EUR wurde vollständig rekonstruiert; siehe
+[Signatur- und Live-Prüfung](EBAY_DIGITAL_SIGNATURE.md). Die Aussagen zu fehlenden
+Secrets weiter unten dokumentieren den ursprünglichen Implementierungsstand.
+
 ## Bedienung
 
 Neuer Tab **Trust / Risk**, zusätzlich zu allen bestehenden Bereichen. Der Button

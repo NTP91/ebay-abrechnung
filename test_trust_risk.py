@@ -19,7 +19,10 @@ def response(data, status=200):
 
 
 def config():
-    return dict(client_id='fake-client', client_secret='fake-secret', ru_name='fake-ru', refresh_token='fake-refresh')
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    key = Ed25519PrivateKey.generate().private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()).decode()
+    return dict(client_id='fake-client', client_secret='fake-secret', ru_name='fake-ru', refresh_token='fake-refresh', signing_private_key=key, signing_jwe='a.b.c.d.e', signing_expiration=9999999999)
 
 
 class TransportTests(unittest.TestCase):
@@ -160,6 +163,20 @@ class AuditTests(unittest.TestCase):
         data['resources']['reference_transactions']['data']['items'][0]['amount']['currency'] = 'USD'
         self.assertFalse(risk.finance_check(data)['reconstructed'])
         self.assertFalse(risk.finance_check(None)['reconstructed'])
+
+    def test_booked_hold_can_have_payout_status_and_count_must_match(self):
+        data = self.financial(amount='591.80')
+        data['resources']['reference_payout']['data']['transactionCount'] = 2
+        data['resources']['reference_transactions']['data']['items'].append({
+            'transactionId': 'RETRO_HOLD-1', 'transactionType': 'DISPUTE', 'transactionStatus': 'PAYOUT',
+            'bookingEntry': 'DEBIT', 'payoutId': risk.PAYOUT, 'orderId': 'order1',
+            'amount': {'value': '100.00', 'currency': 'EUR'}})
+        report = risk.finance_check(data)
+        self.assertTrue(report['reconstructed'])
+        self.assertEqual(len(report['booked_hold_movements']), 1)
+        self.assertEqual(report['order_holds'], [])
+        data['resources']['reference_payout']['data']['transactionCount'] = 3
+        self.assertFalse(risk.finance_check(data)['reconstructed'])
 
     def test_ui_cached_audit_and_missing_secrets_never_call_network(self):
         from streamlit.testing.v1 import AppTest

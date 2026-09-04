@@ -126,9 +126,10 @@ def render(data_dir, catalogue, orders, raw):
             for issue in check['issues']:
                 st.write('• ' + issue)
         st.caption(check['note'])
-        st.write(f"{len(check['order_holds'])} Hold-Transaktionen mit Bezug zu den importierten Bestellungen erkannt. Bestellbezogene Abfragen: {'vollständig' if check['hold_coverage_complete'] else 'nicht vollständig verfügbar'}.")
+        st.write(f"{len(check['order_holds'])} Transaktionen mit Status FUNDS_ON_HOLD. Zusätzlich {len(check['booked_hold_movements'])} gebuchte Einbehalts-Abbuchungen im Payout erkannt. Bestellbezogene Abfragen: {'vollständig' if check['hold_coverage_complete'] else 'nicht vollständig verfügbar'}.")
+        st.caption('Auch Einbehalts-Abbuchungen können den Status PAYOUT tragen. PAYOUT allein bedeutet keine Freigabe einer Bestellung; diese Auswertung ändert keine Abrechnung.')
         with st.expander('Transaktionen, Hold- und Release-Felder'):
-            st.json({'Payoutbewegungen': check['transactions'], 'Bestellbezogene Holds': check['order_holds']})
+            st.json({'Payoutbewegungen': check['transactions'], 'Bestellbezogene Holds': check['order_holds'], 'Gebuchte Einbehalte': check['booked_hold_movements']})
         report = {'fetched_at': snapshot['fetched_at'], 'payout': risk.PAYOUT, **check,
                   'availability': {k: v.get('error', 'verfügbar') for k, v in snapshot['resources'].items()}}
         st.download_button('Prüfbericht herunterladen', json.dumps(report, ensure_ascii=False, indent=2), 'Payout_7718008497_API_Pruefung.json', 'application/json', key='ebay-risk-report')

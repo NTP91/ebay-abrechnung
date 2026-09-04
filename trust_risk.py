@@ -227,6 +227,9 @@ def finance_check(snapshot):
     if data is None:
         issues.append('Payout-Transaktionen nicht vollständig verfügbar.')
     payout_amount = money((payout or {}).get('amount'))
+    expected_count = (payout or {}).get('transactionCount')
+    if expected_count is not None and expected_count != len((data or {}).get('items', [])):
+        issues.append('Transaktionsanzahl stimmt nicht mit dem Payout-Detail ueberein.')
     if payout_amount != BANK:
         issues.append('API-Payoutbetrag bestätigt 491,80 € nicht.')
     for tx in (data or {}).get('items', []):
@@ -256,8 +259,14 @@ def finance_check(snapshot):
         if val.get('available'):
             holds.extend(tx for tx in val['data'].get('items', []) if tx.get('transactionStatus') == 'FUNDS_ON_HOLD')
     unique_holds = {(tx.get('transactionId'), tx.get('transactionType')): tx for tx in holds}
+    # Observed eBay hold bookkeeping is also PAYOUT. These are historical debit
+    # movements, not a new current-state classification or settlement permission.
+    booked_holds = [tx for tx in rows if tx.get('transactionType') == 'DISPUTE'
+                    and tx.get('bookingEntry') == 'DEBIT'
+                    and str(tx.get('transactionId', '')).startswith(('RETRO_HOLD-', 'DISPUTE_HOLD-'))]
     return {'reference': str(BANK), 'api_amount': str(payout_amount) if payout_amount is not None else None,
             'final_sum': str(total), 'difference': str(total - BANK), 'reconstructed': not issues,
             'issues': sorted(set(issues)), 'transactions': rows, 'order_holds': list(unique_holds.values()),
+            'booked_hold_movements': booked_holds,
             'hold_coverage_complete': bool(order_resources) and all(v.get('available') for v in order_resources.values()),
             'note': 'Aktueller API-Status ist kein rückwirkender Nachweis zum Auszahlungsdatum. Bestellbezogene Holds ohne Payout-ID beweisen keine Zugehörigkeit zu diesem Bank-Payout. Keine automatische Abrechnungsfreigabe.'}

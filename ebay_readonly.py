@@ -3,6 +3,7 @@ import time
 from urllib.parse import quote
 
 import requests
+from ebay_signature import signing_headers
 
 
 class EbayError(Exception):
@@ -16,7 +17,7 @@ def secrets_config():
         required = ('client_id', 'client_secret', 'ru_name', 'refresh_token')
         if not all(isinstance(values.get(k), str) and values[k].strip() for k in required):
             raise ValueError()
-        return {k: values[k] for k in required}
+        return {k: values[k] for k in required + ('signing_private_key', 'signing_jwe', 'signing_expiration') if k in values}
     except Exception:
         raise EbayError('Zugangsdaten nicht verfügbar: Streamlit-Abschnitt ebay_durchstart mit client_id, client_secret, ru_name und refresh_token erforderlich.') from None
 
@@ -77,7 +78,7 @@ class Client:
 
     def _refresh(self):
         cfg = self._provider()
-        self._sensitive = list(cfg.values())
+        self._sensitive = [v for v in cfg.values() if isinstance(v, str)]
         response = self._request('POST', 'https://api.ebay.com/identity/v1/oauth2/token',
                                  auth=(cfg['client_id'], cfg['client_secret']),
                                  data={'grant_type': 'refresh_token', 'refresh_token': cfg['refresh_token']})
@@ -96,7 +97,7 @@ class Client:
     def redact(self, value):
         if isinstance(value, dict):
             return {k: self.redact(v) for k, v in value.items()
-                    if not any(word in k.casefold() for word in ('token', 'secret', 'authorization', 'password', 'client_id', 'ru_name'))}
+                    if not any(word in k.casefold() for word in ('token', 'secret', 'authorization', 'password', 'client_id', 'ru_name', 'privatekey', 'private_key', 'signing_jwe'))}
         if isinstance(value, list):
             return [self.redact(v) for v in value]
         if isinstance(value, str):
@@ -119,9 +120,15 @@ class Client:
             if not self._token or self._clock() >= self._expires:
                 self._refresh()
             prefix = 'IAF ' if endpoint == 'returns' else 'Bearer '
-            response = self._request('GET', host + path, params=params or {}, headers={
+            headers = {
                 'Authorization': prefix + self._token, 'Accept': 'application/json',
-                'X-EBAY-C-MARKETPLACE-ID': 'EBAY_DE'})
+                'X-EBAY-C-MARKETPLACE-ID': 'EBAY_DE'}
+            if path.startswith('/sell/finances/v1/'):
+                try:
+                    headers.update(signing_headers(host + path, self._provider(), self._clock()))
+                except ValueError as exc:
+                    raise EbayError(str(exc)) from None
+            response = self._request('GET', host + path, params=params or {}, headers=headers)
             if response.status_code == 401 and attempt == 0:
                 self._token = None
                 continue
