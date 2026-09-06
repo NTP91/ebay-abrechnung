@@ -6,7 +6,86 @@ import pandas as pd
 import streamlit as st
 
 import trust_risk as risk
+import audit_case_store
 from ebay_readonly import Client, EbayError, secrets_config
+
+
+CATEGORY_LABELS = {
+    'not_as_described': 'Nicht wie beschrieben', 'wrong_item': 'Falscher Artikel',
+    'defective': 'Defekt', 'used_instead_of_new': 'Gebraucht statt neu',
+    'opened_used': 'Geöffnet/benutzt', 'empty_consumed': 'Leer/verbraucht',
+    'incomplete_parts': 'Teile fehlen', 'wrong_variant': 'Falsche Variante',
+    'item_not_received': 'Nicht erhalten', 'other_complaint': 'Sonstige Beschwerde',
+}
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_audit_cases():
+    return audit_case_store.load()
+
+
+def _local_times(series):
+    values = pd.to_datetime(series, errors='coerce', utc=True)
+    return values.dt.tz_convert('Europe/Berlin').dt.strftime('%d.%m.%Y %H:%M').fillna('')
+
+
+def render_case_check():
+    st.subheader('Trust/Risk Check')
+    st.caption('Fallbasierte Supabase-Auswertung · jede Kombination aus Bestellung, Line-Item, SKU und Partner wird genau einmal gezählt.')
+    try:
+        data = load_audit_cases()
+    except Exception:
+        st.warning('Die Supabase-Prüfdaten sind derzeit nicht lesbar. Zugangsdaten und Verbindung prüfen.')
+        return
+    cases = pd.DataFrame(data['cases'])
+    if cases.empty:
+        st.info('Noch keine Trust/Risk-Fälle in Supabase vorhanden.')
+        return
+    filters = st.columns(2)
+    partners = sorted(cases.partner_id.dropna().unique())
+    selected_partners = filters[0].multiselect('Partner filtern', partners, key='audit-case-partners')
+    available_skus = sorted(cases.loc[cases.partner_id.isin(selected_partners), 'sku'].unique() if selected_partners else cases.sku.dropna().unique())
+    selected_skus = filters[1].multiselect('SKU filtern', available_skus, key='audit-case-skus')
+    visible = cases
+    if selected_partners:
+        visible = visible[visible.partner_id.isin(selected_partners)]
+    if selected_skus:
+        visible = visible[visible.sku.isin(selected_skus)]
+    st.caption(f'{len(visible)} von {len(cases)} Fällen angezeigt.')
+    table = pd.DataFrame({
+        'Bestellnummer': visible.order_id, 'Line-Item': visible.line_item_id,
+        'Partner': visible.partner_id, 'SKU': visible.sku, 'Artikel': visible.title,
+        'Status': visible.case_status.map({'offen': 'Offen', 'geschlossen': 'Geschlossen'}).fillna(visible.case_status),
+        'Rückgabe': visible.has_return.map({True: 'Ja', False: '—'}),
+        'Nachricht': visible.has_message.map({True: 'Ja', False: '—'}),
+        'Dispute': visible.has_dispute.map({True: 'Ja', False: '—'}),
+        'Hold': visible.has_hold.map({True: 'Ja', False: '—'}),
+        'Negative Bewertung': visible.has_negative_feedback.map({True: 'Ja', False: '—'}),
+        'Rückgabegrund': visible.return_reason_de, 'Käuferkommentar': visible.buyer_comment,
+        'Problemkategorien': visible.apply(lambda row: ', '.join(label for key, label in CATEGORY_LABELS.items() if bool(row.get(key))) or '—', axis=1),
+        'Erstes Ereignis': _local_times(visible.first_event_at),
+        'Letzter Kontakt': _local_times(visible.last_contact_at),
+    })
+    st.dataframe(table, hide_index=True, use_container_width=True, height=520)
+
+    st.subheader('Probleme nach Partner')
+    partner_rows = pd.DataFrame(data['partners'])
+    if not partner_rows.empty:
+        partner_rows = partner_rows.rename(columns={
+            'partner_id': 'Partner', 'problem_cases': 'Fälle', 'returns': 'Rückgaben',
+            'messages': 'Nachrichten', 'disputes': 'Disputes', 'holds': 'Holds',
+            'negative_feedback': 'Negative Bewertungen', **CATEGORY_LABELS,
+        })
+        st.dataframe(partner_rows, hide_index=True, use_container_width=True)
+
+    st.subheader('Auffällige SKUs')
+    sku_rows = pd.DataFrame(data['skus'])
+    if sku_rows.empty:
+        st.info('Keine SKU mit mehreren Fällen im aktuellen Datenstand.')
+    else:
+        sku_rows = sku_rows.rename(columns={'sku': 'SKU', 'partner_id': 'Partner', 'problem_cases': 'Fälle', **CATEGORY_LABELS})
+        st.dataframe(sku_rows, hide_index=True, use_container_width=True)
+        st.caption('Aufgeführt werden ausschließlich SKU-/Partner-Kombinationen mit mehr als einem Fall.')
 
 
 def render(data_dir, catalogue, orders, raw):
@@ -45,6 +124,7 @@ def render(data_dir, catalogue, orders, raw):
     if not snapshot:
         st.info('Noch kein API-Datenstand vorhanden. Account-Status, Fälle und Holds sind nicht verfügbar.')
         st.write('Payout 7718008497 · Bank-Kontrollwert: **491,80 €**. Ein API-Abgleich liegt noch nicht vor.')
+        render_case_check()
         return
     stamp = risk.local_date(snapshot.get('fetched_at'))
     st.caption('Datenstand: ' + (stamp.strftime('%d.%m.%Y %H:%M') if stamp else 'unbekannt') + ' · Finanztransaktionen: letzte 90 Tage; Referenz-Payout zusätzlich separat abgefragt.')
@@ -64,7 +144,7 @@ def render(data_dir, catalogue, orders, raw):
     for col, label, value in zip(st.columns(6), ['Account-Status', 'Offene Rückgaben', 'Payment Disputes', 'Aktive Holds¹', 'Kritische Vorgänge', 'Heute bearbeiten'], values):
         col.metric(label, value)
     st.caption('¹ Erkannte Hold-Transaktionen im 90-Tage-Abruf, keine garantierte Gesamtzahl aller aktiven Einbehalte. Fristen beziehen sich auf Europe/Berlin.')
-    brief, details = st.tabs(['Tagesüberblick', 'Fälle & Daten'])
+    brief, details, case_check = st.tabs(['Tagesüberblick', 'Fälle & Daten', 'Trust/Risk Check'])
     with brief:
         with st.container(border=True):
             st.subheader('KI-Audit · regelbasierte Auswertung')
@@ -115,6 +195,8 @@ def render(data_dir, catalogue, orders, raw):
                     st.json(value['data'])
                 else:
                     st.warning(value.get('error', 'Nicht verfügbar'))
+    with case_check:
+        render_case_check()
     with st.container(border=True):
         st.subheader('Finances-Prüfung · Payout 7718008497')
         check = risk.finance_check(snapshot)
