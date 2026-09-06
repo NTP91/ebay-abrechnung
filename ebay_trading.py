@@ -78,8 +78,14 @@ class TradingClient:
         return self._paged("GetMemberMessages", body, ".//e:MemberMessageExchange", self._member_message)
 
     def my_message_headers(self, start, end):
-        body = "<DetailLevel>ReturnHeaders</DetailLevel>" + self._period(start, end)
-        return self._paged("GetMyMessages", body, ".//e:Message", self._message)
+        result = {}
+        for folder in (0, 1, 2):  # Inbox, Sent, Deleted/archived where retained by eBay.
+            body = f"<DetailLevel>ReturnHeaders</DetailLevel><FolderID>{folder}</FolderID>" + self._period(start, end)
+            for row in self._paged("GetMyMessages", body, ".//e:Message", self._message):
+                row["folder_id"] = str(folder)
+                row["sender_role"] = "buyer" if folder == 0 else "seller" if folder == 1 else "unknown"
+                result[row["external_id"]] = row
+        return list(result.values())
 
     def my_messages(self, message_ids):
         result = []
@@ -101,19 +107,42 @@ class TradingClient:
         mine_refs = sum(bool(row.get("line_item_id") or row.get("transaction_id")) for row in mine)
         member_refs = sum(bool(row.get("line_item_id") or row.get("transaction_id")) for row in member)
         selected = "GetMyMessages" if (mine_refs, len(mine)) >= (member_refs, len(member)) else "GetMemberMessages"
-        rows = self.my_messages([row["external_id"] for row in mine]) if selected == "GetMyMessages" else member
+        if selected == "GetMyMessages":
+            headers = {row["external_id"]: row for row in mine}
+            rows = []
+            for detail in self.my_messages(headers):
+                header = headers.get(detail["external_id"], {})
+                merged = {**header, **detail}
+                if detail.get("sender_role") == "unknown":
+                    merged["sender_role"] = header.get("sender_role", "unknown")
+                if not detail.get("folder_id"):
+                    merged["folder_id"] = header.get("folder_id", "")
+                rows.append(merged)
+        else:
+            rows = member
         return {"selected": selected, "rows": rows,
                 "coverage": {"GetMyMessages": {"count": len(mine), "line_references": mine_refs},
                              "GetMemberMessages": {"count": len(member), "line_references": member_refs}}}
 
     @staticmethod
     def _message(row):
+        folder = _tag(row, "FolderID")
+        replied = _tag(row, "Replied").casefold() == "true"
+        response_text = row.findtext("e:ResponseDetails/e:Content", default="", namespaces=NS) or ""
+        all_tags = {node.tag.rsplit("}", 1)[-1].casefold() for node in row.iter()}
+        text = _tag(row, "Text")
         return {"external_id": _tag(row, "MessageID") or _tag(row, "ExternalMessageID"),
                 "order_id": _tag(row, "OrderID"), "line_item_id": _tag(row, "OrderLineItemID"),
                 "transaction_id": _tag(row, "TransactionID"), "item_id": _tag(row, "ItemID"),
-                "subject": _tag(row, "Subject"), "text": _tag(row, "Text"),
+                "subject": _tag(row, "Subject"), "text": text,
                 "event_at": _tag(row, "ReceiveDate") or _tag(row, "CreationDate"),
-                "status": _tag(row, "Read")}
+                "status": _tag(row, "Read"), "sender": _tag(row, "Sender"),
+                "recipient": _tag(row, "RecipientUserID") or _tag(row, "SendToName"),
+                "sender_role": "buyer" if folder == "0" else "seller" if folder == "1" else "unknown",
+                "reply_present": replied or bool(response_text.strip()),
+                "response_text": response_text.strip(), "folder_id": folder,
+                "attachment_present": bool(all_tags & {"messagemedia", "mediaurl", "attachment", "image"})
+                    or any(word in text.casefold() for word in ("anhang", "foto", "bild", "photo"))}
 
     @staticmethod
     def _member_message(row):

@@ -47,6 +47,7 @@ class CaseEngineTests(unittest.TestCase):
         self.assertFalse(flags["other_complaint"])
         self.assertTrue(category_flags("NOT_AS_DESCRIBED")["not_as_described"])
         self.assertTrue(category_flags("DEFECTIVE_ITEM")["defective"])
+        self.assertFalse(category_flags("Vielen Dank für die schnelle Antwort")["other_complaint"])
 
     def test_hold_does_not_become_other_complaint(self):
         result = normalize_events(ORDERS, [("hold", {"external_id": "h1", "line_item_id": "line-3",
@@ -58,6 +59,13 @@ class CaseEngineTests(unittest.TestCase):
         hold = {"external_id": "tx:line-3", "line_item_id": "line-3", "status": "FUNDS_ON_HOLD"}
         result = normalize_events(ORDERS, [("hold", hold), ("hold", dict(hold))])
         self.assertEqual(len(result["signals"]), 1)
+
+    def test_benign_message_is_not_a_problem_and_seller_reply_is_recorded(self):
+        result = normalize_events(ORDERS, [("message", {"external_id": "m1", "line_item_id": "line-3",
+            "text": "Vielen Dank", "sender_role": "seller", "reply_present": True})])
+        self.assertFalse(result["cases"][0]["is_problem"])
+        self.assertEqual(result["cases"][0]["case_status"], "geschlossen")
+        self.assertTrue(result["signals"][0]["reply_present"])
 
 
 class MigrationTests(unittest.TestCase):

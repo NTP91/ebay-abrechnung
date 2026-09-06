@@ -26,7 +26,7 @@ def load():
     queries = {
         "cases": """select order_id,line_item_id,partner_id,sku,title,has_return,return_reason_de,
 buyer_comment,has_message,has_dispute,has_hold,has_negative_feedback,first_event_at,last_contact_at,
-case_status,not_as_described,wrong_item,defective,used_instead_of_new,opened_used,empty_consumed,
+case_status,is_problem,not_as_described,wrong_item,defective,used_instead_of_new,opened_used,empty_consumed,
 incomplete_parts,wrong_variant,item_not_received,other_complaint
 from public.audit_cases order by last_contact_at desc nulls last,first_event_at desc nulls last,partner_id,sku""",
         "partners": "select * from public.audit_summary_by_partner order by problem_cases desc,partner_id",

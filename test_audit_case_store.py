@@ -44,6 +44,7 @@ class AuditCaseViewTests(unittest.TestCase):
                 'buyer_comment': 'Defekt geliefert', 'has_message': True, 'has_dispute': False,
                 'has_hold': False, 'has_negative_feedback': False, 'first_event_at': '2026-09-05T10:00:00Z',
                 'last_contact_at': '2026-09-05T11:00:00Z', 'case_status': 'offen',
+                'is_problem': True,
                 'not_as_described': False, 'wrong_item': False, 'defective': True,
                 'used_instead_of_new': False, 'opened_used': False, 'empty_consumed': False,
                 'incomplete_parts': False, 'wrong_variant': False, 'item_not_received': False,

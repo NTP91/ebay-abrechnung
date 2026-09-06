@@ -55,6 +55,7 @@ def render_case_check():
     table = pd.DataFrame({
         'Bestellnummer': visible.order_id, 'Line-Item': visible.line_item_id,
         'Partner': visible.partner_id, 'SKU': visible.sku, 'Artikel': visible.title,
+        'Problem erkannt': visible.is_problem.map({True: 'Ja', False: 'Nein'}),
         'Status': visible.case_status.map({'offen': 'Offen', 'geschlossen': 'Geschlossen'}).fillna(visible.case_status),
         'Rückgabe': visible.has_return.map({True: 'Ja', False: '—'}),
         'Nachricht': visible.has_message.map({True: 'Ja', False: '—'}),
@@ -75,6 +76,8 @@ def render_case_check():
             'partner_id': 'Partner', 'problem_cases': 'Fälle', 'returns': 'Rückgaben',
             'messages': 'Nachrichten', 'disputes': 'Disputes', 'holds': 'Holds',
             'negative_feedback': 'Negative Bewertungen', **CATEGORY_LABELS,
+            'affected_orders': 'Betroffene Bestellungen', 'affected_skus': 'Betroffene SKUs',
+            'order_ids': 'Bestellnummern', 'sku_list': 'SKU-Liste',
         })
         st.dataframe(partner_rows, hide_index=True, use_container_width=True)
 
@@ -83,7 +86,9 @@ def render_case_check():
     if sku_rows.empty:
         st.info('Keine SKU mit mehreren Fällen im aktuellen Datenstand.')
     else:
-        sku_rows = sku_rows.rename(columns={'sku': 'SKU', 'partner_id': 'Partner', 'problem_cases': 'Fälle', **CATEGORY_LABELS})
+        sku_rows = sku_rows.rename(columns={'sku': 'SKU', 'partner_id': 'Partner', 'problem_cases': 'Fälle',
+                                            'repeat_count': 'Wiederholungen', 'affected_orders': 'Betroffene Bestellungen',
+                                            'order_ids': 'Bestellnummern', **CATEGORY_LABELS})
         st.dataframe(sku_rows, hide_index=True, use_container_width=True)
         st.caption('Aufgeführt werden ausschließlich SKU-/Partner-Kombinationen mit mehr als einem Fall.')
 

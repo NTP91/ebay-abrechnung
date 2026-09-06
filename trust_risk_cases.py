@@ -24,17 +24,19 @@ REASON_DE = {
 }
 
 PATTERNS = {
-    "not_as_described": ("not as described", "nicht wie beschrieben", "entspricht nicht"),
-    "wrong_item": ("wrong item", "falscher artikel", "falschliefer"),
-    "defective": ("defect", "defekt", "beschädigt", "damaged", "funktioniert nicht"),
-    "used_instead_of_new": ("used instead of new", "gebraucht statt neu", "als gebraucht"),
-    "opened_used": ("opened", "geöffnet", "benutzt", "used"),
-    "empty_consumed": ("empty", "leer", "verbraucht", "aufgebraucht"),
-    "incomplete_parts": ("missing parts", "teile fehlen", "unvollständig", "incomplete"),
-    "wrong_variant": ("wrong variant", "falsche variante", "passt nicht", "does not fit"),
+    "not_as_described": ("not as described", "nicht wie beschrieben", "entspricht nicht", "anders als beschrieben"),
+    "wrong_item": ("wrong item", "falscher artikel", "falschen artikel", "falsche ware", "falsch geliefert", "falschliefer"),
+    "defective": ("defect", "defekt", "kaputt", "beschädig", "damaged", "funktioniert nicht"),
+    "used_instead_of_new": ("used instead of new", "gebraucht statt neu", "als gebraucht", "gebrauchte ware", "gebraucht geliefert"),
+    "opened_used": ("opened", "geöffnet", "schon offen", "versiegelung geöffnet", "benutzt", "used"),
+    "empty_consumed": ("empty", "leer", "toner leer", "patrone leer", "verbraucht", "aufgebraucht"),
+    "incomplete_parts": ("missing parts", "teile fehlen", "teil fehlt", "fehlende teile", "unvollständig", "incomplete"),
+    "wrong_variant": ("wrong variant", "falsche variante", "falsche größe", "falsche ausführung", "passt nicht", "does not fit"),
     "item_not_received": ("not received", "nicht erhalten", "nicht angekommen", "item not received"),
 }
 CATEGORY_NAMES = tuple(PATTERNS) + ("other_complaint",)
+COMPLAINT_CUES = ("beschwer", "reklamation", "problem", "mangel", "mangelhaft", "enttäusch",
+                  "refund", "erstattung", "zurückgeben", "retoure", "unbrauchbar")
 
 
 def partner_from_sku(sku):
@@ -102,7 +104,7 @@ def case_key(row):
 def category_flags(*texts):
     text = " ".join(str(value or "") for value in texts).casefold().replace("_", " ")
     flags = {name: any(term in text for term in terms) for name, terms in PATTERNS.items()}
-    flags["other_complaint"] = bool(text.strip()) and not any(flags.values())
+    flags["other_complaint"] = any(term in text for term in COMPLAINT_CUES) and not any(flags.values())
     return flags
 
 
@@ -140,7 +142,8 @@ def normalize_events(orders, signals):
         case = cases.setdefault(key, {**matched, "has_return": False, "has_message": False,
             "has_dispute": False, "has_hold": False, "has_negative_feedback": False,
             "return_reason_de": "", "buyer_comment": "", "first_event_at": None,
-            "last_contact_at": None, "case_status": "geschlossen", **{name: False for name in CATEGORY_NAMES}})
+            "last_contact_at": None, "case_status": "geschlossen", "is_problem": False,
+            **{name: False for name in CATEGORY_NAMES}})
         signal_flag = {"return": "has_return", "message": "has_message", "dispute": "has_dispute",
                        "hold": "has_hold", "negative_feedback": "has_negative_feedback"}[source]
         case[signal_flag] = True
@@ -149,9 +152,11 @@ def normalize_events(orders, signals):
         if source == "return":
             case["return_reason_de"] = REASON_DE.get(reason.upper(), reason)
             case["buyer_comment"] = comment or case["buyer_comment"]
-        if source != "hold":
-            for name, value in category_flags(reason, comment).items():
-                case[name] = case[name] or value
+        flags = category_flags(reason, comment) if source != "hold" and not (
+            source == "message" and signal.get("sender_role") == "seller") else {name: False for name in CATEGORY_NAMES}
+        for name, value in flags.items():
+            case[name] = case[name] or value
+        case["is_problem"] = case["is_problem"] or source in ("return", "dispute", "hold", "negative_feedback") or any(flags.values())
         event_at = signal.get("event_at")
         if isinstance(event_at, dict):
             event_at = event_at.get("value")
@@ -161,10 +166,17 @@ def normalize_events(orders, signals):
             if source == "message":
                 case["last_contact_at"] = max(filter(None, (case["last_contact_at"], event_at)))
         status = str(signal.get("status") or "").upper()
-        if source == "hold" or status not in ("CLOSED", "RESOLVED", "COMPLETED", "RETURN_CLOSED"):
+        replied = bool(signal.get("reply_present"))
+        if source == "hold" or (source == "message" and not replied) or (
+                source != "message" and status not in ("CLOSED", "RESOLVED", "COMPLETED", "RETURN_CLOSED")):
             case["case_status"] = "offen"
         evidence.append({"source": source, "external_id": external_id, **matched,
                          "event_at": event_at, "status": status, "summary": reason or comment,
+                         "original_code": reason or status, "original_text": comment,
+                         "sender": str(signal.get("sender") or ""), "recipient": str(signal.get("recipient") or ""),
+                         "sender_role": str(signal.get("sender_role") or "unknown"),
+                         "reply_present": signal.get("reply_present"),
+                         "attachment_present": signal.get("attachment_present"),
                          "payload": safe_payload(signal)})
     return {"cases": list(cases.values()), "signals": evidence, "unmatched": unmatched}
 

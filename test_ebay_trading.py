@@ -25,11 +25,21 @@ class TradingTests(unittest.TestCase):
             client.call("AddMemberMessage", "")
 
     def test_headers_are_mapped_without_token_in_result(self):
-        client, oauth = self.client([xml('<Messages><Message><MessageID>m1</MessageID><OrderLineItemID>item-line1</OrderLineItemID></Message></Messages><PaginationResult><TotalNumberOfPages>1</TotalNumberOfPages></PaginationResult>')])
+        content = xml('<Messages><Message><MessageID>m1</MessageID><OrderLineItemID>item-line1</OrderLineItemID></Message></Messages><PaginationResult><TotalNumberOfPages>1</TotalNumberOfPages></PaginationResult>')
+        empty = xml('<Messages></Messages><PaginationResult><TotalNumberOfPages>1</TotalNumberOfPages></PaginationResult>')
+        client, oauth = self.client([content, empty, empty])
         rows = client.my_message_headers(datetime.now(timezone.utc), datetime.now(timezone.utc))
         self.assertEqual(rows[0]["line_item_id"], "item-line1")
         self.assertNotIn("secret", str(rows))
         self.assertEqual(oauth._request.call_args.args[0], "POST")
+
+    def test_message_metadata_preserves_reply_role_and_attachment_hint(self):
+        import xml.etree.ElementTree as ET
+        row = ET.fromstring('<Message xmlns="urn:ebay:apis:eBLBaseComponents"><MessageID>m</MessageID><FolderID>0</FolderID><Sender>buyer</Sender><RecipientUserID>seller</RecipientUserID><Replied>true</Replied><Text>Foto im Anhang</Text></Message>')
+        data = TradingClient._message(row)
+        self.assertEqual(data['sender_role'], 'buyer')
+        self.assertTrue(data['reply_present'])
+        self.assertTrue(data['attachment_present'])
 
     def test_failed_ack_exposes_only_error_code(self):
         response = Mock(status_code=200)

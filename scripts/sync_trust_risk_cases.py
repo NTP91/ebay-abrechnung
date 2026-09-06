@@ -83,17 +83,20 @@ def sql_for(result):
     case_columns = """order_id text,line_item_id text,sku text,partner_id text,title text,
 has_return boolean,return_reason_de text,buyer_comment text,has_message boolean,has_dispute boolean,
 has_hold boolean,has_negative_feedback boolean,first_event_at timestamptz,last_contact_at timestamptz,case_status text,
+is_problem boolean,
 not_as_described boolean,wrong_item boolean,defective boolean,used_instead_of_new boolean,opened_used boolean,
 empty_consumed boolean,incomplete_parts boolean,wrong_variant boolean,item_not_received boolean,other_complaint boolean"""
     case_names = [part.strip().split()[0] for part in case_columns.replace("\n", " ").split(",")]
-    signal_columns = "source text,external_id text,order_id text,line_item_id text,sku text,partner_id text,event_at timestamptz,status text,summary text,payload jsonb"
+    signal_columns = """source text,external_id text,order_id text,line_item_id text,sku text,partner_id text,
+event_at timestamptz,status text,summary text,original_code text,original_text text,sender text,recipient text,
+sender_role text,reply_present boolean,attachment_present boolean,payload jsonb"""
     signal_names = [part.strip().split()[0] for part in signal_columns.split(",")]
     unmatched_columns = "source text,external_id text,reason text,payload jsonb"
     unmatched_names = [part.strip().split()[0] for part in unmatched_columns.split(",")]
     cases = json_recordset(result["cases"], case_columns)
     signals = json_recordset(result["signals"], signal_columns)
     unmatched = json_recordset(result["unmatched"], unmatched_columns)
-    bools = ["has_return", "has_message", "has_dispute", "has_hold", "has_negative_feedback",
+    bools = ["is_problem", "has_return", "has_message", "has_dispute", "has_hold", "has_negative_feedback",
              "not_as_described", "wrong_item", "defective", "used_instead_of_new", "opened_used",
              "empty_consumed", "incomplete_parts", "wrong_variant", "item_not_received", "other_complaint"]
     updates = [f"{name}=audit_cases.{name} or excluded.{name}" for name in bools]
@@ -108,7 +111,10 @@ insert into public.audit_cases({','.join(case_names)}) select {','.join(case_nam
 on conflict(order_id,line_item_id,sku,partner_id) do update set {','.join(updates)};
 insert into public.audit_case_signals({','.join(signal_names)}) select {','.join(signal_names)} from {signals}
 on conflict(source,external_id,order_id,line_item_id,sku,partner_id) do update
-set event_at=excluded.event_at,status=excluded.status,summary=excluded.summary,payload=excluded.payload;
+set event_at=excluded.event_at,status=excluded.status,summary=excluded.summary,
+original_code=excluded.original_code,original_text=excluded.original_text,sender=excluded.sender,
+recipient=excluded.recipient,sender_role=excluded.sender_role,reply_present=excluded.reply_present,
+attachment_present=excluded.attachment_present,payload=excluded.payload;
 insert into public.audit_unmatched_signals({','.join(unmatched_names)}) select {','.join(unmatched_names)} from {unmatched}
 on conflict(source,external_id) do update set reason=excluded.reason,payload=excluded.payload,last_seen_at=now();
 """
