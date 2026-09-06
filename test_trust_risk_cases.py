@@ -1,6 +1,7 @@
 import unittest
 import pandas as pd
 
+import core
 import trust_risk_cases as cases
 from ebay_trading import merge_messages
 
@@ -12,6 +13,9 @@ class TrustRiskCaseTests(unittest.TestCase):
 
     def empty_snapshot(self):
         return {'resources':{'returns':{'data':{'items':[]}},'disputes':{'data':{'items':[]}},'transactions':{'data':{'items':[]}}}}
+
+    def test_confirmed_sku_partner_override(self):
+        self.assertEqual(core.normalized_partner('MAH-00422'),'MH')
 
     def test_multiple_signals_form_one_case(self):
         snap={'resources':{
