@@ -62,7 +62,7 @@ class AuditCaseViewTests(unittest.TestCase):
             app = AppTest.from_string(script).run(timeout=20)
         self.assertEqual(len(app.exception), 0)
         self.assertEqual(len(app.multiselect), 2)
-        self.assertEqual(len(app.dataframe), 7)
+        self.assertEqual(len(app.dataframe), 9)
 
 
 if __name__ == '__main__':

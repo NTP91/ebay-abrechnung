@@ -20,6 +20,9 @@ CATEGORIES = {
     'other_complaint': 'Sonstige Beschwerde',
 }
 SEVERE = {'defective', 'used_instead_of_new', 'opened_used', 'empty_consumed', 'incomplete_parts'}
+MIN_CASES_FOR_RATE = 2
+MIN_ORDER_VOLUME = 5
+HIGH_ERROR_RATE = 10.0
 
 
 def group_for(partner):
@@ -57,8 +60,10 @@ def aggregate(case_rows, orders):
     """Build deterministic partner/group/SKU rankings from unique problem cases."""
     if case_rows is None or case_rows.empty:
         empty = pd.DataFrame()
-        return {'total': 0, 'partners': empty, 'groups': empty, 'skus': empty,
-                'problems': empty, 'priority': empty, 'negative': empty, 'cases': empty,
+        return {'total': 0, 'partners': empty, 'partners_by_cases': empty,
+                'groups': empty, 'skus': empty, 'skus_by_rate': empty,
+                'skus_by_cases': empty, 'problems': empty, 'priority': empty,
+                'negative': empty, 'cases': empty, 'unresolved_skus': empty,
                 'volume_available': False}
     cases = case_rows.copy().fillna('')
     if 'is_problem' in cases:
@@ -66,6 +71,17 @@ def aggregate(case_rows, orders):
     for field in CATEGORIES:
         cases[field] = cases[field].map(bool)
     cases['has_negative_feedback'] = cases['has_negative_feedback'].map(bool)
+    # Holds, seller replies and neutral messages remain evidence but are not
+    # operational customer-quality cases.
+    quality_mask = cases[list(CATEGORIES)].any(axis=1) | cases['has_negative_feedback']
+    cases = cases[quality_mask].copy()
+    if cases.empty:
+        empty = pd.DataFrame()
+        return {'total': 0, 'partners': empty, 'partners_by_cases': empty,
+                'groups': empty, 'skus': empty, 'skus_by_rate': empty,
+                'skus_by_cases': empty, 'problems': empty, 'priority': empty,
+                'negative': empty, 'cases': empty, 'unresolved_skus': empty,
+                'volume_available': False}
     if 'problem_signal_count' not in cases:
         cases['problem_signal_count'] = 0
     cases['problem_signal_count'] = pd.to_numeric(cases['problem_signal_count'], errors='coerce').fillna(0).astype(int)
@@ -86,7 +102,13 @@ def aggregate(case_rows, orders):
     partners['Anteil'] = partners['Fälle'] / len(cases) * 100
     partners = partners.merge(partner_volume.rename(columns={'partner_id': 'Partner', 'orders': 'Bestellungen'}), on='Partner', how='left')
     partners['Fälle je 100 Bestellungen'] = partners['Fälle'] / partners['Bestellungen'] * 100
-    partners = partners.sort_values(['Fälle', 'Partner'], ascending=[False, True]).reset_index(drop=True)
+    partners['Fehlerquote'] = partners['Fälle je 100 Bestellungen']
+    partners[f'Mindestfallzahl ({MIN_CASES_FOR_RATE}) erreicht'] = partners['Fälle'] >= MIN_CASES_FOR_RATE
+    partners['Datenbasis'] = partners.apply(
+        lambda row: 'ausreichend' if row['Bestellungen'] >= MIN_ORDER_VOLUME and row['Fälle'] >= MIN_CASES_FOR_RATE
+        else 'kleine Stichprobe', axis=1)
+    partners_by_cases = partners.sort_values(['Fälle', 'Partner'], ascending=[False, True]).reset_index(drop=True)
+    partners = partners.sort_values(['Fehlerquote', 'Fälle', 'Partner'], ascending=[False, False, True], na_position='last').reset_index(drop=True)
 
     groups = summary(['Gruppe'])
     member = cases.groupby('Gruppe').partner_id.apply(lambda values: ', '.join(sorted(set(values)))).rename('Partner').reset_index()
@@ -97,9 +119,38 @@ def aggregate(case_rows, orders):
     skus = skus.merge(volumes.rename(columns={'sku': 'SKU', 'partner_id': 'Partner', 'orders': 'Bestellmenge'}), on=['SKU', 'Partner'], how='left')
     skus['Fehlerquote'] = skus['Fälle'] / skus['Bestellmenge'] * 100
     sku_specific = ~skus.SKU.str.rstrip().str.endswith('/')
-    skus['Kennzeichnung'] = ['Wiederholt auffällig' if specific and value > 1 else 'Keine produktspezifische SKU' if not specific else 'Einzelfall'
-                              for specific, value in zip(sku_specific, skus['Fälle'])]
-    skus = skus.sort_values(['Fälle', 'Partner', 'SKU'], ascending=[False, True, True]).reset_index(drop=True)
+    skus['Wiederholungsfall'] = sku_specific & (skus['Fälle'] >= MIN_CASES_FOR_RATE)
+    skus['Hohe Fehlerquote'] = (skus['Fehlerquote'] >= HIGH_ERROR_RATE) & (skus['Bestellmenge'] >= MIN_ORDER_VOLUME)
+    skus['Datenbasis'] = skus.apply(
+        lambda row: 'ausreichend' if row['Bestellmenge'] >= MIN_ORDER_VOLUME and row['Fälle'] >= MIN_CASES_FOR_RATE
+        else 'kleine Stichprobe', axis=1)
+    skus['Kennzeichnung'] = [
+        'Keine produktspezifische SKU' if not specific
+        else 'Wiederholt auffällig · hohe Fehlerquote' if repeated and high
+        else 'Wiederholt auffällig' if repeated
+        else 'Hohe Fehlerquote' if high
+        else 'Einzelfall'
+        for specific, repeated, high in zip(sku_specific, skus['Wiederholungsfall'], skus['Hohe Fehlerquote'])]
+    skus_by_cases = skus.sort_values(['Fälle', 'Fehlerquote', 'Partner', 'SKU'], ascending=[False, False, True, True], na_position='last').reset_index(drop=True)
+    skus_by_rate = skus.sort_values(['Fehlerquote', 'Fälle', 'Partner', 'SKU'], ascending=[False, False, True, True], na_position='last').reset_index(drop=True)
+    skus = skus_by_cases
+
+    order_lookup = orders.copy().fillna('') if orders is not None else pd.DataFrame()
+    order_columns = {name.casefold(): name for name in order_lookup.columns}
+    lookup_order = order_columns.get('bestellnummer')
+    lookup_line = order_columns.get('transaktionsnummer')
+    lookup_item = order_columns.get('artikelnummer')
+    unresolved_rows = []
+    for row in cases[cases.sku.astype(str).str.rstrip().str.endswith('/')].itertuples():
+        matches = order_lookup[
+            (order_lookup[lookup_order].astype(str) == str(row.order_id)) &
+            (order_lookup[lookup_line].astype(str) == str(row.line_item_id))
+        ] if lookup_order and lookup_line else pd.DataFrame()
+        item_id = str(matches.iloc[0].get(lookup_item, '')) if len(matches) == 1 and lookup_item else ''
+        unresolved_rows.append({'Bestellung': row.order_id, 'Line Item': row.line_item_id,
+            'Item-ID': item_id, 'Partner': row.partner_id, 'Artikel': row.title,
+            'Grund': 'Bestellbericht und gespeicherte eBay-Order enthalten nur das Partnerpräfix; konkrete SKU fehlt.'})
+    unresolved_skus = pd.DataFrame(unresolved_rows)
 
     problem_rows = []
     for field, label in CATEGORIES.items():
@@ -109,14 +160,21 @@ def aggregate(case_rows, orders):
             'SKUs': ', '.join(sorted(set(affected.sku)))})
     problems = pd.DataFrame(problem_rows).sort_values(['Fälle', 'Problemart'], ascending=[False, True]).reset_index(drop=True)
 
-    partner_counts = cases.partner_id.value_counts()
-    sku_counts = cases.groupby(['partner_id', 'sku']).size()
+    partner_stats = partners_by_cases.set_index('Partner')
+    sku_stats = skus_by_cases.set_index(['Partner', 'SKU'])
     def priority(row):
         severe = any(row[field] for field in SEVERE)
-        repeated_sku = 0 if str(row.sku).rstrip().endswith('/') else sku_counts.get((row.partner_id, row.sku), 0)
-        if row.has_negative_feedback or repeated_sku >= 3 or (severe and (repeated_sku >= 2 or row.problem_signal_count > 1)):
+        generic = str(row.sku).rstrip().endswith('/')
+        stats = sku_stats.loc[(row.partner_id, row.sku)]
+        repeated_sku = 0 if generic else int(stats['Fälle'])
+        enough_sku_data = (not generic and stats['Bestellmenge'] >= MIN_ORDER_VOLUME
+                           and repeated_sku >= MIN_CASES_FOR_RATE)
+        high_sku_rate = enough_sku_data and stats['Fehlerquote'] >= HIGH_ERROR_RATE
+        if row.has_negative_feedback or (severe and repeated_sku >= 2 and high_sku_rate) or (repeated_sku >= 3 and high_sku_rate):
             return 'Priorität 1'
-        if severe or repeated_sku >= 2 or partner_counts.get(row.partner_id, 0) > 1:
+        partner = partner_stats.loc[row.partner_id]
+        enough_partner_data = partner['Bestellungen'] >= MIN_ORDER_VOLUME and partner['Fälle'] >= MIN_CASES_FOR_RATE
+        if severe or repeated_sku >= 2 or (enough_partner_data and partner['Fehlerquote'] >= HIGH_ERROR_RATE):
             return 'Priorität 2'
         return 'Priorität 3'
     cases['Priorität'] = cases.apply(priority, axis=1)
@@ -125,6 +183,8 @@ def aggregate(case_rows, orders):
     columns = ['Priorität', 'Partner', 'Gruppe', 'Bestellung', 'Line Item', 'SKU', 'Artikel', 'Problemarten', 'Problemsignale']
     priority_cases = display[display.Priorität == 'Priorität 1'][columns].copy()
     negative = display[cases.has_negative_feedback.values][columns].copy()
-    return {'total': len(cases), 'partners': partners, 'groups': groups, 'skus': skus,
+    return {'total': len(cases), 'partners': partners, 'partners_by_cases': partners_by_cases,
+            'groups': groups, 'skus': skus, 'skus_by_rate': skus_by_rate, 'skus_by_cases': skus_by_cases,
             'problems': problems, 'priority': priority_cases, 'negative': negative,
-            'cases': display[columns], 'volume_available': bool(partners['Bestellungen'].notna().any())}
+            'cases': display[columns], 'unresolved_skus': unresolved_skus,
+            'volume_available': bool(partners['Bestellungen'].notna().any())}

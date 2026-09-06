@@ -42,26 +42,37 @@ def render_case_check():
     if not report['total']:
         st.info('Noch keine eindeutig zugeordneten Qualitätsfälle vorhanden.')
         return
-    top=report['partners'].iloc[0]
+    top=report['partners_by_cases'].iloc[0]
     repeated=int((report['skus'].Kennzeichnung=='Wiederholt auffällig').sum())
     for col,label,value in zip(st.columns(4),['Echte Qualitätsfälle','Top-Partner','Wiederholt auffällige SKUs','Priorität 1'],
                                [report['total'],f"{top.Partner} · {int(top['Fälle'])}",repeated,len(report['priority'])]):
         col.metric(label,value)
     st.caption('Absolute Fallzahlen und volumenbereinigte Quoten sind getrennt ausgewiesen. Mehrere Signale desselben Falls erhöhen die Fallzahl nicht.')
     partner_tab,group_tab,sku_tab,problem_tab,priority_tab,negative_tab,cases_tab=st.tabs(
-        ['Partner','Gruppen','Top-SKUs','Problemarten','Priorität 1','Negative Bewertungen','Alle Fälle'])
+        ['Partnerquoten','Gruppen','SKU-Quoten','Problemarten','Priorität 1','Negative Bewertungen','Alle Fälle'])
     with partner_tab:
+        st.markdown('**Nach Fehlerquote**')
         table=report['partners'].copy()
-        table['Anteil']=table['Anteil'].map(lambda value:f'{value:.1f} %')
-        table['Fälle je 100 Bestellungen']=table['Fälle je 100 Bestellungen'].map(lambda value:f'{value:.2f}' if pd.notna(value) else '—')
+        for column in ('Anteil','Fälle je 100 Bestellungen','Fehlerquote'):
+            table[column]=table[column].map(lambda value:f'{value:.2f} %' if pd.notna(value) else '—')
         st.dataframe(table,hide_index=True,width='stretch')
+        st.caption(f'Mindestfallzahl für eine belastbare Quotenbewertung: {reporting.MIN_CASES_FOR_RATE}; Mindestvolumen: {reporting.MIN_ORDER_VOLUME} Bestellpositionen.')
+        st.markdown('**Nach absoluten Qualitätsfällen**')
+        absolute=report['partners_by_cases'][['Partner','Bestellungen','Fälle','Fehlerquote','Datenbasis']].copy()
+        absolute['Fehlerquote']=absolute['Fehlerquote'].map(lambda value:f'{value:.2f} %' if pd.notna(value) else '—')
+        st.dataframe(absolute,hide_index=True,width='stretch')
     with group_tab:
         st.dataframe(report['groups'],hide_index=True,width='stretch')
     with sku_tab:
-        table=report['skus'].head(20).copy()
-        table['Fehlerquote']=table['Fehlerquote'].map(lambda value:f'{value:.2f} %' if pd.notna(value) else '—')
-        st.dataframe(table,hide_index=True,width='stretch')
-        st.caption('„NB /“ bleibt sichtbar, wird ohne produktspezifischen SKU-Anteil aber nicht als Wiederholungsproblem priorisiert.')
+        for heading, source in [('Top-SKUs nach Fehlerquote',report['skus_by_rate']),('Top-SKUs nach absoluten Fällen',report['skus_by_cases'])]:
+            st.markdown(f'**{heading}**')
+            table=source.head(20).copy()
+            table['Fehlerquote']=table['Fehlerquote'].map(lambda value:f'{value:.2f} %' if pd.notna(value) else '—')
+            st.dataframe(table,hide_index=True,width='stretch')
+        if not report['unresolved_skus'].empty:
+            st.markdown('**Nicht aufgelöste Partnerpräfixe**')
+            st.dataframe(report['unresolved_skus'],hide_index=True,width='stretch')
+        st.caption('Wiederholungsfälle und hohe Fehlerquoten werden getrennt gekennzeichnet. Kleine Stichproben bleiben sichtbar, fließen aber nicht allein in Priorität 1 ein.')
     with problem_tab:
         st.dataframe(report['problems'],hide_index=True,width='stretch')
     with priority_tab:
