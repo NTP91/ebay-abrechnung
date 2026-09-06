@@ -106,6 +106,12 @@ class Client:
                     value = value.replace(secret, '[entfernt]')
         return value
 
+    def access_token(self):
+        """Return a short-lived OAuth token to another read-only eBay client."""
+        if not self._token or self._clock() >= self._expires:
+            self._refresh()
+        return self._token
+
     def get(self, endpoint, identifier='', params=None):
         if endpoint not in ENDPOINTS:
             raise EbayError('Nicht freigegebener Lese-Endpunkt.')
