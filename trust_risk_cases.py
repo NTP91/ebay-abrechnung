@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import re
-from collections import Counter, defaultdict
+from collections import Counter
+
+ORDER_RE=re.compile(r'(?<!\d)(\d{2}-\d{5}-\d{5})(?!\d)')
 
 FIELDS = ('not_as_described','wrong_item','defective','used_instead_of_new','opened_used',
           'empty_consumed','incomplete_parts','wrong_variant','item_not_received','other_complaint')
@@ -70,35 +72,68 @@ def catalogue_rows(catalogue):
 
 def _match(ref, catalogue):
     order, line, item = (str(ref.get(k,'') or '').strip() for k in ('order_id','line_item_id','item_id'))
+    if not order and not line and not item:
+        return None,'Keine Order-ID oder Artikelreferenz vorhanden'
     choices = catalogue
     if order:
         choices = [r for r in choices if r['order_id'] == order]
+        if not choices:
+            return None, 'Order-ID nicht in den Bestelldaten gefunden'
     if line:
         exact = [r for r in choices if line in (r['line_item_id'], r['transaction_id'])]
-        choices = exact
+        if exact: choices = exact
+        elif order: return None, 'Line-Item-ID gehört nicht zur angegebenen Order-ID'
     elif item:
-        choices = [r for r in choices if r['item_id'] == item]
-    return choices[0] if len(choices) == 1 else None
+        exact=[r for r in choices if r['item_id'] == item]
+        if exact: choices=exact
+        elif order: return None, 'Item-ID gehört nicht zur angegebenen Order-ID'
+    if len(choices)==1: return choices[0],''
+    if order and len(choices)>1: return None,'Mehrere Line Items; kein eindeutiger Artikelbezug'
+    if not order and item and len(choices)>1:
+        return None,'Item-ID gehört zu mehreren Bestellungen; Käufer-/Order-Kontext nicht eindeutig'
+    return None,'API-Referenz ist in den Bestelldaten nicht eindeutig'
+
+
+def message_reference(row):
+    direct=str(row.get('order_id') or '').strip()
+    haystack=' '.join(str(row.get(k) or '') for k in ('external_message_id','subject','text'))
+    found=sorted(set(ORDER_RE.findall(haystack)))
+    order=direct or (found[0] if len(found)==1 else '')
+    return {'order_id':order,'line_item_id':str(row.get('line_item_id') or '').strip(),
+            'item_id':str(row.get('item_id') or '').strip()}, ('Mehrere Bestellnummern in der Nachricht' if len(found)>1 and not direct else '')
+
+
+def message_order_context(snapshot):
+    rows=((((snapshot or {}).get('resources',{}).get('orders') or {}).get('data') or {}).get('items',[]))
+    result=[]
+    for order in rows:
+        buyer=str((order.get('buyer') or {}).get('username') or '').casefold()
+        for line in order.get('lineItems') or []:
+            result.append({'order_id':str(order.get('orderId') or ''),'line_item_id':str(line.get('lineItemId') or ''),
+                           'item_id':str(line.get('legacyItemId') or line.get('itemId') or ''),'buyer':buyer})
+    return result
 
 
 def build(snapshot, catalogue_frame, trading):
     catalogue = catalogue_rows(catalogue_frame)
+    order_context = message_order_context(snapshot)
     signals, unmatched = [], []
 
     def add(source, source_id, payload, ref, code='', text='', at='', status='', force=False, extra=None):
         cat = category(code, text)
-        if not force and not cat:
+        if not force and not cat and source != 'message':
             unmatched.append({'source':source,'source_id':str(source_id),'order_id':ref.get('order_id',''),
                               'line_item_id':ref.get('line_item_id',''),'item_id':ref.get('item_id',''),
                               'reason':'Kein eindeutiges Kundenproblem im Text','raw_payload':payload})
             return
         if force and not cat and source != 'hold':
             cat='other_complaint'
-        match = _match(ref, catalogue)
+        match, match_reason = _match(ref, catalogue)
         if not match:
+            evidence=dict(payload); evidence['_resolved_reference']=dict(ref)
             unmatched.append({'source':source,'source_id':str(source_id),'order_id':ref.get('order_id',''),
                               'line_item_id':ref.get('line_item_id',''),'item_id':ref.get('item_id',''),
-                              'reason':'Keine eindeutige Artikel-/Partnerzuordnung','raw_payload':payload})
+                              'reason':match_reason,'raw_payload':evidence})
             return
         signals.append({**match,'source':source,'source_id':str(source_id),'event_at':timestamp(at),
                         'original_code':str(code or ''),'original_text':str(text or ''),'category':cat,
@@ -136,7 +171,17 @@ def build(snapshot, catalogue_frame, trading):
                               'line_item_id':'','item_id':row.get('item_id',''),
                               'reason':'Verkäuferantwort; kein neuer Kundenfall','raw_payload':row})
             continue
-        add('message',row.get('message_id'),row,{'order_id':row.get('order_id',''),'line_item_id':row.get('line_item_id',''),'item_id':row.get('item_id','')},
+        ref,reference_issue=message_reference(row)
+        if not ref['order_id'] and ref['item_id'] and row.get('sender'):
+            candidates=[x for x in order_context if x['buyer']==str(row.get('sender')).casefold() and x['item_id']==ref['item_id']]
+            identities={(x['order_id'],x['line_item_id']) for x in candidates if x['order_id'] and x['line_item_id']}
+            if len(identities)==1:
+                ref['order_id'],ref['line_item_id']=next(iter(identities))
+        if reference_issue:
+            unmatched.append({'source':'message','source_id':str(row.get('message_id')),'order_id':'','line_item_id':'',
+                              'item_id':row.get('item_id',''),'reason':reference_issue,'raw_payload':row})
+            continue
+        add('message',row.get('message_id'),row,ref,
             '',text,row.get('received_at'),'',False,extra)
 
     cases={}
@@ -153,7 +198,7 @@ def build(snapshot, catalogue_frame, trading):
         dates=[d for d in (case.get('first_event_at'),sig.get('event_at')) if d]
         if dates: case['first_event_at']=min(dates);case['last_contact_at']=max(dates)
         case['case_status']='geschlossen' if str(sig.get('status','')).upper() in ('CLOSED','RESOLVED') else 'offen'
-        case['is_problem']=True
+        case['is_problem']=case.get('is_problem',False) or sig['source'] not in ('hold','message') or bool(sig.get('category'))
     for case in cases.values():
         case['return_reason_de']=case.get('return_reason_de') or ''
         case['buyer_comment']=case.get('buyer_comment') or ''
@@ -161,8 +206,9 @@ def build(snapshot, catalogue_frame, trading):
 
 
 def summarize(model):
-    cases=model['cases']; categories={f:sum(bool(c.get(f)) for c in cases) for f in FIELDS}
-    partners=Counter(c['partner_id'] for c in cases)
-    skus=Counter((c['partner_id'],c['sku']) for c in cases if c['sku'])
-    return {'cases':len(cases),'categories':categories,'partners':partners.most_common(),
+    cases=model['cases']; problems=[c for c in cases if c.get('is_problem')]
+    categories={f:sum(bool(c.get(f)) for c in problems) for f in FIELDS}
+    partners=Counter(c['partner_id'] for c in problems)
+    skus=Counter((c['partner_id'],c['sku']) for c in problems if c['sku'])
+    return {'cases':len(problems),'financial_only_cases':len(cases)-len(problems),'categories':categories,'partners':partners.most_common(),
             'skus':[(p,s,n) for (p,s),n in skus.most_common()]}

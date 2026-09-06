@@ -49,14 +49,17 @@ class TradingClient:
             raise EbayError(f'Trading API {name}: {code} · {message}')
         return root
 
-    def my_messages(self):
+    def my_messages(self, days=90):
         """Read all available Inbox/Sent/Deleted message headers, then bodies in batches."""
         headers = {}
+        start = (datetime.now(timezone.utc) - timedelta(days=days)).strftime('%Y-%m-%dT%H:%M:%S.000Z')
+        end = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000Z')
         for folder in ('0', '1', '2'):
             page = 1
             while True:
                 root = self.call('GetMyMessages',
                     '<DetailLevel>ReturnHeaders</DetailLevel>'
+                    f'<StartTime>{start}</StartTime><EndTime>{end}</EndTime>'
                     f'<FolderID>{folder}</FolderID><Pagination><EntriesPerPage>200</EntriesPerPage>'
                     f'<PageNumber>{page}</PageNumber></Pagination>')
                 for node in root.findall('.//{' + NS + '}Message'):
@@ -92,6 +95,7 @@ class TradingClient:
                     'recipient': _text(node, 'RecipientUserID') or record.get('recipient', ''),
                     'reply_present': _text(node, 'Replied').lower() == 'true' or record.get('reply_present', False),
                     'attachment_present': bool(node.findall('.//{' + NS + '}MessageMedia')),
+                    'external_message_id': _text(node, 'ExternalMessageID'),
                 })
                 result.append(record)
         return result
@@ -111,13 +115,15 @@ class TradingClient:
                     'subject': _text(message, 'Subject'), 'text': _plain(_text(message, 'Body')),
                     'received_at': _text(message, 'CreationDate'), 'sender': _text(message, 'SenderID'),
                     'recipient': '', 'reply_present': bool(node.find('.//{' + NS + '}Response')),
-                    'attachment_present': bool(node.findall('.//{' + NS + '}MessageMedia'))})
+                    'attachment_present': bool(node.findall('.//{' + NS + '}MessageMedia')),
+                    'external_message_id': _text(message, 'ExternalMessageID')})
             if _text(root, 'HasMoreItems').lower() != 'true':
                 break
             page += 1
             if page > 100:
                 raise EbayError('GetMemberMessages Abrufgrenze erreicht.')
         return result
+
 
     def negative_feedback(self):
         result, page = [], 1
@@ -136,3 +142,20 @@ class TradingClient:
                 break
             page += 1
         return result
+
+
+def merge_messages(my_messages, member_messages):
+    """Prefer mailbox records and add only semantically new member messages."""
+    result=[]; ids=set(); semantic=set()
+    for origin, rows in (('GetMyMessages',my_messages),('GetMemberMessages',member_messages)):
+        for row in rows:
+            current=dict(row); current['message_api']=origin
+            if origin=='GetMemberMessages': current['sender_role']='buyer'
+            identifier=str(current.get('message_id') or '').strip()
+            signature=(str(current.get('sender') or '').casefold(),str(current.get('item_id') or ''),
+                       str(current.get('received_at') or '')[:16],_plain(current.get('text') or '').casefold())
+            if (identifier and identifier in ids) or signature in semantic:
+                continue
+            if identifier: ids.add(identifier)
+            semantic.add(signature); result.append(current)
+    return result

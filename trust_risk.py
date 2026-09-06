@@ -97,6 +97,7 @@ def collect(client, payout_orders=(), progress=None):
         ('transactions', lambda: client.pages('transactions', 'transactions', {'filter': f'transactionDate:[{start}..{end}]'})),
         ('payouts', lambda: client.pages('payouts', 'payouts')),
         ('funds', lambda: client.get('funds')),
+        ('orders', lambda: client.pages('orders', 'orders', {'filter': f'creationdate:[{start}..{end}]'})),
         ('reference_payout', lambda: client.get('payout', PAYOUT)),
         ('reference_transactions', lambda: client.pages('transactions', 'transactions', {'filter': f'payoutId:{{{PAYOUT}}}'})),
     ]

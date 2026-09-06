@@ -32,6 +32,7 @@ ENDPOINTS = {
     'payouts': ('https://apiz.ebay.com', '/sell/finances/v1/payout'),
     'payout': ('https://apiz.ebay.com', '/sell/finances/v1/payout/{id}'),
     'funds': ('https://apiz.ebay.com', '/sell/finances/v1/seller_funds_summary'),
+    'orders': ('https://api.ebay.com', '/sell/fulfillment/v1/order'),
 }
 
 
@@ -154,7 +155,8 @@ class Client:
             if not isinstance(rows, list):
                 raise EbayError('API-Antwort unvollständig: erwartete Ergebnisliste fehlt.')
             key_fields = {'returns': ('returnId',), 'disputes': ('paymentDisputeId',),
-                          'transactions': ('transactionId', 'transactionType'), 'payouts': ('payoutId',)}[endpoint]
+                          'transactions': ('transactionId', 'transactionType'), 'payouts': ('payoutId',),
+                          'orders': ('orderId',)}[endpoint]
             for row in rows:
                 if not isinstance(row, dict) or not all(row.get(k) for k in key_fields):
                     raise EbayError('API-Antwort unvollständig: eindeutige Vorgangs-ID fehlt.')

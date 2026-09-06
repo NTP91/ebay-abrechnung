@@ -16,7 +16,7 @@ sys.path.insert(0,str(ROOT))
 import core
 import trust_risk
 from ebay_readonly import Client, EbayError
-from ebay_trading import TradingClient
+from ebay_trading import TradingClient, merge_messages
 from trust_risk_cases import build, summarize
 
 
@@ -95,9 +95,10 @@ def main():
     # active listings when the mailbox endpoint is unavailable.
     selected=('GetMyMessages' if coverage['GetMyMessages'].get('available') and sources['GetMyMessages']
               else 'GetMemberMessages' if coverage['GetMemberMessages'].get('available') else None)
-    messages=sources.get(selected,[])
-    for row in messages:
+    for row in sources.get('GetMyMessages',[]):
         row['sender_role']='seller' if row.get('folder_id')=='1' else 'buyer' if row.get('folder_id')=='0' else 'unknown'
+    messages=merge_messages(sources.get('GetMyMessages',[]),sources.get('GetMemberMessages',[]))
+    coverage['merged_messages']={'count':len(messages)}
     model=build(snapshot,catalogue,{'messages':messages,'feedback':sources['feedback']})
     case_cols=['order_id','line_item_id','sku','partner_id','title','has_return','has_message','has_dispute','has_hold','has_negative_feedback',
       'not_as_described','wrong_item','defective','used_instead_of_new','opened_used','empty_consumed','incomplete_parts','wrong_variant','item_not_received','other_complaint',
@@ -130,7 +131,12 @@ def main():
       wrong_variant=exists(select 1 from public.audit_case_signals s where s.order_id=c.order_id and s.line_item_id=c.line_item_id and s.sku=c.sku and s.partner_id=c.partner_id and s.summary='wrong_variant'),
       item_not_received=exists(select 1 from public.audit_case_signals s where s.order_id=c.order_id and s.line_item_id=c.line_item_id and s.sku=c.sku and s.partner_id=c.partner_id and s.summary='item_not_received'),
       other_complaint=exists(select 1 from public.audit_case_signals s where s.order_id=c.order_id and s.line_item_id=c.line_item_id and s.sku=c.sku and s.partner_id=c.partner_id and s.summary='other_complaint'),
-      is_problem=exists(select 1 from public.audit_case_signals s where s.order_id=c.order_id and s.line_item_id=c.line_item_id and s.sku=c.sku and s.partner_id=c.partner_id);"""
+      is_problem=exists(select 1 from public.audit_case_signals s where s.order_id=c.order_id and s.line_item_id=c.line_item_id and s.sku=c.sku and s.partner_id=c.partner_id and (s.source in ('return','dispute','negative_feedback') or (s.source='message' and s.summary<>'')));
+      delete from public.audit_unmatched_signals u using public.audit_case_signals s
+       where u.source=s.source and u.external_id=s.external_id;
+      update public.audit_unmatched_signals set reason='Item-ID gehört zu mehreren Bestellungen; Käufer-/Order-Kontext nicht eindeutig'
+       where source='message' and reason='API-Referenz ist in den Bestelldaten nicht eindeutig'
+       and coalesce(payload->>'item_id','')<>'';"""
     management.apply(run+'_reconcile',reconcile)
     counts={k:len(((snapshot['resources'].get(k) or {}).get('data') or {}).get('items',[])) for k in ('returns','disputes','transactions')}
     result={'applied':True,**summarize(model),'signals':len(model['signals']),'unmatched':len(model['unmatched']),
