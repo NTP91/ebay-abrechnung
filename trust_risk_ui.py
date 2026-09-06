@@ -7,6 +7,7 @@ import streamlit as st
 
 import trust_risk as risk
 import audit_case_store
+import trust_risk_reporting as reporting
 from ebay_readonly import Client, EbayError, secrets_config
 
 
@@ -30,67 +31,52 @@ def _local_times(series):
 
 
 def render_case_check():
-    st.subheader('Trust/Risk Check')
-    st.caption('Fallbasierte Supabase-Auswertung · jede Kombination aus Bestellung, Line-Item, SKU und Partner wird genau einmal gezählt.')
+    st.subheader('Operative Qualitätsauswertung')
+    st.caption('Echte, eindeutig zugeordnete Kundenfälle. Holds, Verkäuferantworten und neutrale Nachrichten sind ausgeschlossen.')
     try:
         data = load_audit_cases()
     except Exception:
         st.warning('Die Supabase-Prüfdaten sind derzeit nicht lesbar. Zugangsdaten und Verbindung prüfen.')
         return
-    cases = pd.DataFrame(data['cases'])
-    if cases.empty:
-        st.info('Noch keine Trust/Risk-Fälle in Supabase vorhanden.')
+    report=reporting.aggregate(pd.DataFrame(data['cases']),pd.DataFrame(data['orders']))
+    if not report['total']:
+        st.info('Noch keine eindeutig zugeordneten Qualitätsfälle vorhanden.')
         return
-    filters = st.columns(2)
-    partners = sorted(cases.partner_id.dropna().unique())
-    selected_partners = filters[0].multiselect('Partner filtern', partners, key='audit-case-partners')
-    available_skus = sorted(cases.loc[cases.partner_id.isin(selected_partners), 'sku'].unique() if selected_partners else cases.sku.dropna().unique())
-    selected_skus = filters[1].multiselect('SKU filtern', available_skus, key='audit-case-skus')
-    visible = cases
-    if selected_partners:
-        visible = visible[visible.partner_id.isin(selected_partners)]
-    if selected_skus:
-        visible = visible[visible.sku.isin(selected_skus)]
-    st.caption(f'{len(visible)} von {len(cases)} Fällen angezeigt.')
-    table = pd.DataFrame({
-        'Bestellnummer': visible.order_id, 'Line-Item': visible.line_item_id,
-        'Partner': visible.partner_id, 'SKU': visible.sku, 'Artikel': visible.title,
-        'Problem erkannt': visible.is_problem.map({True: 'Ja', False: 'Nein'}),
-        'Status': visible.case_status.map({'offen': 'Offen', 'geschlossen': 'Geschlossen'}).fillna(visible.case_status),
-        'Rückgabe': visible.has_return.map({True: 'Ja', False: '—'}),
-        'Nachricht': visible.has_message.map({True: 'Ja', False: '—'}),
-        'Dispute': visible.has_dispute.map({True: 'Ja', False: '—'}),
-        'Hold': visible.has_hold.map({True: 'Ja', False: '—'}),
-        'Negative Bewertung': visible.has_negative_feedback.map({True: 'Ja', False: '—'}),
-        'Rückgabegrund': visible.return_reason_de, 'Käuferkommentar': visible.buyer_comment,
-        'Problemkategorien': visible.apply(lambda row: ', '.join(label for key, label in CATEGORY_LABELS.items() if bool(row.get(key))) or '—', axis=1),
-        'Erstes Ereignis': _local_times(visible.first_event_at),
-        'Letzter Kontakt': _local_times(visible.last_contact_at),
-    })
-    st.dataframe(table, hide_index=True, use_container_width=True, height=520)
-
-    st.subheader('Probleme nach Partner')
-    partner_rows = pd.DataFrame(data['partners'])
-    if not partner_rows.empty:
-        partner_rows = partner_rows.rename(columns={
-            'partner_id': 'Partner', 'problem_cases': 'Fälle', 'returns': 'Rückgaben',
-            'messages': 'Nachrichten', 'disputes': 'Disputes', 'holds': 'Holds',
-            'negative_feedback': 'Negative Bewertungen', **CATEGORY_LABELS,
-            'affected_orders': 'Betroffene Bestellungen', 'affected_skus': 'Betroffene SKUs',
-            'order_ids': 'Bestellnummern', 'sku_list': 'SKU-Liste',
-        })
-        st.dataframe(partner_rows, hide_index=True, use_container_width=True)
-
-    st.subheader('Auffällige SKUs')
-    sku_rows = pd.DataFrame(data['skus'])
-    if sku_rows.empty:
-        st.info('Keine SKU mit mehreren Fällen im aktuellen Datenstand.')
-    else:
-        sku_rows = sku_rows.rename(columns={'sku': 'SKU', 'partner_id': 'Partner', 'problem_cases': 'Fälle',
-                                            'repeat_count': 'Wiederholungen', 'affected_orders': 'Betroffene Bestellungen',
-                                            'order_ids': 'Bestellnummern', **CATEGORY_LABELS})
-        st.dataframe(sku_rows, hide_index=True, use_container_width=True)
-        st.caption('Aufgeführt werden ausschließlich SKU-/Partner-Kombinationen mit mehr als einem Fall.')
+    top=report['partners'].iloc[0]
+    repeated=int((report['skus'].Kennzeichnung=='Wiederholt auffällig').sum())
+    for col,label,value in zip(st.columns(4),['Echte Qualitätsfälle','Top-Partner','Wiederholt auffällige SKUs','Priorität 1'],
+                               [report['total'],f"{top.Partner} · {int(top['Fälle'])}",repeated,len(report['priority'])]):
+        col.metric(label,value)
+    st.caption('Absolute Fallzahlen und volumenbereinigte Quoten sind getrennt ausgewiesen. Mehrere Signale desselben Falls erhöhen die Fallzahl nicht.')
+    partner_tab,group_tab,sku_tab,problem_tab,priority_tab,negative_tab,cases_tab=st.tabs(
+        ['Partner','Gruppen','Top-SKUs','Problemarten','Priorität 1','Negative Bewertungen','Alle Fälle'])
+    with partner_tab:
+        table=report['partners'].copy()
+        table['Anteil']=table['Anteil'].map(lambda value:f'{value:.1f} %')
+        table['Fälle je 100 Bestellungen']=table['Fälle je 100 Bestellungen'].map(lambda value:f'{value:.2f}' if pd.notna(value) else '—')
+        st.dataframe(table,hide_index=True,width='stretch')
+    with group_tab:
+        st.dataframe(report['groups'],hide_index=True,width='stretch')
+    with sku_tab:
+        table=report['skus'].head(20).copy()
+        table['Fehlerquote']=table['Fehlerquote'].map(lambda value:f'{value:.2f} %' if pd.notna(value) else '—')
+        st.dataframe(table,hide_index=True,width='stretch')
+        st.caption('„NB /“ bleibt sichtbar, wird ohne produktspezifischen SKU-Anteil aber nicht als Wiederholungsproblem priorisiert.')
+    with problem_tab:
+        st.dataframe(report['problems'],hide_index=True,width='stretch')
+    with priority_tab:
+        st.dataframe(report['priority'],hide_index=True,width='stretch')
+    with negative_tab:
+        st.dataframe(report['negative'],hide_index=True,width='stretch')
+    with cases_tab:
+        filters=st.columns(2)
+        partners=sorted(report['cases'].Partner.unique())
+        selected_partners=filters[0].multiselect('Partner filtern',partners,key='audit-case-partners')
+        available=report['cases'][report['cases'].Partner.isin(selected_partners)] if selected_partners else report['cases']
+        selected_skus=filters[1].multiselect('SKU filtern',sorted(available.SKU.unique()),key='audit-case-skus')
+        visible=available[available.SKU.isin(selected_skus)] if selected_skus else available
+        st.caption(f'{len(visible)} von {report["total"]} Qualitätsfällen angezeigt.')
+        st.dataframe(visible,hide_index=True,width='stretch',height=520)
 
 
 def render(data_dir, catalogue, orders, raw):

@@ -254,7 +254,11 @@ def partner_config():
 
 
 def normalized_partner(sku):
-    partner = clean(sku).split('/')[0].strip().upper()
+    normalized_sku = clean(sku).upper()
+    partner = partner_config().get('sku_partner_overrides', {}).get(normalized_sku)
+    if partner:
+        return clean(partner).upper()
+    partner = normalized_sku.split('/')[0].strip()
     return 'MH' if partner.startswith('MH') else partner
 
 
@@ -343,13 +347,11 @@ def load_master_data():
             issue = issue or 'Bestellnummer, SKU oder Produktname im Bestellbericht fehlt'
         if issue:
             issue = 'Zuordnung fehlt: ' + issue
-        partner = sku.split('/')[0].strip().upper()
+        partner = normalized_partner(sku)
         if not fee and not re.fullmatch(r'[A-Z0-9]+', partner):
             issue = issue or 'Zuordnung fehlt: SKU ohne verwertbaren Partner vor dem ersten Slash'
         if not fee and partner and not (partner.startswith(('PP', 'BA', 'MK', '001', 'MH')) or partner in known_group_b_partners()):
             issue = issue or 'Zuordnung fehlt: unbekannter Partner ' + partner
-        if partner.startswith('MH'):
-            partner = 'MH'
         if fee:
             partner, sku, title = '', '', title or 'Sonstige eBay-Gebühr'
         group = ('Gebühren' if fee else 'Ohne Zuordnung' if issue else

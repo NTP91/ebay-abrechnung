@@ -1,5 +1,8 @@
 {
   "group_b": ["NB", "FS"],
+  "sku_partner_overrides": {
+    "MAH-00422": "MH"
+  },
   "multi_item_orders": {
     "18-15098-91741": {
       "partner": "MH",

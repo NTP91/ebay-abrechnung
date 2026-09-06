@@ -1,5 +1,6 @@
 import unittest
 
+import core
 from trust_risk_cases import OrderIndex, category_flags, normalize_events
 
 
@@ -11,6 +12,9 @@ ORDERS = [
 
 
 class CaseEngineTests(unittest.TestCase):
+    def test_confirmed_sku_partner_override(self):
+        self.assertEqual(core.normalized_partner('MAH-00422'), 'MH')
+
     def test_identity_keeps_basket_lines_and_normalizes_mh(self):
         index = OrderIndex(ORDERS)
         self.assertEqual(index.resolve({"order_id": "basket", "line_item_id": "line-1"})["partner_id"], "NB")

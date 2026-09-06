@@ -24,13 +24,21 @@ def load():
     url = f"https://api.supabase.com/v1/projects/{ref}/database/query/read-only"
     headers = {"Authorization": "Bearer " + token, "Content-Type": "application/json"}
     queries = {
-        "cases": """select order_id,line_item_id,partner_id,sku,title,has_return,return_reason_de,
-buyer_comment,has_message,has_dispute,has_hold,has_negative_feedback,first_event_at,last_contact_at,
-case_status,is_problem,not_as_described,wrong_item,defective,used_instead_of_new,opened_used,empty_consumed,
-incomplete_parts,wrong_variant,item_not_received,other_complaint
-from public.audit_cases order by last_contact_at desc nulls last,first_event_at desc nulls last,partner_id,sku""",
+        "cases": """select c.order_id,c.line_item_id,c.partner_id,c.sku,c.title,c.has_return,c.return_reason_de,
+c.buyer_comment,c.has_message,c.has_dispute,c.has_hold,c.has_negative_feedback,c.first_event_at,c.last_contact_at,
+c.case_status,c.is_problem,c.not_as_described,c.wrong_item,c.defective,c.used_instead_of_new,c.opened_used,c.empty_consumed,
+c.incomplete_parts,c.wrong_variant,c.item_not_received,c.other_complaint,
+coalesce(s.problem_signal_count,0) problem_signal_count,coalesce(s.problem_sources,'') problem_sources
+from public.audit_cases c left join (
+ select order_id,line_item_id,sku,partner_id,
+ count(*) filter(where source in ('return','dispute','negative_feedback') or (source='message' and summary<>'')) problem_signal_count,
+ string_agg(distinct source,', ' order by source) filter(where source in ('return','dispute','negative_feedback') or (source='message' and summary<>'')) problem_sources
+ from public.audit_case_signals group by order_id,line_item_id,sku,partner_id
+) s using(order_id,line_item_id,sku,partner_id)
+where c.is_problem order by c.last_contact_at desc nulls last,c.first_event_at desc nulls last,c.partner_id,c.sku""",
         "partners": "select * from public.audit_summary_by_partner order by problem_cases desc,partner_id",
         "skus": "select * from public.audit_summary_by_sku where problem_cases>1 order by problem_cases desc,partner_id,sku",
+        "orders": "select bestellnummer,transaktionsnummer,artikelnummer,sku from public.orders",
     }
     result = {}
     try:

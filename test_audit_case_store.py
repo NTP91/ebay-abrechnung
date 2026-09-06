@@ -14,15 +14,15 @@ class AuditCaseStoreTests(unittest.TestCase):
 
     def test_only_fixed_readonly_queries_are_used(self):
         replies = []
-        for _ in range(3):
+        for _ in range(4):
             response = Mock(status_code=200)
             response.json.return_value = []
             replies.append(response)
         with patch.dict(os.environ, {'SUPABASE_ACCESS_TOKEN': 'secret', 'SUPABASE_PROJECT_REF': 'ref'}, clear=True), \
              patch('requests.post', side_effect=replies) as post:
             result = audit_case_store.load()
-        self.assertEqual(result, {'cases': [], 'partners': [], 'skus': []})
-        self.assertEqual(post.call_count, 3)
+        self.assertEqual(result, {'cases': [], 'partners': [], 'skus': [], 'orders': []})
+        self.assertEqual(post.call_count, 4)
         for call in post.call_args_list:
             self.assertTrue(call.args[0].endswith('/query/read-only'))
             self.assertNotIn('secret', str(call.kwargs['json']))
@@ -57,11 +57,12 @@ class AuditCaseViewTests(unittest.TestCase):
             'not_as_described','wrong_item','defective','used_instead_of_new','opened_used','empty_consumed',
             'incomplete_parts','wrong_variant','item_not_received','other_complaint')}}
         script = 'import trust_risk_ui\ntrust_risk_ui.render_case_check()'
-        with patch('trust_risk_ui.load_audit_cases', return_value={'cases': [case], 'partners': [partner], 'skus': [sku]}):
+        orders=[{'bestellnummer':'o1','transaktionsnummer':'l1','artikelnummer':'i1','sku':'MH / X'}]
+        with patch('trust_risk_ui.load_audit_cases', return_value={'cases': [case], 'partners': [partner], 'skus': [sku], 'orders': orders}):
             app = AppTest.from_string(script).run(timeout=20)
         self.assertEqual(len(app.exception), 0)
         self.assertEqual(len(app.multiselect), 2)
-        self.assertEqual(len(app.dataframe), 3)
+        self.assertEqual(len(app.dataframe), 7)
 
 
 if __name__ == '__main__':
