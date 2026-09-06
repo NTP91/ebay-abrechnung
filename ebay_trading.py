@@ -152,10 +152,11 @@ def merge_messages(my_messages, member_messages):
             current=dict(row); current['message_api']=origin
             if origin=='GetMemberMessages': current['sender_role']='buyer'
             identifier=str(current.get('message_id') or '').strip()
+            aliases={identifier,str(current.get('external_message_id') or '').strip()}-set([''])
             signature=(str(current.get('sender') or '').casefold(),str(current.get('item_id') or ''),
                        str(current.get('received_at') or '')[:16],_plain(current.get('text') or '').casefold())
-            if (identifier and identifier in ids) or signature in semantic:
+            if aliases & ids or signature in semantic:
                 continue
-            if identifier: ids.add(identifier)
+            ids.update(aliases)
             semantic.add(signature); result.append(current)
     return result

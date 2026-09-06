@@ -62,7 +62,7 @@ def catalogue_rows(catalogue):
         sku = str(row.get('SKU','')).strip()
         partner = str(row.get('Partner','')).strip()
         line = str(row.get('Transaktionsnummer','')).strip() or str(row.get('Artikelnummer','')).strip()
-        if order and line and sku and partner:
+        if order and line and sku:
             rows.append({'order_id':order, 'line_item_id':line, 'transaction_id':str(row.get('Transaktionsnummer','')).strip(),
                          'item_id':str(row.get('Artikelnummer','')).strip(), 'sku':sku, 'partner_id':partner,
                          'title':str(row.get('Produkttitel') or row.get('Angebotstitel') or '').strip()})
@@ -87,7 +87,10 @@ def _match(ref, catalogue):
         exact=[r for r in choices if r['item_id'] == item]
         if exact: choices=exact
         elif order: return None, 'Item-ID gehört nicht zur angegebenen Order-ID'
-    if len(choices)==1: return choices[0],''
+    if len(choices)==1:
+        if not choices[0]['partner_id']:
+            return None,'Bestellung und SKU vorhanden; Partnerzuordnung fehlt'
+        return choices[0],''
     if order and len(choices)>1: return None,'Mehrere Line Items; kein eindeutiger Artikelbezug'
     if not order and item and len(choices)>1:
         return None,'Item-ID gehört zu mehreren Bestellungen; Käufer-/Order-Kontext nicht eindeutig'

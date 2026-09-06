@@ -63,6 +63,12 @@ class TrustRiskCaseTests(unittest.TestCase):
         model=cases.build(self.empty_snapshot(),self.catalogue(),{'feedback':[],'messages':[message]})
         self.assertEqual(model['unmatched'][0]['reason'],'Keine Order-ID oder Artikelreferenz vorhanden')
 
+    def test_known_order_and_sku_without_partner_stays_explicitly_unmatched(self):
+        catalogue=self.catalogue(); catalogue.loc[0,'Partner']=''
+        message={'message_id':'m','order_id':'o1','item_id':'i1','text':'Der Artikel ist kaputt','sender_role':'buyer'}
+        model=cases.build(self.empty_snapshot(),catalogue,{'feedback':[],'messages':[message]})
+        self.assertEqual(model['unmatched'][0]['reason'],'Bestellung und SKU vorhanden; Partnerzuordnung fehlt')
+
     def test_generic_message_with_order_is_linked_but_not_quality_problem(self):
         message={'message_id':'m','subject':'Bestellung o1','order_id':'o1','text':'Danke','sender_role':'buyer'}
         model=cases.build(self.empty_snapshot(),self.catalogue(),{'feedback':[],'messages':[message]})
@@ -83,6 +89,13 @@ class TrustRiskCaseTests(unittest.TestCase):
         self.assertEqual(len(merge_messages([base],[base])),1)
         other={**base,'message_id':'other'}
         self.assertEqual(len(merge_messages([base],[other])),1)
+
+    def test_external_message_id_deduplicates_cross_api_copy(self):
+        mailbox={'message_id':'mailbox','external_message_id':'member','item_id':'i','text':'Text A','sender':'buyer'}
+        member={'message_id':'member','item_id':'i','text':'Text B','sender':'buyer'}
+        merged=merge_messages([mailbox],[member])
+        self.assertEqual(len(merged),1)
+        self.assertEqual(merged[0]['message_id'],'mailbox')
 
     def test_wrong_variant_is_not_automatically_wrong_item(self):
         self.assertEqual(cases.category('WRONG_SIZE',''),'wrong_variant')

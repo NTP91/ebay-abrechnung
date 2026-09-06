@@ -80,7 +80,7 @@ def main():
     catalogue['Partner']=catalogue['SKU'].map(core.normalized_partner)
     catalogue['Produkttitel']=catalogue['Angebotstitel']
     known={'001','BA','MK','PP','MH',*core.known_group_b_partners()}
-    catalogue=catalogue[catalogue['Partner'].isin(known)].copy()
+    catalogue.loc[~catalogue['Partner'].isin(known),'Partner']=''
     snapshot=trust_risk.collect(rest)
     trading=TradingClient(rest)
     coverage={}
@@ -134,6 +134,10 @@ def main():
       is_problem=exists(select 1 from public.audit_case_signals s where s.order_id=c.order_id and s.line_item_id=c.line_item_id and s.sku=c.sku and s.partner_id=c.partner_id and (s.source in ('return','dispute','negative_feedback') or (s.source='message' and s.summary<>'')));
       delete from public.audit_unmatched_signals u using public.audit_case_signals s
        where u.source=s.source and u.external_id=s.external_id;
+      delete from public.audit_unmatched_signals u
+       where u.source='message' and coalesce(u.payload->>'external_message_id','')<>''
+       and exists(select 1 from public.audit_unmatched_signals other
+         where other.source='message' and other.external_id=u.payload->>'external_message_id');
       update public.audit_unmatched_signals set reason='Item-ID gehört zu mehreren Bestellungen; Käufer-/Order-Kontext nicht eindeutig'
        where source='message' and reason='API-Referenz ist in den Bestelldaten nicht eindeutig'
        and coalesce(payload->>'item_id','')<>'';"""
