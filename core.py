@@ -247,6 +247,45 @@ def import_reports(frames, path, kind, details=None):
         return max(0, count)
 
 
+def partner_config():
+    return json.loads(Path(__file__).with_name('partners.json').read_text(encoding='utf-8'))
+
+
+def normalized_partner(sku):
+    partner = clean(sku).split('/')[0].strip().upper()
+    return 'MH' if partner.startswith('MH') else partner
+
+
+def configured_multi_item_match(row, matches):
+    """Resolve one configured parent transaction without creating financial child rows."""
+    config = partner_config().get('multi_item_orders', {}).get(clean(row.get('Bestellnummer', '')))
+    if not config or not isinstance(config.get('line_items'), dict):
+        return None
+    expected = {str(key): str(value) for key, value in config['line_items'].items()}
+    actual = {clean(item.Transaktionsnummer): clean(item.get('Anzahl', '')) for _, item in matches.iterrows()}
+    if len(matches) != len(expected) or actual != expected or set(matches.SKU.map(normalized_partner)) != {config.get('partner')}:
+        return None
+    if not matches.Angebotstitel.map(clean).astype(bool).all():
+        return None
+    references = clean(row.get('API_Artikelreferenzen', ''))
+    if references:
+        try:
+            reference_ids = {str(item['lineItemId']) for item in json.loads(references)}
+        except (ValueError, TypeError, KeyError):
+            return None
+        if reference_ids != set(expected):
+            return None
+    result = matches.iloc[0].copy()
+    result['Transaktionsnummer'] = ''
+    result['Artikelnummer'] = ''
+    result['SKU'] = ' | '.join(matches.SKU.map(clean))
+    result['Angebotstitel'] = '\n'.join(
+        f"{expected[clean(item.Transaktionsnummer)]} × {clean(item.Angebotstitel)}"
+        for _, item in matches.iterrows()
+    )
+    return result
+
+
 def match_order(row, orders):
     for keys in [('Transaktionsnummer',), ('Bestellnummer', 'Artikelnummer'), ('Bestellnummer',)]:
         if not all(row[key] for key in keys):
@@ -255,6 +294,9 @@ def match_order(row, orders):
         for key in keys:
             matches = matches[matches[key] == row[key]]
         if len(matches) > 1:
+            configured = configured_multi_item_match(row, matches)
+            if configured is not None:
+                return configured, ''
             return None, 'Mehrdeutige Bestellzuordnung'
         if len(matches) == 1:
             match = matches.iloc[0]
@@ -333,7 +375,7 @@ def invoice_payout_remark(payout_ids):
 
 
 def known_group_b_partners():
-    return set(json.loads(Path(__file__).with_name('partners.json').read_text(encoding='utf-8'))['group_b'])
+    return set(partner_config()['group_b'])
 
 
 def build_invoice_payload(master, payout_id, contact_id, money_received=False):

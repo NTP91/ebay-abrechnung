@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,10 +20,19 @@ class ParentChildTests(unittest.TestCase):
         network.start(); self.addCleanup(network.stop)
         parent = payout('7718008497', transaction='', order='18-15098-91741', amount='149.96')
         parent['Transaktionsbetrag (inkl. Kosten)'] = '149.96'
+        parent['API_Artikelreferenzen'] = json.dumps([
+            {'lineItemId': '10087571312118'}, {'lineItemId': '10087571312218'},
+        ])
         rows = [parent]
-        for transaction, item, amount in [('10087571312118','i1','99.98'),('10087571312218','i2','49.98')]:
+        for transaction, item, amount, sku, title in [
+            ('10087571312118','i1','99.98','MH / SKU-1','Produkt Eins'),
+            ('10087571312218','i2','49.98','MH / SKU-2','Produkt Zwei'),
+        ]:
             child = payout('7718008497',transaction=transaction,order='18-15098-91741',amount='--')
             child['Artikelnummer'] = item
+            child['SKU'] = sku
+            child['Angebotstitel'] = title
+            child['Anzahl'] = '2'
             child['Zwischensumme Artikel'] = amount
             child['Verpackung und Versand'] = '0'
             child['Transaktionsbetrag (inkl. Kosten)'] = '--'
@@ -44,6 +54,10 @@ class ParentChildTests(unittest.TestCase):
         master = core.load_master_data()
         self.assertEqual(len(master),1)
         self.assertEqual(master.Erlös_Brutto.sum(),149.96)
+        self.assertEqual(master.iloc[0].Partner,'MH')
+        self.assertFalse(master.iloc[0]['Prüfhinweis'])
+        self.assertIn('2 × Produkt Eins',master.iloc[0].Angebotstitel)
+        self.assertIn('2 × Produkt Zwei',master.iloc[0].Angebotstitel)
         orders = core.read_master(core.ORDERS_DB_PATH)
         for _,row in raw.iloc[1:].iterrows():
             match,issue=core.match_order(row,orders)
@@ -65,6 +79,15 @@ class ParentChildTests(unittest.TestCase):
         result=self.upload(self.frame)
         self.assertTrue(result['transactions']['warnings'])
         self.assertTrue(core.read_master(core.PAYOUTS_DB_PATH).empty)
+
+    def test_configured_parent_stays_ambiguous_if_one_child_partner_differs(self):
+        core.import_reports([self.frame],core.PAYOUTS_DB_PATH,'payout')
+        orders=core.read_master(core.ORDERS_DB_PATH)
+        orders.loc[orders.Transaktionsnummer=='10087571312218','SKU']='NB / fremd'
+        parent=core.read_master(core.PAYOUTS_DB_PATH).iloc[0]
+        match,issue=core.match_order(parent,orders)
+        self.assertIsNone(match)
+        self.assertEqual(issue,'Mehrdeutige Bestellzuordnung')
 
     def test_missing_parent_or_single_amount_is_hard_error(self):
         for frame in [self.frame.iloc[1:],payout(amount='--')]:

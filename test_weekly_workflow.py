@@ -58,6 +58,13 @@ class WeeklyWorkflowTests(unittest.TestCase):
         with patch.object(core,'known_group_b_partners',return_value=set()):
             self.assertIn('unbekannter Partner',core.load_master_data().iloc[0]['Prüfhinweis'])
 
+    def test_fs_is_configured_as_group_b_partner(self):
+        self.seed('FS / / WN2')
+        row=core.load_master_data().iloc[0]
+        self.assertEqual(row.Partner,'FS')
+        self.assertEqual(row.Gruppe,'Gruppe B')
+        self.assertEqual(row['Prüfhinweis'],'')
+
     def test_order_identity_enrichment_and_conflict(self):
         first=payout()
         second=first.copy()
