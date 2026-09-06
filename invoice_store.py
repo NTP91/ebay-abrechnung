@@ -1,6 +1,7 @@
 """Durable incoming-invoice records mirrored independently of SQLite."""
 import json
 import os
+from atomic_io import replace_file
 
 
 def initialize(db, directory):
@@ -31,4 +32,4 @@ def mirror(db, directory):
     with temporary.open('w',encoding='utf-8') as output:
         json.dump(value,output,ensure_ascii=False)
         output.flush(); os.fsync(output.fileno())
-    os.replace(temporary,path)
+    replace_file(temporary,path)

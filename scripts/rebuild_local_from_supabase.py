@@ -22,6 +22,8 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from atomic_io import replace_file
+
 
 EXPECTED_HOLDS = {"08-15103-42438", "06-15117-56051"}
 ALLOWED_FINANCE_TYPES = {"SALE", "REFUND", "NON_SALE_CHARGE"}
@@ -87,7 +89,7 @@ def atomic_csv(frame: pd.DataFrame, path: Path) -> None:
     with tempfile.NamedTemporaryFile("w", encoding="utf-8-sig", newline="", delete=False, dir=path.parent) as out:
         temporary = Path(out.name)
         frame.to_csv(out, sep=";", index=False)
-    os.replace(temporary, path)
+    replace_file(temporary, path)
 
 
 def atomic_json(document: dict, path: Path) -> None:
@@ -95,7 +97,7 @@ def atomic_json(document: dict, path: Path) -> None:
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=path.parent) as out:
         temporary = Path(out.name)
         json.dump(document, out, ensure_ascii=False, default=str)
-    os.replace(temporary, path)
+    replace_file(temporary, path)
 
 
 def amount_value(value: object) -> str:

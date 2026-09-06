@@ -9,6 +9,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from filelock import FileLock
+from atomic_io import replace_file
 
 from ebay_readonly import EbayError
 
@@ -82,7 +83,7 @@ def save_snapshot(data_dir, snapshot):
             output.write(text)
             output.flush()
             os.fsync(output.fileno())
-        os.replace(temporary, path)
+        replace_file(temporary, path)
 
 
 def collect(client, payout_orders=(), progress=None):

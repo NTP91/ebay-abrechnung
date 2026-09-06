@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+from atomic_io import replace_file
 import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -129,7 +130,7 @@ def save(payout, bank, decisions, actor, note, expected_version, expected_source
         temporary=(directory/FILE).with_suffix('.json.tmp')
         with temporary.open('w',encoding='utf-8') as f:
             f.write(encoded);f.flush();os.fsync(f.fileno())
-        os.replace(temporary,directory/FILE)
+        replace_file(temporary,directory/FILE)
         return inspect(payout,document=document)
 
 

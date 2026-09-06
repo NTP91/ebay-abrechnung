@@ -7,6 +7,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from filelock import FileLock
+from atomic_io import replace_file
 
 FILE = 'Settlement_API_Holds.json'
 
@@ -83,7 +84,7 @@ def ingest(directory, snapshot):
             output.write(text)
             output.flush()
             os.fsync(output.fileno())
-        os.replace(temporary, directory / FILE)
+        replace_file(temporary, directory / FILE)
         return document
 
 

@@ -15,9 +15,11 @@ import hashlib
 import requests
 import zipfile
 from contextlib import contextmanager
+from atomic_io import replace_file
 
-ORDERS_DB_PATH = str(Path(os.environ.get('PAYMENT_DATA_DIR', '.')) / 'Master_Orders.csv')
-PAYOUTS_DB_PATH = str(Path(os.environ.get('PAYMENT_DATA_DIR', '.')) / 'Master_Payouts.csv')
+DATA_DIR = Path(os.environ.get('PAYMENT_DATA_DIR') or Path(__file__).resolve().parent).expanduser().resolve()
+ORDERS_DB_PATH = str(DATA_DIR / 'Master_Orders.csv')
+PAYOUTS_DB_PATH = str(DATA_DIR / 'Master_Payouts.csv')
 
 FIELDS = {
     'Bestellnummer': ['bestellnummer', 'order number', 'order id'],
@@ -240,7 +242,7 @@ def import_reports(frames, path, kind, details=None):
         os.close(fd)
         try:
             merged.to_csv(temporary, sep=';', index=False, encoding='utf-8-sig')
-            os.replace(temporary, destination)
+            replace_file(temporary, destination)
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
@@ -498,19 +500,19 @@ def ledger():
                 json.dump(corrections, output, ensure_ascii=False)
                 output.flush()
                 os.fsync(output.fileno())
-            os.replace(temporary, correction_guard)
+            replace_file(temporary, correction_guard)
             temporary = guard.with_suffix('.json.tmp')
             with temporary.open('w', encoding='utf-8') as output:
                 json.dump(records, output, ensure_ascii=False)
                 output.flush()
                 os.fsync(output.fileno())
-            os.replace(temporary, guard)
+            replace_file(temporary, guard)
             temporary = workflow_guard.with_suffix('.json.tmp')
             with temporary.open('w', encoding='utf-8') as output:
                 json.dump(workflow_records, output, ensure_ascii=False)
                 output.flush()
                 os.fsync(output.fileno())
-            os.replace(temporary, workflow_guard)
+            replace_file(temporary, workflow_guard)
 
 
 def audit(db, payout_id, event):

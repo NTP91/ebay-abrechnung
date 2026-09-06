@@ -16,3 +16,7 @@ Settlement_Payout_Reconciliation.json*
 Settlement_API_Holds.json*
 Settlement_Ebay_Sync.json*
 Ebay_Readonly/
+
+supabase/.temp/
+recovery.*.log
+recovery.pid

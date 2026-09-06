@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import os
+from atomic_io import replace_file
 from pathlib import Path
 import re
 import sqlite3
@@ -58,7 +59,7 @@ def save(directory, document):
     temporary=(directory/FILE).with_suffix('.tmp')
     with temporary.open('w',encoding='utf-8') as out:
         out.write(text);out.flush();os.fsync(out.fileno())
-    os.replace(temporary,directory/FILE)
+    replace_file(temporary,directory/FILE)
 
 
 def eur(value):
