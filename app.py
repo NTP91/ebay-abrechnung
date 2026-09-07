@@ -10,7 +10,6 @@ import draft_correction
 import partner_invoices
 import payout_reconciliation
 import trust_risk_ui
-import lexware_config
 from datetime import date
 from partner_export import export_partner_excel, prepare_partner_export
 
@@ -296,11 +295,8 @@ with st.sidebar:
                             st.caption(f"{receipt['historical_without_sku']} historische Positionen ohne SKU archiviert · nicht abrechnungsrelevant")
     invoice_entry = st.empty()
     st.divider()
-    configured_key,configured_key_source=lexware_config.configured_api_key()
     with st.expander('Lexware-Verbindung'):
-        api_key=st.text_input('API-Key',type='password',value=configured_key,key='lexware-api-key')
-        if configured_key_source:
-            st.caption('API-Key aus der lokalen Konfiguration geladen.')
+        api_key=st.text_input('API-Key',type='password')
         st.caption('Evelyn · Kundennummer 16335. Nur Entwürfe, kein Versand.')
     with st.expander('Datensicherung'):
         st.caption('Quelldaten, Historie und Rechnungssperren gemeinsam sichern.')
