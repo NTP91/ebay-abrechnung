@@ -552,13 +552,21 @@ def sync_status(master):
         return pd.read_sql_query('SELECT id AS Auszahlung, status AS Status, invoice_id AS Entwurf, attempt AS Sperre FROM payouts ORDER BY id', db)
 
 
+def payout_receipt_confirmed(block):
+    """Accept the final receipt evidence emitted by CSV and Finances API imports."""
+    if block.empty or 'eBay-Auszahlungsstatus' not in block:
+        return False
+    statuses = block['eBay-Auszahlungsstatus'].map(clean).str.casefold()
+    return bool(statuses.isin({'betrag überwiesen', 'payout'}).all())
+
+
 def confirm_received(payout_id):
     master = load_master_data()
     block = master[master['Auszahlung Nr.'] == str(payout_id)]
     if block.empty or block['Prüfhinweis'].astype(bool).any():
         raise ValueError('Zuordnung fehlt.')
     # Confirmation supplements, but cannot override, missing transfer evidence.
-    if not (block['eBay-Auszahlungsstatus'] == 'Betrag überwiesen').all():
+    if not payout_receipt_confirmed(block):
         raise ValueError('eBay-Nachweis „Betrag überwiesen“ fehlt.')
     sync_status(master)
     with ledger() as db:

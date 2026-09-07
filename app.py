@@ -493,7 +493,10 @@ with group_b:
                 col.metric(label,value)
             st.caption('Rabatt wird auf den Nettobetrag berechnet und anschließend vom Bruttobetrag abgezogen.')
 
-        can_create=bool(selected and totals and api_key and st.session_state.get('lexware-received') and st.session_state.get('lexware-prior') and st.session_state.get('lexware-once'))
+        can_create=studio_view.lexware_create_ready(
+            selected, totals, api_key,
+            (st.session_state.get('lexware-received'), st.session_state.get('lexware-prior'), st.session_state.get('lexware-once')),
+        )
         download_col,lexware_col,_=st.columns([1.25,1.75,1.5],vertical_alignment='center')
         with download_col:
             if all_totals:

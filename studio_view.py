@@ -46,8 +46,14 @@ def eligible_rows(master, states):
         return master.copy()
     unlocked = set(states.loc[states.Sperre.isna() & states.Entwurf.isna() & ~states.Status.str.contains('Prüfung', na=False), 'Auszahlung'])
     bad = set(master.loc[master['Prüfhinweis'].astype(bool), 'Auszahlung Nr.'])
+    paid = {payout for payout, block in master.groupby('Auszahlung Nr.') if core.payout_receipt_confirmed(block)}
     business = position_workflow.positions(master, states)
-    return business[business['Auszahlung Nr.'].isin(unlocked - bad) & (business['Erlös_Brutto'] > 0) & (business.Art == 'Bestellung') & ~business['closed_at'].astype(bool) & ~business.Quellenpruefung.astype(bool) & ~api_holds.mask(business)].copy()
+    return business[business['Auszahlung Nr.'].isin((unlocked - bad) & paid) & (business['Erlös_Brutto'] > 0) & (business.Art == 'Bestellung') & ~business['closed_at'].astype(bool) & ~business.Quellenpruefung.astype(bool) & ~api_holds.mask(business)].copy()
+
+
+def lexware_create_ready(selected, totals, api_key, confirmations):
+    """Pure UI gate; durable invoice locks are still enforced in core."""
+    return bool(selected and totals and str(api_key).strip() and all(confirmations))
 
 
 def partner_rows(business):
