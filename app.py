@@ -77,28 +77,59 @@ def partner_panel(rows, rate, prefix):
         st.warning(str(exc))
         return
     summary = summary.set_index('Partner')
+    invoice_records=partner_invoices.list_invoices()
     for partner, partner_block in rows.groupby('Partner'):
         with st.container(border=True):
             values=summary.loc[partner]
+            awaiting_payment=partner_block[partner_block.reviewed_at.astype(bool) & ~partner_block.paid_at.astype(bool)]
+            next_invoice=partner_block[~partner_block.reviewed_at.astype(bool)]
+            group_a_waits_for_all=not next_invoice.empty and partner_block.iloc[0].Gruppe=='Gruppe A'
             st.subheader(partner)
-            for col,label,value in zip(st.columns(4),['Offene Positionen','eBay-Auszahlungsbetrag brutto',f'Rabatt {rate} netto','Rechnungsbetrag brutto'],[str(len(partner_block)),euros(values['eBay-Brutto']),euros(values['Rabatt netto']),euros(values['Rechnungsbetrag'])]):
+            for col,label,value in zip(st.columns(4),['Offene Partnerpositionen gesamt','eBay-Auszahlungsbetrag brutto',f'Rabatt {rate} netto','Offener Gesamtbetrag brutto'],[str(len(partner_block)),euros(values['eBay-Brutto']),euros(values['Rabatt netto']),euros(values['Rechnungsbetrag'])]):
                 col.metric(label,value)
-            st.caption('Rabatt wird auf den Nettobetrag berechnet und anschließend vom Bruttobetrag abgezogen.')
             payout_ids=sorted(partner_block['Auszahlung Nr.'].unique())
-            unreviewed=int((~partner_block.reviewed_at.astype(bool)).sum())
-            status='Partnerrechnung geprüft' if not unreviewed else f'{unreviewed} '+('Position noch nicht geprüft' if unreviewed==1 else 'Positionen noch nicht geprüft')
-            st.caption(f"Kumulative Sammelabrechnung aus {len(payout_ids)} Payout{'s' if len(payout_ids)!=1 else ''} · {status}. Payoutnummern bleiben in Export und Historie nachvollziehbar.")
-            download_col,action_col,_=st.columns([1.3,1.5,2])
-            with download_col:
-                statement_block=partner_block[~partner_block.reviewed_at.astype(bool)]
-                if statement_block.empty:
-                    st.caption('Alle Positionen bereits auf freigegebenen Partnerbelegen. Originalbelege unten verfügbar.')
-                else:
-                    download('Einzelabrechnung herunterladen', statement_block, prefix+'_'+partner)
-                    if len(statement_block)!=len(partner_block):
-                        st.caption('Download enthält nur die noch nicht auf freigegebenen Partnerbelegen enthaltenen Positionen.')
-            with action_col:
-                workflow_panel(partner_block,prefix+'_'+partner,action_only=True)
+            st.caption(f"Gesamtoffenstand aus {len(payout_ids)} Payout{'s' if len(payout_ids)!=1 else ''}. Bereits freigegebene Rechnungen und neue Abrechnungspositionen werden getrennt ausgewiesen.")
+            payment_col,new_col=st.columns(2)
+            with payment_col:
+                with st.container(border=True):
+                    st.markdown('**Freigegebene Rechnung · Zahlung offen**')
+                    covered=set()
+                    for record in invoice_records:
+                        if record['partner']!=partner:
+                            continue
+                        if not record['approved_at'] or record['expected']['scope']!='Rechnung':
+                            continue
+                        invoice_keys={item['key'] for item in record['expected']['items']}
+                        invoice_rows=awaiting_payment[awaiting_payment.position_key.isin(invoice_keys)]
+                        if invoice_rows.empty:
+                            continue
+                        covered.update(invoice_rows.position_key)
+                        st.metric('In freigegebener Rechnung',f'{len(invoice_rows)} Positionen')
+                        st.metric('Zahlung offen',euros(partner_invoices.confirmed_payment_total(invoice_rows)))
+                        st.caption(f"{record['invoice_number'] or record['file_name']} · geprüft/freigegeben · Partnerzahlung noch offen")
+                        label='Bezahlt / abgeschlossen' if invoice_rows.iloc[0].Gruppe=='Gruppe A' else 'Partner bezahlt'
+                        if group_a_waits_for_all:
+                            st.caption('Zahlungsabschluss erst möglich, wenn alle aktuell offenen Positionen dieses Partners geprüft sind.')
+                        elif st.button(label,key=prefix+'_'+partner+'-'+record['id']+'-partner-paid',icon=':material/check_circle:',use_container_width=True):
+                            st.session_state['confirmation_request']=(invoice_rows.copy(),'partner_paid',label)
+                    if awaiting_payment.empty:
+                        st.caption('Aktuell wartet keine freigegebene Partnerrechnung auf Zahlung.')
+                    elif set(awaiting_payment.position_key)-covered:
+                        st.warning('Geprüfte Positionen ohne eindeutigen freigegebenen Rechnungsbezug; Zahlung gesperrt.')
+            with new_col:
+                with st.container(border=True):
+                    st.markdown('**Neu für nächste Rechnung**')
+                    if next_invoice.empty:
+                        st.caption('Keine neuen abrechnungsfähigen Positionen.')
+                    else:
+                        pending=studio_view.partner_summary(next_invoice).iloc[0]
+                        st.metric('Neu für nächste Rechnung',f'{len(next_invoice)} Positionen')
+                        st.metric('Neue offene Rechnungssumme',euros(pending['Rechnungsbetrag']))
+                        st.caption('Noch nicht geprüft/freigegeben · nicht in einer bestehenden Partnerrechnung gebunden.')
+                        if group_a_waits_for_all and awaiting_payment.empty:
+                            st.caption('Zahlungsabschluss erst möglich, wenn alle aktuell offenen Positionen dieses Partners geprüft sind.')
+                        download('Einzelabrechnung herunterladen',next_invoice,prefix+'_'+partner)
+            st.caption('Rabatt wird auf den Nettobetrag berechnet und anschließend vom Bruttobetrag abgezogen. Payoutnummern bleiben in Export und Historie nachvollziehbar.')
             invoice_panel(partner_block,prefix+'_'+partner)
 
 

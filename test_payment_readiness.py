@@ -94,6 +94,30 @@ class PaymentReadinessTests(unittest.TestCase):
         result=workflow.positions().set_index('Bestellnummer')
         self.assertTrue(result.loc['new','closed_at']);self.assertFalse(result.loc['old','closed_at'])
 
+    def test_group_b_invoice_payment_action_ignores_new_unreviewed_positions(self):
+        from streamlit.testing.v1 import AppTest
+        self.seed([payout('p1','old','old',sku='NB / 1')])
+        self.approve(workflow.positions(),number='NB-OLD')
+        self.seed([payout('p2','new','new',sku='NB / 2')])
+
+        app=AppTest.from_file('app.py').run(timeout=30)
+        self.assertFalse(app.exception)
+        self.assertIn('Partner bezahlt',[button.label for button in app.button])
+        metrics={metric.label:metric.value for metric in app.metric}
+        self.assertEqual(metrics['In freigegebener Rechnung'],'1 Positionen')
+        self.assertEqual(metrics['Neu für nächste Rechnung'],'1 Positionen')
+        self.assertTrue(any('NB-OLD' in caption.value for caption in app.caption))
+
+        next(button for button in app.button if button.label=='Partner bezahlt').click().run()
+        self.assertIn('Verbindlich bestätigen',[button.label for button in app.button])
+        next(button for button in app.button if button.label=='Verbindlich bestätigen').click().run()
+        result=workflow.positions().set_index('Bestellnummer')
+        self.assertTrue(result.loc['old','paid_at'])
+        self.assertFalse(result.loc['old','closed_at'])
+        self.assertFalse(result.loc['old','received_at'])
+        self.assertFalse(result.loc['new','reviewed_at'])
+        self.assertFalse(result.loc['new','paid_at'])
+
     def test_payload_never_includes_a_reviewed_position_with_changed_source(self):
         self.seed([payout('p1','changed','changed'),payout('p1','good','good')])
         self.approve(workflow.positions())
