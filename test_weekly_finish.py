@@ -129,6 +129,8 @@ class WeeklyFinishTests(unittest.TestCase):
         self.assertTrue(workflow.positions().closed_at.astype(bool).all())
         self.assertNotIn('Bezahlt / abgeschlossen',[b.label for b in app.button])
         self.assertNotIn('Einzelabrechnung herunterladen',[b.label for b in app.get('download_button')])
+        self.assertIn('Originalrechnung öffnen',[b.label for b in app.get('download_button')])
+        self.assertTrue(any('bezahlt / Partnerabrechnung abgeschlossen' in message.value for message in app.success))
         self.assertEqual(workflow.payout_status(workflow.positions())['p1'],'abgeschlossen')
 
     def test_ui_one_weekly_statement_for_partner_across_payouts(self):

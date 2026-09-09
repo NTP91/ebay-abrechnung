@@ -143,6 +143,13 @@ def list_invoices(partner=None):
     return [r for r in records if partner is None or r['partner']==partner]
 
 
+def stored_original(record):
+    """Return the immutable original only while its stored hash still matches."""
+    path=Path(core.PAYOUTS_DB_PATH).parent/'Partner_Invoices'/record['file_ref']
+    if path.name!=record['file_ref'] or not path.is_file(): return None
+    return path if hashlib.sha256(path.read_bytes()).hexdigest()==record['file_hash'] else None
+
+
 def upload(partner, filename, content, scope='Rechnung'):
     suffix=Path(filename).suffix.lower()
     if suffix not in ('.pdf','.xlsx','.csv') or not content or len(content)>20*1024*1024:
@@ -209,8 +216,7 @@ def authorize_review(db, invoice_id, chosen, actor, reason, override_confirmed):
         raise ValueError('Manuelle Freigabe benötigt ausdrückliche Bestätigung und eine nachvollziehbare Begründung.')
     expected={r['key']:r for r in record['expected']['items']}
     if set(chosen.position_key)!=set(expected): raise ValueError('Positionsumfang stimmt nicht mit der Eingangsrechnung überein.')
-    path=Path(core.PAYOUTS_DB_PATH).parent/'Partner_Invoices'/record['file_ref']
-    if path.name!=record['file_ref'] or not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest()!=record['file_hash']:
+    if stored_original(record) is None:
         raise ValueError('Originalrechnung fehlt oder wurde verändert; Freigabe gesperrt.')
     for _,position in chosen.iterrows():
         if expected[position.position_key]['source']!=workflow.source_snapshot(position):

@@ -127,6 +127,10 @@ class PaymentReadinessTests(unittest.TestCase):
         self.assertFalse(result.loc['old','received_at'])
         self.assertFalse(result.loc['new','reviewed_at'])
         self.assertFalse(result.loc['new','paid_at'])
+        self.assertTrue(any('bezahlt / Partnerabrechnung abgeschlossen' in message.value for message in app.success))
+        self.assertTrue(any('Zahlungsdatum:' in caption.value for caption in app.caption))
+        self.assertIn('Originalrechnung öffnen',[button.label for button in app.get('download_button')])
+        self.assertIn('Details · Bestellnummern und Payouts',[expander.label for expander in app.expander])
 
     def test_payload_never_includes_a_reviewed_position_with_changed_source(self):
         self.seed([payout('p1','changed','changed'),payout('p1','good','good')])

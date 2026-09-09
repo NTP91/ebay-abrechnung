@@ -136,7 +136,9 @@ class PartnerInvoiceTests(unittest.TestCase):
     def test_original_tampering_and_changed_source_prevent_approval(self):
         record=self.upload()
         path=self.root/'Partner_Invoices'/record['file_ref'];original=path.read_bytes()
+        self.assertEqual(incoming.stored_original(record),path)
         path.write_bytes(b'changed')
+        self.assertIsNone(incoming.stored_original(record))
         with self.assertRaisesRegex(ValueError,'Originalrechnung'):incoming.approve(record['id'],'Tester')
         path.write_bytes(original)
         orders=core.read_master(core.ORDERS_DB_PATH);orders.loc[0,'Angebotstitel']='Veränderter Titel'

@@ -67,19 +67,73 @@ def download(label, rows, key, kind='partner'):
         st.warning(f'Export benötigt Prüfung: {exc}')
 
 
-def partner_panel(rows, rate, prefix):
-    if rows.empty:
+def invoice_history_panel(partner, rows, records, key):
+    invoices=[record for record in records if record['partner']==partner and record['expected']['scope']=='Rechnung']
+    st.markdown('**Rechnungshistorie**')
+    if not invoices:
+        st.caption('Noch keine Partnerrechnung gespeichert.')
+        return
+    for record in invoices:
+        expected=record['expected']['items']; keys={item['key'] for item in expected}
+        invoice_rows=rows[rows.position_key.isin(keys)] if not rows.empty else rows
+        complete=len(invoice_rows)==len(keys)
+        paid=bool(complete and invoice_rows.paid_at.astype(bool).all())
+        closed=bool(complete and invoice_rows.closed_at.astype(bool).all())
+        payment_dates=sorted({str(value) for value in invoice_rows.paid_at if value}) if complete else []
+        with st.container(border=True):
+            st.write('**'+(record['invoice_number'] or record['file_name'])+'**')
+            detail_col,amount_col,count_col=st.columns([1.4,1,1])
+            detail_col.caption('Rechnungsdatum')
+            detail_col.write(record['invoice_date'] or 'nicht erkannt')
+            amount_col.metric('Betrag',euros(float(record['expected']['total'])))
+            count_col.metric('Positionen',str(len(expected)))
+            if paid:
+                st.success('bezahlt / Partnerabrechnung abgeschlossen')
+                st.caption('Zahlungsdatum: '+', '.join(payment_dates))
+                if not closed and not invoice_rows.empty and invoice_rows.iloc[0].Gruppe=='Gruppe B':
+                    st.caption('Partnerseite abgeschlossen · Evelyn-Zahlung und Gesamtabschluss bleiben davon getrennt.')
+            elif record['approved_at']:
+                st.warning('geprüft/freigegeben · Zahlung offen')
+            elif record['report']['status']=='matched':
+                st.info('geprüft · Freigabe offen')
+            else:
+                st.warning('Prüfung offen')
+            upload_stamp=studio_view.local_datetime(core.pd.Series([record['uploaded_at']])).iloc[0]
+            approval_stamp=studio_view.local_datetime(core.pd.Series([record['approved_at']])).iloc[0] if record['approved_at'] else 'offen'
+            st.caption(f'Upload: {upload_stamp} · Freigabe: {approval_stamp}')
+            original=partner_invoices.stored_original(record)
+            if original is None:
+                st.error('Gespeicherte Originalrechnung fehlt oder der Dateihash stimmt nicht.')
+            else:
+                st.download_button('Originalrechnung öffnen',original.read_bytes(),record['file_name'],'application/pdf',key=key+'-'+record['id']+'-history-original',icon=':material/open_in_new:')
+            with st.expander('Details · Bestellnummern und Payouts'):
+                detail=core.pd.DataFrame(expected)
+                st.dataframe(detail[['order','payout','sku']].rename(columns={'order':'Bestellnummer','payout':'Payoutnummer','sku':'SKU'}),hide_index=True,use_container_width=True)
+
+
+def partner_panel(rows, rate, prefix, history_rows=None):
+    history_rows=rows if history_rows is None else history_rows
+    if rows.empty and history_rows.empty:
         st.info('Aktuell keine offenen Partnerabrechnungen für diese Auswahl.')
         return
     invoice_records=partner_invoices.list_invoices()
-    for partner, partner_block in rows.groupby('Partner'):
+    history_keys=set(history_rows.position_key) if not history_rows.empty else set()
+    history_partners={record['partner'] for record in invoice_records
+                      if record['expected']['scope']=='Rechnung' and history_keys.intersection(item['key'] for item in record['expected']['items'])}
+    partners=sorted(set(rows.Partner) | history_partners)
+    for partner in partners:
+        partner_block=rows[rows.Partner==partner] if not rows.empty else rows
+        partner_history=history_rows[history_rows.Partner==partner] if not history_rows.empty else history_rows
         with st.container(border=True):
             awaiting_payment=partner_block[partner_block.reviewed_at.astype(bool) & ~partner_block.paid_at.astype(bool)]
             next_invoice=partner_block[~partner_block.reviewed_at.astype(bool)]
-            group_a_waits_for_all=not next_invoice.empty and partner_block.iloc[0].Gruppe=='Gruppe A'
+            group_a_waits_for_all=not next_invoice.empty and not partner_history.empty and partner_history.iloc[0].Gruppe=='Gruppe A'
             st.subheader(partner)
             payout_ids=sorted(partner_block['Auszahlung Nr.'].unique())
-            st.caption(f"{len(payout_ids)} Payout{'s' if len(payout_ids)!=1 else ''} im noch nicht abgeschlossenen Partnerbestand. Jede Statusstufe wird separat ausgewiesen.")
+            if payout_ids:
+                st.caption(f"{len(payout_ids)} Payout{'s' if len(payout_ids)!=1 else ''} im noch nicht abgeschlossenen Partnerbestand. Jede Statusstufe wird separat ausgewiesen.")
+            else:
+                st.caption('Aktuell keine neue oder zahlungsoffene Partnerposition. Abgeschlossene Rechnungen bleiben hier auffindbar.')
             payment_col,new_col=st.columns(2)
             with payment_col:
                 with st.container(border=True):
@@ -124,8 +178,9 @@ def partner_panel(rows, rate, prefix):
                             if group_a_waits_for_all and awaiting_payment.empty:
                                 st.caption('Zahlungsabschluss erst möglich, wenn alle aktuell offenen Positionen dieses Partners geprüft sind.')
                             download('Einzelabrechnung herunterladen',next_invoice,prefix+'_'+partner)
-            st.caption(f'Neu abrechnungsfähig: Rabatt {rate} wird auf den Nettobetrag berechnet. Bezahlt / abgeschlossen: anschließend ausschließlich unter Historie → Positionsstatus.')
-            invoice_panel(partner_block,prefix+'_'+partner)
+            st.caption(f'Neu abrechnungsfähig: Rabatt {rate} wird auf den Nettobetrag berechnet. Bezahlte Belege bleiben hier in der Rechnungshistorie und zusätzlich unter Historie → Positionsstatus sichtbar.')
+            invoice_history_panel(partner,partner_history,invoice_records,prefix+'_'+partner)
+            invoice_panel(next_invoice,prefix+'_'+partner)
 
 
 def invoice_report(record, key, allow_approval=True):
@@ -149,8 +204,8 @@ def invoice_report(record, key, allow_approval=True):
         st.caption('Zugehöriger Sollbestand zum Upload-Zeitpunkt')
         expected_table=core.pd.DataFrame(record['expected']['items'])
         st.dataframe(expected_table[['order','sku','article','quantity','net','gross','rate','payout']].rename(columns={'order':'Bestellnummer','sku':'SKU','article':'Artikel','quantity':'Menge','net':'Netto vor Rabatt','gross':'Positionsbetrag brutto','rate':'Rabatt %','payout':'Payoutnummer'}),hide_index=True,use_container_width=True)
-        stored=Path(core.PAYOUTS_DB_PATH).parent/'Partner_Invoices'/record['file_ref']
-        if stored.name==record['file_ref'] and stored.is_file():
+        stored=partner_invoices.stored_original(record)
+        if stored is not None:
             st.download_button('Originalrechnung herunterladen',stored.read_bytes(),record['file_name'],key=key+'-original',icon=':material/download:')
     if allow_approval and not record['approved_at'] and status!='deviation':
         actor=st.text_input('Freigebende Person',value='Patrick',key=key+'-actor')
@@ -487,7 +542,7 @@ with group_a:
     st.caption('Rechnung hochladen → automatisch prüfen → freigeben. Danach erscheint „Bezahlt / abgeschlossen“.')
     st.caption('PP · BA · MK · 001 — 0,5 % Rabatt. Unabhängig von Patrick → Evelyn. Abschluss erst nach Prüfung und bestätigter Partnerzahlung.')
     with st.container(border=True):
-        partner_panel(partner_ready[partner_ready.Gruppe=='Gruppe A'] if not partner_ready.empty else partner_ready,'0,5 %','Gruppe_A')
+        partner_panel(partner_ready[partner_ready.Gruppe=='Gruppe A'] if not partner_ready.empty else partner_ready,'0,5 %','Gruppe_A',business[business.Gruppe=='Gruppe A'] if not business.empty else business)
 
 with group_b:
     b_ready=ready[ready.Gruppe=='Gruppe B'] if not ready.empty else ready
@@ -496,7 +551,7 @@ with group_b:
     with st.container(border=True):
         st.subheader('Partner → Patrick')
         st.caption('Einzelabrechnungen für MH, NB und weitere zugeordnete Partner · 3,5 % Rabatt')
-        partner_panel(partner_ready[partner_ready.Gruppe=='Gruppe B'] if not partner_ready.empty else partner_ready,'3,5 %','Partner_Patrick')
+        partner_panel(partner_ready[partner_ready.Gruppe=='Gruppe B'] if not partner_ready.empty else partner_ready,'3,5 %','Partner_Patrick',business[business.Gruppe=='Gruppe B'] if not business.empty else business)
     with st.container(border=True):
         st.subheader('Gesamtabrechnung Gruppe B an Evelyn')
         transmitted=sum(item['Positionen'] or 0 for item in invoices.values() if not item['discarded'])
