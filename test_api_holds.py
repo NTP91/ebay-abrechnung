@@ -70,9 +70,15 @@ class ApiHoldTests(unittest.TestCase):
                         overview=studio_view.evelyn_overview(after,eligible,{})
                         self.assertEqual(overview['ready'].Bestellnummer.tolist(),['free'])
                         self.assertEqual(overview['held'].Bestellnummer.tolist(),['held'])
+                        self.assertEqual(overview['new_held'].Bestellnummer.tolist(),['held'])
+                        self.assertTrue(overview['prior_held'].empty)
                         self.assertTrue(overview['review'].empty)
                         blocked=studio_view.evelyn_overview(after,eligible.iloc[0:0],{})
                         self.assertEqual(blocked['review'].Bestellnummer.tolist(),['free'])
+                        prior=studio_view.evelyn_overview(after,eligible,{'old':{'discarded':False,'Payouts':['p1']}})
+                        self.assertTrue(prior['new_ready'].empty)
+                        self.assertTrue(prior['new_held'].empty)
+                        self.assertEqual(prior['prior_held'].Bestellnummer.tolist(),['held'])
 
     def test_protected_snapshot_and_paid_closed_fields_are_preserved(self):
         self.seed()

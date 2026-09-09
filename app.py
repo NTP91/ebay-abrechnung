@@ -569,7 +569,7 @@ with group_b:
         st.subheader('Gesamtabrechnung Gruppe B an Evelyn')
         active_invoices=[item for item in invoices.values() if not item['discarded']]
         transmitted=len(evelyn['bound'])
-        st.markdown('**Bereits fakturiert / bezahlt**')
+        st.markdown('**Bereits fakturiert**')
         if not active_invoices:
             st.caption('Noch kein Evelyn-Beleg gespeichert.')
         for item in active_invoices:
@@ -579,14 +579,14 @@ with group_b:
                 st.markdown(f"**{item['Belegnummer']}** · {invoice_date} · **{amount}** · {item['Positionen']} Positionen")
                 badge_col,payment_col,close_col=st.columns([.8,1.45,1],vertical_alignment='center')
                 badge_col.badge('fakturiert',color='blue',icon=':material/receipt_long:')
-                payment_col.badge(item['Zahlungsstatus'],color='green' if item['Zahlungsstatus'].endswith('erhalten') else 'orange',icon=':material/account_balance:')
+                payment_col.badge('bezahlt' if item['Zahlungsstatus'].endswith('erhalten') else item['Zahlungsstatus'],color='green' if item['Zahlungsstatus'].endswith('erhalten') else 'orange',icon=':material/account_balance:')
                 close_col.badge('abgeschlossen' if item['Abschlussstatus']=='abgeschlossen' else 'Abschluss offen',color='green' if item['Abschlussstatus']=='abgeschlossen' else 'gray',icon=':material/check_circle:')
                 st.caption('Payouts: '+', '.join(item['Payouts']))
 
         st.markdown('**Neu für nächste Rechnung**')
-        available=sorted(b_ready['Auszahlung Nr.'].unique()) if not b_ready.empty else []
+        chosen=evelyn['new_ready']
+        available=sorted(chosen['Auszahlung Nr.'].unique()) if not chosen.empty else []
         selected=available
-        chosen=b_ready
         totals=None
         if not chosen.empty:
             try:
@@ -601,16 +601,20 @@ with group_b:
         else:
             st.info('Aktuell keine neuen Gruppe-B-Positionen für einen Lexware-Entwurf freigegeben.')
         status_cols=st.columns(3)
-        status_cols[0].metric('Neu abrechnungsfähig',f"{len(evelyn['ready'])} Positionen")
-        status_cols[1].metric('Prüfung erforderlich',f"{len(evelyn['review'])} Positionen")
-        status_cols[2].metric('Durch Hold blockiert',f"{len(evelyn['held'])} Positionen")
+        status_cols[0].metric('Neu abrechnungsfähig',f"{len(evelyn['new_ready'])} Positionen")
+        status_cols[1].metric('Prüfung erforderlich',f"{len(evelyn['new_review'])} Positionen")
+        status_cols[2].metric('Hold im neuen Payout',f"{len(evelyn['new_held'])} Positionen")
         st.caption('Neue Payouts seit dem letzten Beleg: '+(', '.join(evelyn['new_payouts']) if evelyn['new_payouts'] else 'keine'))
-        if not evelyn['review'].empty:
-            with st.expander(f"Prüfung erforderlich · {len(evelyn['review'])} Positionen"):
-                st.dataframe(evelyn['review'][['Auszahlung Nr.','Bestellnummer','Partner','SKU','Erlös_Brutto','Bearbeitungsstatus']],hide_index=True,use_container_width=True)
-        if not evelyn['held'].empty:
-            with st.expander(f"Durch Hold blockiert · {len(evelyn['held'])} Positionen"):
-                st.dataframe(evelyn['held'][['Auszahlung Nr.','Bestellnummer','Partner','SKU','Erlös_Brutto','API_Hold_Hinweis']],hide_index=True,use_container_width=True)
+        st.caption(f"Hold-Positionen gesamt: {len(evelyn['held'])} · davon {len(evelyn['new_held'])} im neuen Payout · {len(evelyn['prior_held'])} aus älteren Payouts")
+        if not evelyn['new_review'].empty:
+            with st.expander(f"Prüfung erforderlich · {len(evelyn['new_review'])} neue Positionen"):
+                st.dataframe(evelyn['new_review'][['Auszahlung Nr.','Bestellnummer','Partner','SKU','Erlös_Brutto','Bearbeitungsstatus']],hide_index=True,use_container_width=True)
+        if not evelyn['new_held'].empty:
+            with st.expander(f"Durch Hold blockiert · {len(evelyn['new_held'])} im neuen Payout"):
+                st.dataframe(evelyn['new_held'][['Auszahlung Nr.','Bestellnummer','Partner','SKU','Erlös_Brutto','API_Hold_Hinweis']],hide_index=True,use_container_width=True)
+        if not evelyn['prior_held'].empty:
+            with st.expander(f"Ältere Hold-Positionen · {len(evelyn['prior_held'])} · nicht neu"):
+                st.dataframe(evelyn['prior_held'][['Auszahlung Nr.','Bestellnummer','Partner','SKU','Erlös_Brutto','API_Hold_Hinweis']],hide_index=True,use_container_width=True)
 
         can_create=studio_view.lexware_create_ready(
             selected, totals, api_key,

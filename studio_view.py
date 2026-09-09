@@ -229,7 +229,8 @@ def evelyn_overview(business, eligible, invoices):
     if business.empty or not {'Gruppe','Art','Erlös_Brutto','closed_at','Lexware_uebertragen','position_key'}.issubset(business.columns):
         empty = business.iloc[0:0].copy()
         return {'bound':empty, 'ready':empty, 'review':empty, 'held':empty,
-                'new_payouts':[], 'total':Decimal(0)}
+                'new_ready':empty, 'new_review':empty, 'new_held':empty,
+                'prior_held':empty, 'new_payouts':[], 'total':Decimal(0)}
     group_b = business[
         (business.Gruppe == 'Gruppe B') & (business.Art == 'Bestellung')
         & (business['Erlös_Brutto'] > 0)
@@ -243,8 +244,15 @@ def evelyn_overview(business, eligible, invoices):
     review = pending[~pending.position_key.isin(eligible_keys) & ~held_mask].copy()
     invoice_payouts = {payout for item in invoices.values() if not item['discarded'] for payout in item['Payouts']}
     new_payouts = sorted(set(pending['Auszahlung Nr.']) - invoice_payouts)
+    new_mask = pending['Auszahlung Nr.'].isin(new_payouts)
+    new_keys = set(pending.loc[new_mask, 'position_key'])
+    new_ready = ready[ready.position_key.isin(new_keys)].copy()
+    new_review = review[review.position_key.isin(new_keys)].copy()
+    new_held = held[held.position_key.isin(new_keys)].copy()
+    prior_held = held[~held.position_key.isin(new_keys)].copy()
     total = Decimal(0)
-    if not ready.empty:
-        total = prepare_partner_export(ready, statement_type='group_b_evelyn')['totals']['Rechnung']['gross']
+    if not new_ready.empty:
+        total = prepare_partner_export(new_ready, statement_type='group_b_evelyn')['totals']['Rechnung']['gross']
     return {'bound':bound, 'ready':ready, 'review':review, 'held':held,
-            'new_payouts':new_payouts, 'total':total}
+            'new_ready':new_ready, 'new_review':new_review, 'new_held':new_held,
+            'prior_held':prior_held, 'new_payouts':new_payouts, 'total':total}

@@ -87,7 +87,7 @@ class PaymentReadinessTests(unittest.TestCase):
         self.assertEqual(metrics['Neu für Evelyn'],'1')
         self.assertEqual(metrics['Neu abrechnungsfähig'],'1 Positionen')
         self.assertEqual(metrics['Prüfung erforderlich'],'0 Positionen')
-        self.assertEqual(metrics['Durch Hold blockiert'],'0 Positionen')
+        self.assertEqual(metrics['Hold im neuen Payout'],'0 Positionen')
         self.assertNotIn('Offene Positionen',metrics)
         self.assertIn('Neue Evelyn-Abrechnung herunterladen',[button.label for button in app.get('download_button')])
         evelyn_history=next(expander for expander in app.expander if expander.label.startswith('Historie ·'))
