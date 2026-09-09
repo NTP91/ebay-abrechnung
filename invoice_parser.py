@@ -14,17 +14,17 @@ def norm(value):
 ALIASES = {
     'order':('Bestellnummer','eBay-Bestellnummer','Order number'),
     'sku':('SKU','Bestandseinheit'),
-    'article':('Artikel','Artikelname','Angebotstitel','Produkt','Produkttitel'),
+    'article':('Artikel','Artikelname','Angebotstitel','Produkt','Produkttitel','Bezeichnung'),
     'extra':('Zusatztext','Beschreibung'),
     'quantity':('Menge','Stück','Anzahl','Quantity'),
     'net':('Netto vor Rabatt','Rechnungsbetrag netto vor Rabatt','VK netto','Einzelpreis netto','VK netto in Lexoffice eintragen'),
     'net_after':('Netto nach Rabatt','Positionsbetrag netto'),
-    'gross':('Positionsbetrag brutto','Rechnungsbetrag brutto nach Rabatt','Zeilenbetrag brutto'),
+    'gross':('Positionsbetrag brutto','Rechnungsbetrag brutto nach Rabatt','Zeilenbetrag brutto','Gesamt','Gesamt €','Gesamt EUR'),
     'rate':('Rabatt %','Rabatt in %','Discount %'),
     'discount':('Rabattbetrag','Rabatt netto'),
     'number':('Rechnungsnummer','Invoice number'),
     'invoice_date':('Rechnungsdatum','Invoice date'),
-    'total':('Gesamtbetrag brutto','Rechnungsbetrag brutto','Bruttosumme','Gesamtsumme brutto'),
+    'total':('Gesamtbetrag brutto','Gesamtbetrag','Rechnungsbetrag brutto','Bruttosumme','Gesamtsumme brutto'),
 }
 LOOKUP = {norm(alias):field for field,aliases in ALIASES.items() for alias in aliases}
 
@@ -85,13 +85,17 @@ def extract(content, filename):
             ambiguous_rate=False
             table_totals=set()
             item_count=len(result['items'])
+            generic_order_prefix=False
             for raw in table:
                 row=[cell(value) for value in raw]
                 nonempty=[value for value in row if value]
                 if not nonempty: continue
                 fields=[LOOKUP.get(norm(value)) for value in row]
-                if 'order' in fields and len([f for f in fields if f])>=2:
+                generic_position_table=(norm(row[0]) in ('pos','position') and
+                                        all(field in fields for field in ('article','quantity','gross')))
+                if ('order' in fields and len([f for f in fields if f])>=2) or generic_position_table:
                     had_header=True
+                    generic_order_prefix=generic_position_table
                     mapping={index:field for index,field in enumerate(fields) if field}
                     ambiguous_rate=any(norm(value)=='rabatt' and '%' not in value for value in row)
                     if len(mapping.values())!=len(set(mapping.values())):
@@ -109,6 +113,8 @@ def extract(content, filename):
                     (table_totals if meta_field=='total' else metadata[meta_field]).add(nonempty[-1]); continue
                 if first=='rechnungsbetragbruttonachrabatt' and len(nonempty)>=2:
                     table_totals.add(nonempty[-1]); continue
+                if first.startswith(('zwischensumme','ubertrag','bertrag')):
+                    continue
                 if not mapping: continue
                 if first.startswith(('summe','rabattbetrag','nettonachrabatt','19umsatzsteuer','rabattnettoineuro','umsatzsteuer19','ebayauszahlungsbetrag','rabattbruttoineuro')):
                     mapping=None
@@ -116,6 +122,11 @@ def extract(content, filename):
                 if first.startswith(('ebayauszahlungsnummer','partner','gruppe','auszahlungsdatum','angewendeter','keineerstattungen','keinepositionen','rechenweg')):
                     continue
                 item={field:row[index] if index<len(row) else '' for index,field in mapping.items()}
+                if not item.get('order') and generic_order_prefix and item.get('article'):
+                    order_match=re.match(r'\s*(\S+)\s+(.+)',item['article'],re.S)
+                    if order_match:
+                        item['order']=order_match.group(1)
+                        item['article']=order_match.group(2).strip()
                 if not item.get('order'):
                     result['warnings'].append('Nicht eindeutig zuordenbare Tabellenzeile: '+' | '.join(nonempty)[:180]); continue
                 for field in metadata:
@@ -138,7 +149,7 @@ def extract(content, filename):
                 label={'number':'Rechnungsnummer','invoice_date':'Rechnungsdatum','total':'Gesamtbetrag brutto'}[field]
                 result['errors'].append('Widersprüchliche Angaben für '+label+': '+', '.join(sorted(values)))
             elif values: result[field]=next(iter(values))
-        for field,pattern in [('number',r'Rechnungs(?:nummer|[- ]?Nr\.?)(?:\s*:\s*|\s+)([^\s;,]+)'),('invoice_date',r'Rechnungsdatum\s*:?\s*(\d{2}\.\d{2}\.\d{4})'),('total',r'(?im)^\s*(?:Gesamtbetrag brutto|Rechnungsbetrag brutto|Bruttosumme)\s*:?\s*(-?[\d.,]+)\s*(?:EUR|€)?\s*$')]:
+        for field,pattern in [('number',r'Rechnungs(?:nummer|[- ]?Nr\.?)(?:\s*:\s*|\s+)([^\s;,]+)'),('invoice_date',r'(?<!Leistungs)(?:Rechnungsdatum|Datum)\s*:?\s*(\d{2}\.\d{2}\.\d{4})'),('total',r'(?im)^\s*(?:Gesamtbetrag(?: brutto)?\*?|Rechnungsbetrag brutto|Bruttosumme)\s*:?\s*(-?[\d.,]+)\s*(?:EUR|€)?\s*$')]:
             matches=set(re.findall(pattern,result['text'],re.I))
             if not result[field] and len(matches)==1: result[field]=next(iter(matches))
         if not result['items']:

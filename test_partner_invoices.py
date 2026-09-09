@@ -160,5 +160,39 @@ class PartnerInvoiceTests(unittest.TestCase):
         manual=self.upload(blank.getvalue(),'scan.pdf')
         self.assertEqual(manual['report']['status'],'manual_required')
 
+    def test_supplier_pdf_uses_order_prefix_and_invoice_date_cutoff(self):
+        from reportlab.platypus import SimpleDocTemplate,Table,TableStyle,Paragraph,Spacer
+        from reportlab.lib import colors
+        from reportlab.lib.styles import getSampleStyleSheet
+        historical=self.expected
+        output=io.BytesIO()
+        rows=[['Pos.','Bezeichnung','Menge','Einzel EUR','USt. %','Gesamt EUR']]
+        for index,item in enumerate(historical['items'],1):
+            rows.append([str(index),item['order']+' '+item['article'],'1',item['gross'],'19,00',item['gross']])
+        rows.append(['Gesamtbetrag*','','','','',historical['total']])
+        table=Table(rows,colWidths=[90,370,55,80,55,80])
+        table.setStyle(TableStyle([('GRID',(0,0),(-1,-1),1,colors.black),('FONTSIZE',(0,0),(-1,-1),7)]))
+        styles=getSampleStyleSheet()
+        SimpleDocTemplate(output,pagesize=(800,600)).build([
+            Paragraph('Rechnungsnr.: MH-2026-1',styles['Normal']),
+            Paragraph('Datum: 03.09.2026',styles['Normal']),Spacer(1,10),table])
+
+        later=payout('p4','t4','o4',sku='MH45 / C',title='Später hinzugekommener Artikel')
+        later['Transaktionsbetrag (inkl. Kosten)']=later['Betrag abzügl. Kosten']
+        later['Auszahlungsdatum']='04.09.2026';later['Auszahlungsstatus']='Betrag überwiesen'
+        core.import_reports([later],core.ORDERS_DB_PATH,'orders')
+        core.import_reports([later],core.PAYOUTS_DB_PATH,'payout')
+
+        record=self.upload(output.getvalue(),'supplier.pdf')
+        self.assertEqual(record['report']['status'],'matched',record)
+        self.assertEqual(len(record['extracted']['items']),2)
+        self.assertEqual(len(record['expected']['items']),2)
+        self.assertEqual(record['extracted']['total'],historical['total'])
+        incoming.approve(record['id'],'Tester')
+        positions=workflow.positions().query("Partner == 'MH'")
+        self.assertTrue(positions[positions.Bestellnummer.isin(['o1','o2'])].reviewed_at.astype(bool).all())
+        self.assertFalse(positions[positions.Bestellnummer=='o4'].reviewed_at.astype(bool).any())
+        self.assertFalse(positions.received_at.astype(bool).any())
+
 
 if __name__=='__main__':unittest.main()
