@@ -1,4 +1,5 @@
 import streamlit as st
+import hashlib
 from pathlib import Path
 import core
 import api_holds
@@ -67,48 +68,56 @@ def download(label, rows, key, kind='partner'):
         st.warning(f'Export benötigt Prüfung: {exc}')
 
 
+def stored_invoice_original(record):
+    """Keep hot-reloaded app.py compatible with an older imported helper module."""
+    resolver=getattr(partner_invoices,'stored_original',None)
+    if callable(resolver): return resolver(record)
+    path=Path(core.PAYOUTS_DB_PATH).parent/'Partner_Invoices'/record['file_ref']
+    if path.name!=record['file_ref'] or not path.is_file(): return None
+    return path if hashlib.sha256(path.read_bytes()).hexdigest()==record['file_hash'] else None
+
+
 def invoice_history_panel(partner, rows, records, key):
     invoices=[record for record in records if record['partner']==partner and record['expected']['scope']=='Rechnung']
-    st.markdown('**Rechnungshistorie**')
     if not invoices:
-        st.caption('Noch keine Partnerrechnung gespeichert.')
         return
-    for record in invoices:
-        expected=record['expected']['items']; keys={item['key'] for item in expected}
-        invoice_rows=rows[rows.position_key.isin(keys)] if not rows.empty else rows
-        complete=len(invoice_rows)==len(keys)
-        paid=bool(complete and invoice_rows.paid_at.astype(bool).all())
-        closed=bool(complete and invoice_rows.closed_at.astype(bool).all())
-        payment_dates=sorted({str(value) for value in invoice_rows.paid_at if value}) if complete else []
-        with st.container(border=True):
-            st.write('**'+(record['invoice_number'] or record['file_name'])+'**')
-            detail_col,amount_col,count_col=st.columns([1.4,1,1])
-            detail_col.caption('Rechnungsdatum')
-            detail_col.write(record['invoice_date'] or 'nicht erkannt')
-            amount_col.metric('Betrag',euros(float(record['expected']['total'])))
-            count_col.metric('Positionen',str(len(expected)))
-            if paid:
-                st.success('bezahlt / Partnerabrechnung abgeschlossen')
-                st.caption('Zahlungsdatum: '+', '.join(payment_dates))
-                if not closed and not invoice_rows.empty and invoice_rows.iloc[0].Gruppe=='Gruppe B':
+    with st.expander(f'Rechnungshistorie · {len(invoices)}',expanded=False):
+        for record in invoices:
+            expected=record['expected']['items']; keys={item['key'] for item in expected}
+            invoice_rows=rows[rows.position_key.isin(keys)] if not rows.empty else rows
+            complete=len(invoice_rows)==len(keys)
+            paid=bool(complete and invoice_rows.paid_at.astype(bool).all())
+            closed=bool(complete and invoice_rows.closed_at.astype(bool).all())
+            payment_dates=sorted({str(value) for value in invoice_rows.paid_at if value}) if complete else []
+            payouts=sorted({item['payout'] for item in expected})
+            with st.container(border=True):
+                st.markdown(f"**{record['invoice_number'] or record['file_name']}** · {record['invoice_date'] or 'Datum nicht erkannt'} · **{euros(float(record['expected']['total']))}** · {len(expected)} Positionen")
+                if paid:
+                    st.badge('bezahlt / Partnerabrechnung abgeschlossen',icon=':material/check_circle:',color='green')
+                elif record['approved_at']:
+                    st.badge('geprüft/freigegeben · Zahlung offen',icon=':material/schedule:',color='orange')
+                elif record['report']['status']=='matched':
+                    st.badge('geprüft · Freigabe offen',icon=':material/verified:',color='blue')
+                else:
+                    st.badge('Prüfung offen',icon=':material/error:',color='gray')
+                st.caption('Zahlungsdatum: '+(', '.join(payment_dates) if payment_dates else 'offen'))
+                st.caption('Payouts: '+(', '.join(payouts) if payouts else 'nicht auf dem Beleg angegeben'))
+                if paid and not closed and not invoice_rows.empty and invoice_rows.iloc[0].Gruppe=='Gruppe B':
                     st.caption('Partnerseite abgeschlossen · Evelyn-Zahlung und Gesamtabschluss bleiben davon getrennt.')
-            elif record['approved_at']:
-                st.warning('geprüft/freigegeben · Zahlung offen')
-            elif record['report']['status']=='matched':
-                st.info('geprüft · Freigabe offen')
-            else:
-                st.warning('Prüfung offen')
-            upload_stamp=studio_view.local_datetime(core.pd.Series([record['uploaded_at']])).iloc[0]
-            approval_stamp=studio_view.local_datetime(core.pd.Series([record['approved_at']])).iloc[0] if record['approved_at'] else 'offen'
-            st.caption(f'Upload: {upload_stamp} · Freigabe: {approval_stamp}')
-            original=partner_invoices.stored_original(record)
-            if original is None:
-                st.error('Gespeicherte Originalrechnung fehlt oder der Dateihash stimmt nicht.')
-            else:
-                st.download_button('Originalrechnung öffnen',original.read_bytes(),record['file_name'],'application/pdf',key=key+'-'+record['id']+'-history-original',icon=':material/open_in_new:')
-            with st.expander('Details · Bestellnummern und Payouts'):
-                detail=core.pd.DataFrame(expected)
-                st.dataframe(detail[['order','payout','sku']].rename(columns={'order':'Bestellnummer','payout':'Payoutnummer','sku':'SKU'}),hide_index=True,use_container_width=True)
+                action_col,details_col=st.columns([1,1.8],vertical_alignment='center')
+                original=stored_invoice_original(record)
+                with action_col:
+                    if original is None:
+                        st.error('Original fehlt oder Hash abweichend.')
+                    else:
+                        st.download_button('Originalrechnung öffnen',original.read_bytes(),record['file_name'],'application/pdf',key=key+'-'+record['id']+'-history-original',icon=':material/open_in_new:')
+                with details_col:
+                    with st.popover('Details',icon=':material/list_alt:'):
+                        upload_stamp=studio_view.local_datetime(core.pd.Series([record['uploaded_at']])).iloc[0]
+                        approval_stamp=studio_view.local_datetime(core.pd.Series([record['approved_at']])).iloc[0] if record['approved_at'] else 'offen'
+                        st.caption(f'Upload: {upload_stamp} · Freigabe: {approval_stamp}')
+                        detail=core.pd.DataFrame(expected)
+                        st.dataframe(detail[['order','sku']].rename(columns={'order':'Bestellnummer','sku':'SKU'}),hide_index=True,use_container_width=True)
 
 
 def partner_panel(rows, rate, prefix, history_rows=None):
@@ -204,7 +213,7 @@ def invoice_report(record, key, allow_approval=True):
         st.caption('Zugehöriger Sollbestand zum Upload-Zeitpunkt')
         expected_table=core.pd.DataFrame(record['expected']['items'])
         st.dataframe(expected_table[['order','sku','article','quantity','net','gross','rate','payout']].rename(columns={'order':'Bestellnummer','sku':'SKU','article':'Artikel','quantity':'Menge','net':'Netto vor Rabatt','gross':'Positionsbetrag brutto','rate':'Rabatt %','payout':'Payoutnummer'}),hide_index=True,use_container_width=True)
-        stored=partner_invoices.stored_original(record)
+        stored=stored_invoice_original(record)
         if stored is not None:
             st.download_button('Originalrechnung herunterladen',stored.read_bytes(),record['file_name'],key=key+'-original',icon=':material/download:')
     if allow_approval and not record['approved_at'] and status!='deviation':
