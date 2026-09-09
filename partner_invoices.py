@@ -40,6 +40,12 @@ def money(value):
 
 def reconcile(extracted, expected, all_rows, allocated):
     errors=list(extracted.get('errors',[])); warnings=list(extracted['warnings']); matched=[]; remaining=list(expected['items'])
+    if not extracted.get('number'):
+        warnings.append('Rechnungsnummer nicht sicher erkannt.')
+    if extracted.get('payouts'):
+        actual_payouts=set(extracted['payouts']); expected_payouts={row['payout'] for row in expected['items']}
+        if actual_payouts!=expected_payouts:
+            errors.append('Payout-Nummern stimmen nicht: Erwartet '+', '.join(sorted(expected_payouts))+', Rechnung '+', '.join(sorted(actual_payouts))+'.')
     identities_complete=bool(extracted['items'])
     for index,item in enumerate(extracted['items'],1):
         order=item.get('order','').strip(); sku=item.get('sku','').strip()
@@ -77,6 +83,8 @@ def reconcile(extracted, expected, all_rows, allocated):
             if not item.get(field): warnings.append(prefix+('Artikelname' if field=='article' else 'Menge')+' fehlt.')
         if item.get('article') and _article_text(item['article'])!=_article_text(wanted['article']):
             errors.append(prefix+'Artikelbezeichnung stimmt nicht.')
+        if item.get('payout') and item['payout'].strip()!=wanted['payout']:
+            errors.append(prefix+'Payout-Nummer stimmt nicht; erwartet '+wanted['payout']+'.')
         if item.get('quantity'):
             try:
                 if Decimal(item['quantity'].replace(',','.'))!=1: errors.append(prefix+'Menge stimmt nicht; erwartet 1.')

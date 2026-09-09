@@ -77,6 +77,14 @@ class PaymentReadinessTests(unittest.TestCase):
             db.execute("UPDATE payouts SET invoice_id='RE0089',attempt='created',snapshot=? WHERE id='old'",(json.dumps(old),));db.commit()
         ready=studio_view.eligible_rows(core.load_master_data(),core.sync_status(core.load_master_data()))
         self.assertEqual(ready.Bestellnummer.tolist(),['new'])
+        from streamlit.testing.v1 import AppTest
+        app=AppTest.from_file('app.py').run(timeout=30)
+        self.assertFalse(app.exception)
+        metrics={metric.label:metric.value for metric in app.metric}
+        self.assertEqual(metrics['Neu für Evelyn'],'1')
+        self.assertEqual(metrics['Bereits an Lexware gebunden'],'1 Positionen')
+        self.assertNotIn('Offene Positionen',metrics)
+        self.assertIn('Neue Evelyn-Abrechnung herunterladen',[button.label for button in app.get('download_button')])
         http=Mock();http.get.return_value.status_code=200
         http.get.return_value.json.return_value={'content':[{'id':'contact','roles':{'customer':{'number':16335}}}]}
         http.post.return_value.status_code=201;http.post.return_value.json.return_value={'id':'real-draft-simulated'}
@@ -106,6 +114,8 @@ class PaymentReadinessTests(unittest.TestCase):
         metrics={metric.label:metric.value for metric in app.metric}
         self.assertEqual(metrics['In freigegebener Rechnung'],'1 Positionen')
         self.assertEqual(metrics['Neu für nächste Rechnung'],'1 Positionen')
+        self.assertNotIn('Offene Partnerpositionen gesamt',metrics)
+        self.assertNotIn('Offener Gesamtbetrag brutto',metrics)
         self.assertTrue(any('NB-OLD' in caption.value for caption in app.caption))
 
         next(button for button in app.button if button.label=='Partner bezahlt').click().run()

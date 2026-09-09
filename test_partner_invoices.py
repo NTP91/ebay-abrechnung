@@ -22,7 +22,7 @@ class PartnerInvoiceTests(unittest.TestCase):
         paths.start();self.addCleanup(paths.stop)
         network=patch('requests.sessions.Session.request',side_effect=AssertionError('HTTP forbidden'))
         network.start();self.addCleanup(network.stop)
-        frames=[payout('p1','t1','o1',sku='MH43 / A',title='Vollständiger Artikel A'),payout('p2','t2','o2',sku='MH44 / B',title='Vollständiger Artikel B'),payout('p3','t3','o3',sku='NB / C')]
+        frames=[payout('7700000001','t1','o1',sku='MH43 / A',title='Vollständiger Artikel A'),payout('7700000002','t2','o2',sku='MH44 / B',title='Vollständiger Artikel B'),payout('7700000003','t3','o3',sku='NB / C')]
         for frame in frames:
             frame['Transaktionsbetrag (inkl. Kosten)']=frame['Betrag abzügl. Kosten']
             frame['Auszahlungsdatum']='03.09.2026';frame['Auszahlungsstatus']='Betrag überwiesen'
@@ -65,6 +65,27 @@ class PartnerInvoiceTests(unittest.TestCase):
                 record=self.upload(blob)
                 self.assertEqual(record['report']['status'],'deviation',record['report'])
                 with self.assertRaises(ValueError): incoming.approve(record['id'],'Tester','Dokument geprüft und freigegeben',True)
+
+    def test_invoice_number_is_required_for_automatic_match(self):
+        record=self.upload(self.content(lambda rows:[row.update({'Rechnungsnummer':''}) for row in rows]))
+        self.assertEqual(record['report']['status'],'manual_required')
+        self.assertTrue(any('Rechnungsnummer' in warning for warning in record['report']['warnings']))
+
+    def test_payout_number_is_checked_when_invoice_contains_it(self):
+        def content(number, wrong=False):
+            source=list(csv.DictReader(io.StringIO(self.content().decode('utf-8-sig')),delimiter=';'))
+            fields=list(source[0])+['Payout-Nummer']
+            output=io.StringIO();writer=csv.DictWriter(output,fieldnames=fields,delimiter=';');writer.writeheader()
+            payouts={item['order']:item['payout'] for item in self.expected['items']}
+            for row in source:
+                row['Rechnungsnummer']=number
+                row['Payout-Nummer']='9999999999' if wrong else payouts[row['Bestellnummer']]
+                writer.writerow(row)
+            return output.getvalue().encode('utf-8-sig')
+        self.assertEqual(self.upload(content('PAYOUT-OK'))['report']['status'],'matched')
+        wrong=self.upload(content('PAYOUT-BAD',True))
+        self.assertEqual(wrong['report']['status'],'deviation')
+        self.assertTrue(any('Payout-Nummer stimmt nicht' in error for error in wrong['report']['errors']))
 
     def test_missing_and_additional_positions_are_red(self):
         missing=self.upload(self.content(lambda rows:rows.pop()))
@@ -141,10 +162,13 @@ class PartnerInvoiceTests(unittest.TestCase):
         record=self.upload(output.getvalue(),'invoice.xlsx')
         self.assertEqual(record['report']['status'],'matched',record['report'])
 
-    def test_existing_partner_workbook_with_empty_credit_sheet_is_readable(self):
+    def test_existing_partner_workbook_with_empty_credit_sheet_requires_invoice_number(self):
         from partner_export import export_partner_excel
         record=self.upload(export_partner_excel(self.rows),'partner.xlsx')
-        self.assertEqual(record['report']['status'],'matched',record['report'])
+        self.assertEqual(record['report']['status'],'manual_required',record['report'])
+        self.assertEqual(len(record['report']['matched']),2)
+        self.assertEqual(record['extracted']['payouts'],['7700000001','7700000002'])
+        self.assertTrue(any('Rechnungsnummer' in warning for warning in record['report']['warnings']))
 
     def test_pdf_table_matches_and_textless_pdf_stays_manual(self):
         from reportlab.platypus import SimpleDocTemplate,Table,TableStyle

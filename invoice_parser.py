@@ -22,6 +22,7 @@ ALIASES = {
     'gross':('Positionsbetrag brutto','Rechnungsbetrag brutto nach Rabatt','Zeilenbetrag brutto','Gesamt','Gesamt €','Gesamt EUR'),
     'rate':('Rabatt %','Rabatt in %','Discount %'),
     'discount':('Rabattbetrag','Rabatt netto'),
+    'payout':('Payout','Payout-Nummer','Payoutnummer','Payout-Nummern','Payoutnummern','eBay-Auszahlungsnummer','eBay-Auszahlungsnummern','Auszahlung Nr.','Auszahlungsnummer','Auszahlungsnummern'),
     'number':('Rechnungsnummer','Invoice number'),
     'invoice_date':('Rechnungsdatum','Invoice date'),
     'total':('Gesamtbetrag brutto','Gesamtbetrag','Rechnungsbetrag brutto','Bruttosumme','Gesamtsumme brutto'),
@@ -36,7 +37,7 @@ def cell(value):
 
 
 def extract(content, filename):
-    result = dict(items=[], number='', invoice_date='', total='', warnings=[], errors=[], text='')
+    result = dict(items=[], number='', invoice_date='', total='', payouts=[], warnings=[], errors=[], text='')
     tables=[]
     try:
         suffix=filename.lower().rsplit('.',1)[-1]
@@ -78,6 +79,18 @@ def extract(content, filename):
         else:
             raise ValueError('Unterstützt werden PDF, XLSX und CSV.')
         metadata={'number':set(),'invoice_date':set(),'total':set()}
+        payout_labels={norm(alias) for alias in ALIASES['payout']}
+        payouts=set()
+        for table in tables:
+            cells=[[cell(value) for value in row] for row in table]
+            for row_index,row in enumerate(cells):
+                for column_index,value in enumerate(row):
+                    if norm(value) not in payout_labels: continue
+                    candidates=row[column_index+1:]
+                    if row_index+1<len(cells) and column_index<len(cells[row_index+1]):
+                        candidates.append(cells[row_index+1][column_index])
+                    for candidate in candidates:
+                        payouts.update(re.findall(r'(?<![A-Za-z0-9])\d{8,14}(?![A-Za-z0-9])',candidate))
         for table in tables:
             mapping=None
             header_rate=''
@@ -149,6 +162,10 @@ def extract(content, filename):
                 label={'number':'Rechnungsnummer','invoice_date':'Rechnungsdatum','total':'Gesamtbetrag brutto'}[field]
                 result['errors'].append('Widersprüchliche Angaben für '+label+': '+', '.join(sorted(values)))
             elif values: result[field]=next(iter(values))
+        payouts.update(item['payout'].strip() for item in result['items'] if item.get('payout'))
+        for match in re.findall(r'(?i)(?:eBay[- ]?)?(?:Auszahlungs|Payout)[- ]?(?:nummern?|nr\.?)\s*:?\s*([^\n;]+)',result['text']):
+            payouts.update(re.findall(r'(?<![A-Za-z0-9])\d{8,14}(?![A-Za-z0-9])',match))
+        result['payouts']=sorted(payouts)
         for field,pattern in [('number',r'Rechnungs(?:nummer|[- ]?Nr\.?)(?:\s*:\s*|\s+)([^\s;,]+)'),('invoice_date',r'(?<!Leistungs)(?:Rechnungsdatum|Datum)\s*:?\s*(\d{2}\.\d{2}\.\d{4})'),('total',r'(?im)^\s*(?:Gesamtbetrag(?: brutto)?\*?|Rechnungsbetrag brutto|Bruttosumme)\s*:?\s*(-?[\d.,]+)\s*(?:EUR|€)?\s*$')]:
             matches=set(re.findall(pattern,result['text'],re.I))
             if not result[field] and len(matches)==1: result[field]=next(iter(matches))
