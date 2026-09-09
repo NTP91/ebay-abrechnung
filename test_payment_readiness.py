@@ -113,11 +113,17 @@ class PaymentReadinessTests(unittest.TestCase):
         from streamlit.testing.v1 import AppTest
         self.seed([payout('p1','old','old',sku='NB / 1')])
         before=workflow.positions()[list(workflow.FIELDS)].copy()
-        with patch.object(studio_view,'evelyn_overview',None):
-            app=AppTest.from_file('app.py').run(timeout=30)
-        self.assertFalse(app.exception)
-        self.assertEqual(before.to_dict('records'),workflow.positions()[list(workflow.FIELDS)].to_dict('records'))
-        self.assertIn('Gruppe B',[tab.label for tab in app.tabs])
+        current=studio_view.evelyn_overview
+        def old_overview(*args):
+            result=current(*args)
+            return {key:result[key] for key in ('bound','ready','review','held','new_payouts','total')}
+        for replacement in (None,old_overview):
+            with self.subTest(replacement='missing' if replacement is None else 'old keys'):
+                with patch.object(studio_view,'evelyn_overview',replacement):
+                    app=AppTest.from_file('app.py').run(timeout=30)
+                self.assertFalse(app.exception)
+                self.assertEqual(before.to_dict('records'),workflow.positions()[list(workflow.FIELDS)].to_dict('records'))
+                self.assertIn('Gruppe B',[tab.label for tab in app.tabs])
 
     def test_group_b_invoice_payment_action_ignores_new_unreviewed_positions(self):
         from streamlit.testing.v1 import AppTest

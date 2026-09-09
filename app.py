@@ -560,6 +560,10 @@ with group_a:
 with group_b:
     b_ready=ready[ready.Gruppe=='Gruppe B'] if not ready.empty else ready
     evelyn=studio_view.evelyn_overview(business,b_ready,invoices)
+    if not {'new_ready','new_review','new_held','prior_held'}.issubset(evelyn):
+        studio_view=importlib.reload(studio_view)
+        invoices=studio_view.invoice_history()
+        evelyn=studio_view.evelyn_overview(business,b_ready,invoices)
     transferred_rows=evelyn['bound']
     with st.container(border=True):
         st.subheader('Partner → Patrick')
