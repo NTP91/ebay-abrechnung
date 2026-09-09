@@ -159,7 +159,37 @@ class ApiHoldTests(unittest.TestCase):
         app=AppTest.from_file('app.py').run(timeout=30)
         payment=next(box for box in app.checkbox if box.label=='Zahlung von Evelyn erhalten')
         payment.set_value(True).run()
-        next(button for button in app.button if button.label=='Verbindlich bestätigen').click().run()
+        calls=[]
+        current=workflow.confirm
+        def capture(*args,**kwargs):
+            calls.append((args[1],kwargs.get('invoice_id')))
+            return current(*args,**kwargs)
+        with patch.object(workflow,'confirm',side_effect=capture):
+            next(button for button in app.button if button.label=='Verbindlich bestätigen').click().run()
+
+        self.assertFalse(app.exception)
+        self.assertEqual(calls,[('evelyn_received','invoice')])
+        rows=workflow.positions()
+        self.assertTrue(rows.received_at.astype(bool).all())
+        self.assertTrue(rows.query("Bestellnummer=='held'").iloc[0].API_Hold)
+
+    def test_stale_workflow_module_reloads_for_later_hold_ui(self):
+        from streamlit.testing.v1 import AppTest
+        self.seed()
+        payload=core.build_invoice_payload(core.load_master_data(),'p1','contact',True)
+        payload['voucherDate']='2026-09-03T09:00:00Z'
+        with core.ledger() as db:
+            db.execute("UPDATE payouts SET attempt='created',invoice_id='invoice',snapshot=? WHERE id='p1'",
+                       (json.dumps(payload,ensure_ascii=False),))
+            db.commit()
+        api_holds.ingest(self.root,snapshot([movement(transactionDate='2026-09-03T10:00:00Z')]))
+
+        with patch.object(workflow,'_later_hold_on_bound_invoice',None), \
+                patch.object(workflow,'confirm',side_effect=ValueError('stale hold gate')):
+            app=AppTest.from_file('app.py').run(timeout=30)
+            payment=next(box for box in app.checkbox if box.label=='Zahlung von Evelyn erhalten')
+            payment.set_value(True).run()
+            next(button for button in app.button if button.label=='Verbindlich bestätigen').click().run()
 
         self.assertFalse(app.exception)
         rows=workflow.positions()

@@ -17,6 +17,8 @@ from partner_export import export_partner_excel, prepare_partner_export
 
 if not callable(getattr(studio_view,'evelyn_overview',None)):
     studio_view=importlib.reload(studio_view)
+if not callable(getattr(position_workflow,'_later_hold_on_bound_invoice',None)):
+    position_workflow=importlib.reload(position_workflow)
 
 st.set_page_config(page_title='Payout Studio', page_icon='💠', layout='wide', initial_sidebar_state='expanded')
 st.markdown('''<style>
