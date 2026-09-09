@@ -8,6 +8,14 @@ from decimal import Decimal
 from partner_export import prepare_partner_export, cents
 
 
+# Lexware stores its technical document UUID in the payout lock.  The confirmed
+# voucher number is presentation metadata; keeping it here does not alter the
+# immutable payout-to-invoice binding.
+LEXWARE_DOCUMENT_NUMBERS = {
+    'ec17afe6-c236-4691-bfd3-996ecd604328': 'RE0090',
+}
+
+
 def local_datetime(values):
     """Presentation-only conversion of UTC register timestamps to local minutes."""
     parsed = pd.to_datetime(values, utc=True, errors='coerce')
@@ -155,18 +163,86 @@ def order_catalogue(raw, business):
     return pd.DataFrame(records.values(), columns=['Bestellnummer','Datum','Partner','SKU','Produkttitel','Status','payout','closed','keys'])
 
 
-def invoice_history():
+def _snapshot_total(payload):
+    """Reproduce the existing Lexware column calculation from its snapshot."""
+    total_after = previous_tax = Decimal(0)
+    for item in payload.get('lineItems', []):
+        unit = item.get('unitPrice', {})
+        net = Decimal(str(unit.get('netAmount', 0))) * Decimal(str(item.get('quantity', 1)))
+        rate = Decimal(str(item.get('discountPercentage', 0))) / Decimal(100)
+        after = cents(net * (Decimal(1) - rate))
+        total_after += after
+        previous_tax = cents(total_after * Decimal(str(unit.get('taxRatePercentage', 0))) / Decimal(100))
+    return cents(total_after + previous_tax)
+
+
+def invoice_history(business=None):
     with core.ledger() as db:
         rows = [dict(row) for row in db.execute('SELECT * FROM payouts WHERE invoice_id IS NOT NULL ORDER BY id')]
         discarded = [dict(row) for row in db.execute('SELECT * FROM discarded_invoices ORDER BY discarded_at')]
     grouped = {}
     for row in rows:
-        item = grouped.setdefault(row['invoice_id'], {'Payouts': [], 'Positionen': None, 'discarded': False, 'Status': 'Lexware-Entwurf erstellt · Zahlung separat bestätigen'})
+        item = grouped.setdefault(row['invoice_id'], {
+            'Belegnummer': LEXWARE_DOCUMENT_NUMBERS.get(row['invoice_id'], row['invoice_id']),
+            'Payouts': [], 'Positionen': None, 'Datum': '', 'Betrag': None,
+            'discarded': False, 'Status': 'fakturiert',
+            'Zahlungsstatus': 'Zahlung von Evelyn offen', 'Abschlussstatus': 'offen',
+        })
         item['Payouts'].append(row['id'])
         if row['snapshot']:
-            item['Positionen'] = len(json.loads(row['snapshot']).get('lineItems', []))
+            payload = json.loads(row['snapshot'])
+            item['Positionen'] = len(payload.get('lineItems', []))
+            item['Datum'] = payload.get('voucherDate', '')
+            item['Betrag'] = _snapshot_total(payload)
     for row in discarded:
         previous = json.loads(row['snapshot'])
-        grouped[row['invoice_id']] = {'Payouts':[r['id'] for r in previous], 'Positionen':len(json.loads(previous[0]['snapshot'])['lineItems']),
-                                     'discarded':True, 'Status':row['label']+' · verworfen am '+row['discarded_at']}
+        payload = json.loads(previous[0]['snapshot'])
+        grouped[row['invoice_id']] = {
+            'Belegnummer': row['label'], 'Payouts':[r['id'] for r in previous],
+            'Positionen':len(payload['lineItems']), 'Datum':payload.get('voucherDate', ''),
+            'Betrag':_snapshot_total(payload), 'discarded':True,
+            'Status':row['label']+' · verworfen am '+row['discarded_at'],
+            'Zahlungsstatus':'nicht zutreffend', 'Abschlussstatus':'verworfen',
+        }
+    if business is not None and not business.empty:
+        for item in grouped.values():
+            if item['discarded']:
+                continue
+            bound = business[
+                business['Auszahlung Nr.'].isin(item['Payouts'])
+                & business.Lexware_uebertragen
+                & (business.Art == 'Bestellung')
+                & (business['Erlös_Brutto'] > 0)
+            ]
+            complete = len(bound) == item['Positionen'] and not bound.empty
+            received = complete and bound.received_at.astype(bool).all()
+            closed = complete and bound.closed_at.astype(bool).all()
+            item['Zahlungsstatus'] = 'Zahlung von Evelyn erhalten' if received else 'Zahlung von Evelyn offen'
+            item['Abschlussstatus'] = 'abgeschlossen' if closed else 'offen'
     return grouped
+
+
+def evelyn_overview(business, eligible, invoices):
+    """Disjoint read-only buckets for the next Group-B Evelyn settlement."""
+    if business.empty or not {'Gruppe','Art','Erlös_Brutto','closed_at','Lexware_uebertragen','position_key'}.issubset(business.columns):
+        empty = business.iloc[0:0].copy()
+        return {'bound':empty, 'ready':empty, 'review':empty, 'held':empty,
+                'new_payouts':[], 'total':Decimal(0)}
+    group_b = business[
+        (business.Gruppe == 'Gruppe B') & (business.Art == 'Bestellung')
+        & (business['Erlös_Brutto'] > 0)
+    ].copy()
+    bound = group_b[group_b.Lexware_uebertragen].copy()
+    pending = group_b[~group_b.Lexware_uebertragen & ~group_b.closed_at.astype(bool)].copy()
+    held_mask = api_holds.mask(pending)
+    held = pending[held_mask].copy()
+    eligible_keys = set(eligible.position_key) if not eligible.empty else set()
+    ready = pending[pending.position_key.isin(eligible_keys) & ~held_mask].copy()
+    review = pending[~pending.position_key.isin(eligible_keys) & ~held_mask].copy()
+    invoice_payouts = {payout for item in invoices.values() if not item['discarded'] for payout in item['Payouts']}
+    new_payouts = sorted(set(pending['Auszahlung Nr.']) - invoice_payouts)
+    total = Decimal(0)
+    if not ready.empty:
+        total = prepare_partner_export(ready, statement_type='group_b_evelyn')['totals']['Rechnung']['gross']
+    return {'bound':bound, 'ready':ready, 'review':review, 'held':held,
+            'new_payouts':new_payouts, 'total':total}

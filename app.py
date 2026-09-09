@@ -423,7 +423,7 @@ try:
     open_rows=studio_view.open_positions(raw)
     catalogue=studio_view.order_catalogue(raw,business)
     open_orders=catalogue[~catalogue.payout & (catalogue.Status!='Einbehalt / Rücksendung in Klärung')] if not catalogue.empty else catalogue
-    invoices=studio_view.invoice_history()
+    invoices=studio_view.invoice_history(business)
     api_imports=ebay_sync.load(Path(core.PAYOUTS_DB_PATH).parent)
 except Exception as exc:
     st.error(f'Datenbestand benötigt Prüfung: {exc}')
@@ -555,15 +555,31 @@ with group_a:
 
 with group_b:
     b_ready=ready[ready.Gruppe=='Gruppe B'] if not ready.empty else ready
-    transferred_rows=business[business.Lexware_uebertragen & (business.Art=='Bestellung') & (business['Erlös_Brutto']>0)] if not business.empty else business
-    evelyn_payment_open=transferred_rows[~transferred_rows.received_at.astype(bool) & ~transferred_rows.closed_at.astype(bool)] if not transferred_rows.empty else transferred_rows
+    evelyn=studio_view.evelyn_overview(business,b_ready,invoices)
+    transferred_rows=evelyn['bound']
     with st.container(border=True):
         st.subheader('Partner → Patrick')
         st.caption('Einzelabrechnungen für MH, NB und weitere zugeordnete Partner · 3,5 % Rabatt')
         partner_panel(partner_ready[partner_ready.Gruppe=='Gruppe B'] if not partner_ready.empty else partner_ready,'3,5 %','Partner_Patrick',business[business.Gruppe=='Gruppe B'] if not business.empty else business)
     with st.container(border=True):
         st.subheader('Gesamtabrechnung Gruppe B an Evelyn')
-        transmitted=sum(item['Positionen'] or 0 for item in invoices.values() if not item['discarded'])
+        active_invoices=[item for item in invoices.values() if not item['discarded']]
+        transmitted=len(evelyn['bound'])
+        st.markdown('**Bereits fakturiert / bezahlt**')
+        if not active_invoices:
+            st.caption('Noch kein Evelyn-Beleg gespeichert.')
+        for item in active_invoices:
+            invoice_date=studio_view.local_datetime(core.pd.Series([item['Datum']])).iloc[0].split()[0] if item['Datum'] else 'Datum nicht gespeichert'
+            amount=euros(item['Betrag']) if item['Betrag'] is not None else 'Betrag nicht gespeichert'
+            with st.container(border=True):
+                st.markdown(f"**{item['Belegnummer']}** · {invoice_date} · **{amount}** · {item['Positionen']} Positionen")
+                badge_col,payment_col,close_col=st.columns([.8,1.45,1],vertical_alignment='center')
+                badge_col.badge('fakturiert',color='blue',icon=':material/receipt_long:')
+                payment_col.badge(item['Zahlungsstatus'],color='green' if item['Zahlungsstatus'].endswith('erhalten') else 'orange',icon=':material/account_balance:')
+                close_col.badge('abgeschlossen' if item['Abschlussstatus']=='abgeschlossen' else 'Abschluss offen',color='green' if item['Abschlussstatus']=='abgeschlossen' else 'gray',icon=':material/check_circle:')
+                st.caption('Payouts: '+', '.join(item['Payouts']))
+
+        st.markdown('**Neu für nächste Rechnung**')
         available=sorted(b_ready['Auszahlung Nr.'].unique()) if not b_ready.empty else []
         selected=available
         chosen=b_ready
@@ -573,16 +589,24 @@ with group_b:
                 totals=prepare_partner_export(chosen,statement_type='group_b_evelyn')['totals']['Rechnung']
             except ValueError as exc:
                 st.warning(str(exc))
+        visible_totals=totals or {'ebay':0,'discount':0,'gross':0}
+        for col,label,value in zip(st.columns(4),['Neu für Evelyn','Neuer eBay-Auszahlungsbetrag brutto','Neuer Rabatt 0,5 % netto','Neue Rechnungssumme brutto'],[str(len(chosen)),euros(visible_totals['ebay']),euros(visible_totals['discount']),euros(visible_totals['gross'])]):
+            col.metric(label,value)
         if totals:
-            for col,label,value in zip(st.columns(4),['Neu für Evelyn','Neuer eBay-Auszahlungsbetrag brutto','Neuer Rabatt 0,5 % netto','Neue Rechnungssumme brutto'],[str(len(chosen)),euros(totals['ebay']),euros(totals['discount']),euros(totals['gross'])]):
-                col.metric(label,value)
             st.caption('Diese Summen enthalten ausschließlich Positionen des nächsten Lexware-Entwurfs.')
         else:
             st.info('Aktuell keine neuen Gruppe-B-Positionen für einen Lexware-Entwurf freigegeben.')
-        if transmitted:
-            prior_col,payment_col=st.columns(2)
-            prior_col.metric('Bereits an Lexware gebunden',f'{transmitted} Positionen')
-            payment_col.metric('Evelyn-Zahlung noch offen',f'{len(evelyn_payment_open)} Positionen')
+        status_cols=st.columns(3)
+        status_cols[0].metric('Neu abrechnungsfähig',f"{len(evelyn['ready'])} Positionen")
+        status_cols[1].metric('Prüfung erforderlich',f"{len(evelyn['review'])} Positionen")
+        status_cols[2].metric('Durch Hold blockiert',f"{len(evelyn['held'])} Positionen")
+        st.caption('Neue Payouts seit dem letzten Beleg: '+(', '.join(evelyn['new_payouts']) if evelyn['new_payouts'] else 'keine'))
+        if not evelyn['review'].empty:
+            with st.expander(f"Prüfung erforderlich · {len(evelyn['review'])} Positionen"):
+                st.dataframe(evelyn['review'][['Auszahlung Nr.','Bestellnummer','Partner','SKU','Erlös_Brutto','Bearbeitungsstatus']],hide_index=True,use_container_width=True)
+        if not evelyn['held'].empty:
+            with st.expander(f"Durch Hold blockiert · {len(evelyn['held'])} Positionen"):
+                st.dataframe(evelyn['held'][['Auszahlung Nr.','Bestellnummer','Partner','SKU','Erlös_Brutto','API_Hold_Hinweis']],hide_index=True,use_container_width=True)
 
         can_create=studio_view.lexware_create_ready(
             selected, totals, api_key,
@@ -595,9 +619,15 @@ with group_b:
         with lexware_col:
             create_clicked=st.button('An Lexware übermitteln',type='primary',disabled=not can_create,use_container_width=True,key='lexware-create',icon=':material/lock:')
         st.caption('Anzeige, Download und Lexware-Entwurf enthalten ausschließlich noch nicht übertragene, fachlich freigegebene Positionen. Frühere Entwürfe bleiben separat gebunden.')
-        if transmitted:
-            active_payouts=sorted(business.loc[business.Lexware_uebertragen,'Auszahlung Nr.'].unique()) if not business.empty else []
-            st.caption(f"Entwurf: {transmitted} Positionen · Payouts "+', '.join(active_payouts))
+
+        with st.expander(f'Historie · {len(invoices)} Evelyn-Belege',expanded=False):
+            for item in sorted(invoices.values(),key=lambda record:record['Datum'],reverse=True):
+                invoice_date=studio_view.local_datetime(core.pd.Series([item['Datum']])).iloc[0].split()[0] if item['Datum'] else 'Datum nicht gespeichert'
+                amount=euros(item['Betrag']) if item['Betrag'] is not None else 'Betrag nicht gespeichert'
+                st.markdown(f"**{item['Belegnummer']}** · {invoice_date} · {amount} · {item['Positionen']} Positionen")
+                st.caption('Payouts: '+', '.join(item['Payouts']))
+                st.caption(f"Zahlungsstatus: {item['Zahlungsstatus']} · Abschlussstatus: {item['Abschlussstatus']}")
+                st.divider()
 
         with st.container(border=True):
             st.subheader('Lexware-Aktion')
@@ -611,6 +641,8 @@ with group_b:
                     transferred_rows=transferred_rows.copy()
                     transferred_rows['invoice_scope']=transferred_rows['Auszahlung Nr.'].map(invoice_map)
                     for invoice_id,payment_rows in transferred_rows.groupby('invoice_scope'):
+                        invoice_record=invoices.get(invoice_id,{})
+                        st.caption(invoice_record.get('Belegnummer',str(invoice_id)))
                         outstanding=payment_rows[~payment_rows.received_at.astype(bool) & ~payment_rows.closed_at.astype(bool)]
                         if outstanding.empty:
                             st.checkbox('Zahlung von Evelyn erhalten',value=True,disabled=True,key='evelyn-paid-'+str(invoice_id))

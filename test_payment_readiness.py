@@ -82,9 +82,13 @@ class PaymentReadinessTests(unittest.TestCase):
         self.assertFalse(app.exception)
         metrics={metric.label:metric.value for metric in app.metric}
         self.assertEqual(metrics['Neu für Evelyn'],'1')
-        self.assertEqual(metrics['Bereits an Lexware gebunden'],'1 Positionen')
+        self.assertEqual(metrics['Neu abrechnungsfähig'],'1 Positionen')
+        self.assertEqual(metrics['Prüfung erforderlich'],'0 Positionen')
+        self.assertEqual(metrics['Durch Hold blockiert'],'0 Positionen')
         self.assertNotIn('Offene Positionen',metrics)
         self.assertIn('Neue Evelyn-Abrechnung herunterladen',[button.label for button in app.get('download_button')])
+        evelyn_history=next(expander for expander in app.expander if expander.label.startswith('Historie ·'))
+        self.assertFalse(evelyn_history.proto.expanded)
         http=Mock();http.get.return_value.status_code=200
         http.get.return_value.json.return_value={'content':[{'id':'contact','roles':{'customer':{'number':16335}}}]}
         http.post.return_value.status_code=201;http.post.return_value.json.return_value={'id':'real-draft-simulated'}

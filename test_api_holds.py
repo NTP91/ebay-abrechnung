@@ -61,11 +61,18 @@ class ApiHoldTests(unittest.TestCase):
                     self.assertEqual(before.position_key.tolist(),after.position_key.tolist())
                     self.assertEqual(fingerprint,core.payout_fingerprint(core.load_master_data()))
                     self.assertEqual(studio_view.partner_rows(after).Bestellnummer.tolist(),['free'])
-                    self.assertEqual(studio_view.eligible_rows(core.load_master_data(),core.sync_status(core.load_master_data())).Bestellnummer.tolist(),['free'])
+                    eligible=studio_view.eligible_rows(core.load_master_data(),core.sync_status(core.load_master_data()))
+                    self.assertEqual(eligible.Bestellnummer.tolist(),['free'])
                     if sku.startswith('MH'):
                         payload=core.build_invoice_payload(core.load_master_data(),'p1','contact',True)
                         self.assertEqual(len(payload['lineItems']),1)
                         self.assertIn('free',payload['lineItems'][0]['description'])
+                        overview=studio_view.evelyn_overview(after,eligible,{})
+                        self.assertEqual(overview['ready'].Bestellnummer.tolist(),['free'])
+                        self.assertEqual(overview['held'].Bestellnummer.tolist(),['held'])
+                        self.assertTrue(overview['review'].empty)
+                        blocked=studio_view.evelyn_overview(after,eligible.iloc[0:0],{})
+                        self.assertEqual(blocked['review'].Bestellnummer.tolist(),['free'])
 
     def test_protected_snapshot_and_paid_closed_fields_are_preserved(self):
         self.seed()
