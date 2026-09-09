@@ -78,7 +78,10 @@ class PaymentReadinessTests(unittest.TestCase):
         ready=studio_view.eligible_rows(core.load_master_data(),core.sync_status(core.load_master_data()))
         self.assertEqual(ready.Bestellnummer.tolist(),['new'])
         from streamlit.testing.v1 import AppTest
-        app=AppTest.from_file('app.py').run(timeout=30)
+        invoice_history=studio_view.invoice_history
+        with patch.object(studio_view,'invoice_history',side_effect=lambda:invoice_history()) as history_call:
+            app=AppTest.from_file('app.py').run(timeout=30)
+        history_call.assert_called()
         self.assertFalse(app.exception)
         metrics={metric.label:metric.value for metric in app.metric}
         self.assertEqual(metrics['Neu für Evelyn'],'1')

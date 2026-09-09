@@ -176,7 +176,9 @@ def _snapshot_total(payload):
     return cents(total_after + previous_tax)
 
 
-def invoice_history(business=None):
+def invoice_history():
+    """Return Evelyn vouchers while preserving the established no-argument API."""
+    business = position_workflow.positions()
     with core.ledger() as db:
         rows = [dict(row) for row in db.execute('SELECT * FROM payouts WHERE invoice_id IS NOT NULL ORDER BY id')]
         discarded = [dict(row) for row in db.execute('SELECT * FROM discarded_invoices ORDER BY discarded_at')]

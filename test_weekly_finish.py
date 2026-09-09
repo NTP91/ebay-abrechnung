@@ -107,7 +107,7 @@ class WeeklyFinishTests(unittest.TestCase):
         self.assertEqual(http.get.call_count,1)
         row=workflow.positions().query("Gruppe == 'Gruppe B'").iloc[0]
         workflow.confirm([row.position_key],'evelyn_received',date.today())
-        history=studio_view.invoice_history(workflow.positions())['draft']
+        history=studio_view.invoice_history()['draft']
         self.assertEqual(history['Zahlungsstatus'],'Zahlung von Evelyn erhalten')
         self.assertEqual(history['Abschlussstatus'],'offen')
         self.assertEqual(history['Positionen'],1)

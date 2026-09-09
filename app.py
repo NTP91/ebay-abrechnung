@@ -423,7 +423,7 @@ try:
     open_rows=studio_view.open_positions(raw)
     catalogue=studio_view.order_catalogue(raw,business)
     open_orders=catalogue[~catalogue.payout & (catalogue.Status!='Einbehalt / Rücksendung in Klärung')] if not catalogue.empty else catalogue
-    invoices=studio_view.invoice_history(business)
+    invoices=studio_view.invoice_history()
     api_imports=ebay_sync.load(Path(core.PAYOUTS_DB_PATH).parent)
 except Exception as exc:
     st.error(f'Datenbestand benötigt Prüfung: {exc}')
