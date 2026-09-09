@@ -259,7 +259,7 @@ def invoice_panel(rows, key, scope='Rechnung', expanded=False, choose_partner=Fa
 
 
 @st.dialog('Vorgang bestätigen')
-def confirm_dialog(rows, action, label):
+def confirm_dialog(rows, action, label, invoice_id=None):
     st.write(f"**{label}** · {len(rows)} Positionen")
     st.write('Partner: '+', '.join(sorted(rows.Partner.unique())))
     st.write('Payouts: '+', '.join(sorted(rows['Auszahlung Nr.'].unique())))
@@ -273,7 +273,7 @@ def confirm_dialog(rows, action, label):
     st.dataframe(rows[['Bestellnummer','SKU','Angebotstitel','Erlös_Brutto']], hide_index=True)
     if st.button('Verbindlich bestätigen', type='primary'):
         try:
-            position_workflow.confirm(rows.position_key.tolist(), action, date.today(),
+            position_workflow.confirm(rows.position_key.tolist(), action, date.today(), invoice_id=invoice_id,
                 expected_sources={r.position_key:position_workflow.source_snapshot(r) for _,r in rows.iterrows()})
             st.session_state.pop('confirmation_request',None)
             st.rerun()
@@ -284,9 +284,9 @@ def confirm_dialog(rows, action, label):
         st.rerun()
 
 
-def checkbox_confirmation(key, rows, action, label):
+def checkbox_confirmation(key, rows, action, label, invoice_id=None):
     if st.session_state.get(key):
-        st.session_state['confirmation_request']=(rows.copy(),action,label)
+        st.session_state['confirmation_request']=(rows.copy(),action,label,invoice_id)
         st.session_state[key]=False
 
 
@@ -660,7 +660,7 @@ with group_b:
                             st.checkbox('Zahlung von Evelyn erhalten',value=True,disabled=True,key='evelyn-paid-'+str(invoice_id))
                         else:
                             payment_key='evelyn-payment-'+str(invoice_id)
-                            st.checkbox('Zahlung von Evelyn erhalten',key=payment_key,on_change=checkbox_confirmation,args=(payment_key,outstanding,'evelyn_received','Zahlung von Evelyn erhalten'))
+                            st.checkbox('Zahlung von Evelyn erhalten',key=payment_key,on_change=checkbox_confirmation,args=(payment_key,outstanding,'evelyn_received','Zahlung von Evelyn erhalten',invoice_id))
                 else:
                     st.checkbox('Zahlung von Evelyn erhalten',value=False,disabled=True,key='evelyn-payment-none')
             with status_col:

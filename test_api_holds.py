@@ -107,6 +107,65 @@ class ApiHoldTests(unittest.TestCase):
             partner_invoices.approve(invoice['id'],'Test')
         self.assertFalse(workflow.positions().reviewed_at.astype(bool).any())
 
+    def test_later_hold_allows_only_receipt_for_immutable_invoice_snapshot(self):
+        self.seed()
+        payload=core.build_invoice_payload(core.load_master_data(),'p1','contact',True)
+        payload['voucherDate']='2026-09-03T09:00:00Z'
+        with core.ledger() as db:
+            db.execute("UPDATE payouts SET attempt='created',invoice_id='invoice',snapshot=? WHERE id='p1'",
+                       (json.dumps(payload,ensure_ascii=False),))
+            db.commit()
+        api_holds.ingest(self.root,snapshot([movement(transactionDate='2026-09-03T10:00:00Z')]))
+        rows=workflow.positions()
+        self.assertTrue(rows.Lexware_uebertragen.all())
+        self.assertTrue(rows.query("Bestellnummer=='held'").iloc[0].API_Hold)
+
+        workflow.confirm(rows.position_key.tolist(),'evelyn_received',date.today(),invoice_id='invoice')
+
+        received=workflow.positions()
+        self.assertTrue(received.received_at.astype(bool).all())
+        held=received.query("Bestellnummer=='held'").iloc[0]
+        self.assertTrue(held.API_Hold)
+        self.assertTrue(held.API_Korrekturfall)
+        with self.assertRaisesRegex(ValueError,'API-Einbehalt'):
+            workflow.confirm([held.position_key],'partner_paid',date.today())
+        self.assertNotIn('held',studio_view.eligible_rows(core.load_master_data(),core.sync_status(core.load_master_data())).Bestellnummer.tolist())
+
+    def test_hold_before_invoice_still_blocks_evelyn_receipt(self):
+        self.seed()
+        payload=core.build_invoice_payload(core.load_master_data(),'p1','contact',True)
+        payload['voucherDate']='2026-09-03T11:00:00Z'
+        with core.ledger() as db:
+            db.execute("UPDATE payouts SET attempt='created',invoice_id='invoice',snapshot=? WHERE id='p1'",
+                       (json.dumps(payload,ensure_ascii=False),))
+            db.commit()
+        api_holds.ingest(self.root,snapshot([movement(transactionDate='2026-09-03T10:00:00Z')]))
+        rows=workflow.positions()
+        with self.assertRaisesRegex(ValueError,'API-Einbehalt'):
+            workflow.confirm(rows.position_key.tolist(),'evelyn_received',date.today(),invoice_id='invoice')
+        self.assertFalse(workflow.positions().received_at.astype(bool).any())
+
+    def test_later_hold_evelyn_ui_confirmation_uses_invoice_scope(self):
+        from streamlit.testing.v1 import AppTest
+        self.seed()
+        payload=core.build_invoice_payload(core.load_master_data(),'p1','contact',True)
+        payload['voucherDate']='2026-09-03T09:00:00Z'
+        with core.ledger() as db:
+            db.execute("UPDATE payouts SET attempt='created',invoice_id='invoice',snapshot=? WHERE id='p1'",
+                       (json.dumps(payload,ensure_ascii=False),))
+            db.commit()
+        api_holds.ingest(self.root,snapshot([movement(transactionDate='2026-09-03T10:00:00Z')]))
+
+        app=AppTest.from_file('app.py').run(timeout=30)
+        payment=next(box for box in app.checkbox if box.label=='Zahlung von Evelyn erhalten')
+        payment.set_value(True).run()
+        next(button for button in app.button if button.label=='Verbindlich bestätigen').click().run()
+
+        self.assertFalse(app.exception)
+        rows=workflow.positions()
+        self.assertTrue(rows.received_at.astype(bool).all())
+        self.assertTrue(rows.query("Bestellnummer=='held'").iloc[0].API_Hold)
+
     def test_missing_refresh_refund_and_ordinary_credit_never_release(self):
         self.seed();api_holds.ingest(self.root,snapshot([movement()]))
         changes=[[], [movement(identifier='refund',transactionType='REFUND')],
