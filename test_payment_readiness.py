@@ -109,6 +109,16 @@ class PaymentReadinessTests(unittest.TestCase):
         result=workflow.positions().set_index('Bestellnummer')
         self.assertTrue(result.loc['new','closed_at']);self.assertFalse(result.loc['old','closed_at'])
 
+    def test_stale_studio_view_module_is_reloaded_without_data_changes(self):
+        from streamlit.testing.v1 import AppTest
+        self.seed([payout('p1','old','old',sku='NB / 1')])
+        before=workflow.positions()[list(workflow.FIELDS)].copy()
+        with patch.object(studio_view,'evelyn_overview',None):
+            app=AppTest.from_file('app.py').run(timeout=30)
+        self.assertFalse(app.exception)
+        self.assertEqual(before.to_dict('records'),workflow.positions()[list(workflow.FIELDS)].to_dict('records'))
+        self.assertIn('Gruppe B',[tab.label for tab in app.tabs])
+
     def test_group_b_invoice_payment_action_ignores_new_unreviewed_positions(self):
         from streamlit.testing.v1 import AppTest
         self.seed([payout('p1','old','old',sku='NB / 1')])

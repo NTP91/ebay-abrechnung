@@ -1,5 +1,6 @@
 import streamlit as st
 import hashlib
+import importlib
 from pathlib import Path
 import core
 import api_holds
@@ -13,6 +14,9 @@ import payout_reconciliation
 import trust_risk_ui
 from datetime import date
 from partner_export import export_partner_excel, prepare_partner_export
+
+if not callable(getattr(studio_view,'evelyn_overview',None)):
+    studio_view=importlib.reload(studio_view)
 
 st.set_page_config(page_title='Payout Studio', page_icon='💠', layout='wide', initial_sidebar_state='expanded')
 st.markdown('''<style>
