@@ -607,12 +607,25 @@ with group_b:
             selected, totals, api_key,
             (st.session_state.get('lexware-received'), st.session_state.get('lexware-prior'), st.session_state.get('lexware-once')),
         )
-        with st.container(border=True):
-            st.subheader('Lexware-Übertragung vorbereiten')
+        st.markdown('''<style>
+.st-key-lexware-action-card{border-radius:16px!important;border:1px solid #e3e8ef!important;box-shadow:0 6px 22px #16335b0a!important}
+.st-key-lexware-action-card [data-testid="stVerticalBlockBorderWrapper"]{border:none!important;box-shadow:none!important}
+.st-key-lexware-action-card [data-testid="stCheckbox"]{padding:.08rem 0;border-bottom:none!important}
+.st-key-lexware-action-card [data-testid="stAlert"]{background:#eef4fd!important;border:1px solid #d3e2f7!important;color:#1c3a68!important;border-radius:10px!important}
+.st-key-lexware-action-card [data-testid="stCaptionContainer"]{font-size:.78rem!important}
+.st-key-lexware-status-badges{margin-top:12px;padding-top:14px;border-top:1px dashed #e3e8ef}
+.st-key-lexware-status-badges [data-testid="stMetric"]{background:#f7f9fc!important;border:1px solid #e6eaf1!important;box-shadow:none!important;padding:10px 12px!important;min-height:auto!important}
+.st-key-lexware-status-badges [data-testid="stMetricLabel"]{font-size:.74rem!important}
+.st-key-lexware-status-badges [data-testid="stMetricValue"]{font-size:1.05rem!important}
+</style>''', unsafe_allow_html=True)
+        with st.container(border=True, key='lexware-action-card'):
+            title_col,ref_col=st.columns([3,1],vertical_alignment='center')
+            title_col.subheader('Lexware-Übertragung vorbereiten')
+            if selected:
+                ref_col.caption('Payout '+', '.join(selected))
             if totals:
-                st.write(f"**Aktueller Umfang:** {len(chosen)} Positionen · {euros(totals['gross'])} brutto · Payout {', '.join(selected)}")
-                st.caption('Payoutnachweise: '+', '.join(selected))
-            check_col,status_col=st.columns([1.1,1.5],vertical_alignment='top')
+                st.write(f"**Aktueller Umfang:** {len(chosen)} Positionen · {euros(totals['gross'])} brutto")
+            check_col,status_col=st.columns([1,1],vertical_alignment='top')
             with check_col:
                 st.checkbox('eBay-Geldeingang geprüft',key='lexware-received')
                 st.checkbox('Kein bestehender Beleg in Lexware',key='lexware-prior')
@@ -625,21 +638,22 @@ with group_b:
                 else:
                     st.success(f'{len(chosen)} Positionen sind fachlich bereit. Die Übermittlung wird erst nach allen drei Sicherheitsbestätigungen aktiv.')
                 st.caption(f'{len(b_ready)} neu für Lexware bereit · {transmitted} bereits früher übertragen.')
-                st.caption('Button-Sichtbarkeit ändert keine fachliche Freigabe oder Sperre.')
-            download_col,lexware_col,_=st.columns([1.25,1.75,1.5],vertical_alignment='center')
+            download_col,lexware_col=st.columns([1,1],vertical_alignment='center')
             with download_col:
                 if totals:
                     download('Neue Evelyn-Abrechnung herunterladen',chosen,'Gruppe_B_Neu_Evelyn','group_b_evelyn')
             with lexware_col:
                 create_clicked=st.button('An Lexware übermitteln',type='primary',disabled=not can_create,use_container_width=True,key='lexware-create',icon=':material/lock:')
             st.caption('Anzeige, Download und Lexware-Entwurf enthalten ausschließlich noch nicht übertragene, fachlich freigegebene Positionen. Frühere Entwürfe bleiben separat gebunden.')
+            st.caption('Button-Sichtbarkeit ändert keine fachliche Freigabe oder Sperre.')
 
-        status_cols=st.columns(3)
-        status_cols[0].metric('Neu abrechnungsfähig',f"{len(evelyn['new_ready'])} Positionen")
-        status_cols[1].metric('Prüfung erforderlich',f"{len(evelyn['new_review'])} Positionen")
-        status_cols[2].metric('Hold im neuen Payout',f"{len(evelyn['new_held'])} Positionen")
-        st.caption('Neue Payouts seit dem letzten Beleg: '+(', '.join(evelyn['new_payouts']) if evelyn['new_payouts'] else 'keine'))
-        st.caption(f"Hold-Positionen gesamt: {len(evelyn['held'])} · davon {len(evelyn['new_held'])} im neuen Payout · {len(evelyn['prior_held'])} aus älteren Payouts")
+        with st.container(key='lexware-status-badges'):
+            status_cols=st.columns(3)
+            status_cols[0].metric('Neu abrechnungsfähig',f"{len(evelyn['new_ready'])} Positionen")
+            status_cols[1].metric('Prüfung erforderlich',f"{len(evelyn['new_review'])} Positionen")
+            status_cols[2].metric('Hold im neuen Payout',f"{len(evelyn['new_held'])} Positionen")
+            st.caption('Neue Payouts seit dem letzten Beleg: '+(', '.join(evelyn['new_payouts']) if evelyn['new_payouts'] else 'keine'))
+            st.caption(f"Hold-Positionen gesamt: {len(evelyn['held'])} · davon {len(evelyn['new_held'])} im neuen Payout · {len(evelyn['prior_held'])} aus älteren Payouts")
         if not evelyn['new_review'].empty:
             with st.expander(f"Prüfung erforderlich · {len(evelyn['new_review'])} neue Positionen"):
                 st.dataframe(evelyn['new_review'][['Auszahlung Nr.','Bestellnummer','Partner','SKU','Erlös_Brutto','Bearbeitungsstatus']],hide_index=True,use_container_width=True)
