@@ -52,11 +52,12 @@ def holds(raw):
 def eligible_rows(master, states):
     if master.empty:
         return master.copy()
-    unlocked = set(states.loc[states.Sperre.isna() & states.Entwurf.isna() & ~states.Status.str.contains('Prüfung', na=False), 'Auszahlung'])
-    bad = set(master.loc[master['Prüfhinweis'].astype(bool), 'Auszahlung Nr.'])
+    # A payout-level review status is informational. Only a durable invoice
+    # reservation locks the whole payout; business gates are evaluated per row.
+    unlocked = set(states.loc[states.Sperre.isna() & states.Entwurf.isna(), 'Auszahlung'])
     paid = {payout for payout, block in master.groupby('Auszahlung Nr.') if core.payout_receipt_confirmed(block)}
     business = position_workflow.positions(master, states)
-    return business[business['Auszahlung Nr.'].isin((unlocked - bad) & paid) & (business['Erlös_Brutto'] > 0) & (business.Art == 'Bestellung') & ~business.get('Neutralisiert',False) & ~business['closed_at'].astype(bool) & ~business.Quellenpruefung.astype(bool) & ~api_holds.mask(business)].copy()
+    return business[business['Auszahlung Nr.'].isin(unlocked & paid) & (business['Erlös_Brutto'] > 0) & (business.Art == 'Bestellung') & ~business['Prüfhinweis'].astype(bool) & ~business.get('Neutralisiert',False) & ~business['closed_at'].astype(bool) & ~business.Quellenpruefung.astype(bool) & ~api_holds.mask(business)].copy()
 
 
 def lexware_create_ready(selected, totals, api_key, confirmations):
@@ -233,7 +234,7 @@ def evelyn_overview(business, eligible, invoices):
                 'prior_held':empty, 'new_payouts':[], 'total':Decimal(0)}
     group_b = business[
         (business.Gruppe == 'Gruppe B') & (business.Art == 'Bestellung')
-        & (business['Erlös_Brutto'] > 0)
+        & (business['Erlös_Brutto'] > 0) & ~business.get('Neutralisiert',False)
     ].copy()
     bound = group_b[group_b.Lexware_uebertragen].copy()
     pending = group_b[~group_b.Lexware_uebertragen & ~group_b.closed_at.astype(bool)].copy()

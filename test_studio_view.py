@@ -56,6 +56,22 @@ class StudioViewTests(unittest.TestCase):
         ready=studio_view.eligible_rows(master,core.sync_status(master))
         self.assertEqual(set(ready['Auszahlung Nr.']),{'p3'})
 
+    def test_one_ambiguous_position_does_not_block_clean_rows_in_same_payout(self):
+        master=core.load_master_data()
+        clean=master[master['Auszahlung Nr.']=='p3'].iloc[0].copy()
+        ambiguous=clean.copy()
+        ambiguous['Transaktionsnummer']='t3-ambiguous';ambiguous['Bestellnummer']='o3-ambiguous'
+        ambiguous['Prüfhinweis']='Zuordnung fehlt: mehrdeutig'
+        mixed=core.pd.concat([master,core.pd.DataFrame([ambiguous])],ignore_index=True)
+        states=core.sync_status(mixed)
+        self.assertIn('Prüfung',states.loc[states.Auszahlung=='p3','Status'].iloc[0])
+        ready=studio_view.eligible_rows(mixed,states)
+        same=ready[ready['Auszahlung Nr.']=='p3']
+        self.assertEqual(same.Bestellnummer.tolist(),['o3'])
+        payload=core.build_invoice_payload(mixed,'p3','contact',True)
+        self.assertEqual(len(payload['lineItems']),1)
+        self.assertIn('o3',payload['lineItems'][0]['description'])
+
     def prepare(self):
         for pid in ['p2','p3']:
             core.confirm_received(pid)

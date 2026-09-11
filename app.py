@@ -484,7 +484,7 @@ with st.expander('Payout-Abgleich · Bankbetrag und einzelne Positionen'):
             locked=payout_reconciliation.protected(manual_pid,check['financial'])
             st.caption('Freigegeben bedeutet: diese Bewegung wird im Bankabgleich berücksichtigt. Negative Einbehalte/Gebühren werden mit ihrem Vorzeichen berücksichtigt und bleiben außerhalb der Partnerrechnung. Child-Zeilen werden nicht zusätzlich summiert.')
             if locked: st.info(locked)
-            st.caption('Ohne gespeicherten manuellen Abgleich bleibt der bisherige Ablauf bestehen. Nach Aktivierung sind nur freigegebene Positionen eines vollständig abgestimmten Payouts abrechnungsfähig; bestehende Zuordnungsprüfungen gelten weiterhin.')
+            st.caption('Ohne gespeicherten manuellen Abgleich gilt die automatische Positionsprüfung. Unklare Zeilen, Holds und Erstattungen bleiben einzeln gesperrt; saubere Positionen eines finalen Payouts können weiterlaufen.')
             revision=f"manual-{manual_pid}-{check['version']}-{check['source_digest']}"
             api_control=api_imports['payouts'].get(manual_pid)
             if api_control:
@@ -538,7 +538,7 @@ with home:
     st.progress(assigned/total if total else 0,text=f'{assigned} von {total} Bestellpositionen einem eBay-Payout zugeordnet · {without} noch ohne Payout')
     st.caption('Bestellberichte und Bestelltransaktionen ohne Doppelzählung. „Ohne Payout“ bedeutet: im vorhandenen Datenbestand kein Payout bekannt. Ein Lexware-Entwurf ist keine Zahlung.')
     if issue_count:
-        st.warning(f'{issue_count} Zuordnungen prüfen. Betroffene Payouts bleiben gesperrt.')
+        st.warning(f'{issue_count} Zuordnungen prüfen. Nur die betroffenen Positionen bleiben gesperrt.')
     if not overview['warnings'].empty:
         st.warning('Importhinweise vorhanden. Details findest du in der Historie.')
     for gap in overview['gaps']:

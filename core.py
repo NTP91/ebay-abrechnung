@@ -47,13 +47,14 @@ def clean(value):
 
 
 def neutralized_mask(rows):
-    """Fully refunded economic order lines; never infer cancellation from order alone."""
+    """Verified cancellations whose exact economic order line nets to zero."""
     result = pd.Series(False, index=rows.index, dtype=bool)
     keys = ['Bestellnummer', 'Artikelnummer', 'SKU', 'Partner']
     required = set(keys + ['Art', 'Erlös_Brutto'])
     if rows.empty or not required.issubset(rows.columns):
         return result
-    eligible = rows['Art'].isin(['Bestellung', 'Erstattung'])
+    confirmed = {clean(value) for value in partner_config().get('neutralized_orders', []) if clean(value)}
+    eligible = rows['Art'].isin(['Bestellung', 'Erstattung']) & rows['Bestellnummer'].isin(confirmed)
     eligible &= rows[keys].apply(lambda column: column.map(clean).astype(bool)).all(axis=1)
     for _, block in rows.loc[eligible].groupby(keys, dropna=False):
         kinds = set(block['Art'])
@@ -427,14 +428,13 @@ def build_invoice_payload(master, payout_id, contact_id, money_received=False):
     if not money_received:
         raise ValueError('Geldeingang des Payouts muss zuerst bestätigt werden.')
     payout = master[master['Auszahlung Nr.'] == str(payout_id)]
-    if payout.empty or payout['Prüfhinweis'].astype(bool).any():
-        raise ValueError('Payout fehlt oder enthält ungeklärte Zuordnungen.')
-    related = payout[payout['Art'] != 'Gebühr']
-    if not (related['Titelquelle'] == 'Bestellbericht').all():
-        raise ValueError('Zuordnung fehlt: verbindlicher Bestellbericht-Titel fehlt.')
+    if payout.empty:
+        raise ValueError('Payout fehlt.')
     import api_holds
     neutralized = neutralized_mask(master)
-    sales = payout[(payout['Gruppe'] == 'Gruppe B') & (payout['Art'] == 'Bestellung') & (payout['Erlös_Brutto'] > 0) & ~api_holds.mask(payout) & ~neutralized.reindex(payout.index,fill_value=False)]
+    sales = payout[(payout['Gruppe'] == 'Gruppe B') & (payout['Art'] == 'Bestellung') & (payout['Erlös_Brutto'] > 0)
+                   & ~payout['Prüfhinweis'].astype(bool) & (payout['Titelquelle'] == 'Bestellbericht')
+                   & ~api_holds.mask(payout) & ~neutralized.reindex(payout.index,fill_value=False)]
     # Match the UI's completion/source gates without opening a nested write transaction.
     import position_workflow
     from contextlib import closing
@@ -656,8 +656,9 @@ def create_invoice_draft(api_key, payout_id, prior_invoices_checked=False, http=
             db.execute('BEGIN IMMEDIATE')
             for payout_id in payout_ids:
                 row = db.execute('SELECT * FROM payouts WHERE id=?', (payout_id,)).fetchone()
-                if not row or row['attempt'] or row['invoice_id'] or row['status'] != 'Geld eingegangen':
-                    raise ValueError('Payout gesperrt oder Geldeingang/Zuordnung nicht bestätigt.')
+                block=master[master['Auszahlung Nr.']==payout_id]
+                if not row or row['attempt'] or row['invoice_id'] or not payout_receipt_confirmed(block):
+                    raise ValueError('Payout gesperrt oder finaler eBay-Auszahlungsnachweis fehlt.')
                 if expected_fingerprints is not None and expected_fingerprints.get(payout_id) != payout_fingerprint(master[master['Auszahlung Nr.'] == payout_id]):
                     raise ValueError('Datenstand geändert. Übersicht aktualisieren und erneut prüfen; kein Entwurf erstellt.')
             try:

@@ -85,10 +85,14 @@ class ApiWorkflowTests(unittest.TestCase):
             self.send()
 
     def test_no_receipt_no_post_and_contact_error_no_post(self):
+        payouts=core.read_master(core.PAYOUTS_DB_PATH)
+        payouts['Auszahlungsstatus']='In Bearbeitung'
+        payouts.to_csv(core.PAYOUTS_DB_PATH,sep=';',index=False,encoding='utf-8-sig')
         with self.assertRaises(ValueError):
             self.send()
         self.http.post.assert_not_called()
-        core.confirm_received('7700379513')
+        payouts['Auszahlungsstatus']='Betrag überwiesen'
+        payouts.to_csv(core.PAYOUTS_DB_PATH,sep=';',index=False,encoding='utf-8-sig')
         self.http.get.return_value.status_code = 401
         with self.assertRaises(ValueError):
             self.send()

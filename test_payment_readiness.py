@@ -56,6 +56,16 @@ class PaymentReadinessTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'Keine Gruppe-B-Bestellungen'):
             core.build_invoice_payload(core.load_master_data(),'neutral','contact',True)
 
+    def test_full_refund_without_confirmed_cancellation_stays_in_separate_workflow(self):
+        sale=payout('return','sale','ordinary-return',sku='NB / 1',amount='119,00')
+        refund=payout('return','refund','ordinary-return',sku='NB / 1',amount='-119,00',kind='Rückerstattung')
+        for frame in (sale,refund): frame['Artikelnummer']='item-1'
+        self.seed([sale,refund])
+        case=workflow.positions().query("Bestellnummer == 'ordinary-return'")
+        self.assertFalse(case.Neutralisiert.any())
+        self.assertTrue(case.loc[case.Art=='Bestellung','partner_ready'].all())
+        self.assertIn('Erstattung zu klären',case.loc[case.Art=='Erstattung','Bearbeitungsstatus'].iloc[0])
+
     def test_group_a_new_positions_after_approved_invoice_remain_payable(self):
         self.seed([payout('p1','old','old',sku='BA / 1')])
         first=self.approve(workflow.positions(),number='FIRST')
