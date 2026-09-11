@@ -253,7 +253,11 @@ def partner_config():
 
 def normalized_partner(sku):
     normalized_sku = clean(sku).upper()
-    partner = partner_config().get('sku_partner_overrides', {}).get(normalized_sku)
+    config = partner_config()
+    for prefix, configured_partner in config.get('sku_prefix_overrides', {}).items():
+        if normalized_sku.startswith(clean(prefix).upper()):
+            return clean(configured_partner).upper()
+    partner = config.get('sku_partner_overrides', {}).get(normalized_sku)
     if partner:
         return clean(partner).upper()
     partner = normalized_sku.split('/')[0].strip()

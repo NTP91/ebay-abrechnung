@@ -14,8 +14,11 @@ class TrustRiskCaseTests(unittest.TestCase):
     def empty_snapshot(self):
         return {'resources':{'returns':{'data':{'items':[]}},'disputes':{'data':{'items':[]}},'transactions':{'data':{'items':[]}}}}
 
-    def test_confirmed_sku_partner_override(self):
-        self.assertEqual(core.normalized_partner('MAH-00422'),'MH')
+    def test_mah_prefix_is_assigned_to_fs_without_changing_mh(self):
+        self.assertEqual(core.normalized_partner('MAH-00422'),'FS')
+        self.assertEqual(core.normalized_partner('mah-another-item'),'FS')
+        self.assertEqual(core.normalized_partner('MH / X'),'MH')
+        self.assertEqual(core.normalized_partner('MH44 / PHI'),'MH')
 
     def test_multiple_signals_form_one_case(self):
         snap={'resources':{
