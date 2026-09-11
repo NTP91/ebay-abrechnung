@@ -60,16 +60,32 @@ def _request(sql, readonly=False):
     ref = os.environ['SUPABASE_PROJECT_REF'].strip()
     token = os.environ['SUPABASE_ACCESS_TOKEN'].strip()
     suffix = '/query/read-only' if readonly else '/query'
-    response = requests.post(
-        f'https://api.supabase.com/v1/projects/{ref}/database{suffix}',
-        headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
-        json={'query': sql, 'parameters': [], 'read_only': bool(readonly)}, timeout=90,
-    )
+    try:
+        response = requests.post(
+            f'https://api.supabase.com/v1/projects/{ref}/database{suffix}',
+            headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
+            json={'query': sql, 'parameters': [], 'read_only': bool(readonly)}, timeout=90,
+        )
+    except requests.exceptions.RequestException as exc:
+        raise StoreError(f'Supabase nicht erreichbar: {type(exc).__name__}') from None
     if response.status_code not in (200, 201):
         detail=response.text[:500].replace(token,'[redacted]')
         raise StoreError(f'Supabase-Abfrage fehlgeschlagen (HTTP {response.status_code}): {detail}')
     value = response.json()
     return value if isinstance(value, list) else value.get('result', [])
+
+
+def preflight():
+    """Verify Supabase is reachable and the configured credentials actually authenticate.
+
+    require() only checks that the environment variables are non-empty; it does not prove
+    they are valid. This performs one lightweight authenticated call so a revoked/expired
+    token or wrong project ref fails loudly here, before any payment data is touched.
+    """
+    if not enabled() and os.environ.get('PYTEST_CURRENT_TEST'):
+        return
+    require()
+    _request('select 1', readonly=True)
 
 
 def ensure_schema():

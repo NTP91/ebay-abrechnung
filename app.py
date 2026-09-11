@@ -16,7 +16,11 @@ import supabase_store
 from datetime import date
 from partner_export import export_partner_excel, prepare_partner_export
 
-supabase_store.require()
+try:
+    supabase_store.preflight()
+except supabase_store.StoreError as exc:
+    st.error(f'Supabase nicht verfügbar oder nicht authentifiziert: {exc}\n\nKein lokaler Fallback möglich; Anwendung angehalten.')
+    st.stop()
 
 if not callable(getattr(studio_view,'evelyn_overview',None)):
     studio_view=importlib.reload(studio_view)
