@@ -29,6 +29,7 @@ def positions(master=None, states=None):
         snapshots = {r['id']: json.loads(r['snapshot']) for r in db.execute('SELECT id,snapshot FROM payouts WHERE snapshot IS NOT NULL AND snapshot != ""')}
     transport = {r.Auszahlung: r for r in states.itertuples()}
     result = master.copy()
+    result['Neutralisiert'] = core.neutralized_mask(result)
     result['position_key'] = result.apply(position_key, axis=1)
     if result.loc[result.Art != 'Gebühr', 'position_key'].duplicated().any():
         raise ValueError('Positionsstatus benötigt eindeutige Transaktionsidentitäten.')
@@ -44,6 +45,7 @@ def positions(master=None, states=None):
         source_changed = bool(stored.get('source') and stored['source'] != source_snapshot(row))
         held = bool(row.get('API_Hold', False))
         correction = held and (transferred or any(record.values()) or row['Auszahlung Nr.'] in snapshots or bool(state is not None and state.Sperre))
+        neutralized = bool(row.Neutralisiert) and not transferred and not any(record.values())
         valid = not row['Prüfhinweis'] and not source_changed and not held and row.Gruppe in ('Gruppe A','Gruppe B')
         if record['closed_at']:
             status = 'abgeschlossen'
@@ -51,6 +53,9 @@ def positions(master=None, states=None):
             status = 'Geschützter Korrekturfall · nachträglicher API-Hold'
         elif held:
             status = 'einbehalten · API-Nachweis'
+        elif neutralized:
+            status = ('vollständig neutralisiert / storniert' if row.Art == 'Bestellung'
+                      else 'Erstattung neutralisiert Verkauf · separat zu klären')
         elif not valid:
             status = 'Prüfung erforderlich'
         elif record['paid_at'] or record['received_at']:
@@ -67,7 +72,7 @@ def positions(master=None, states=None):
                       Partnerzahlung='bezahlt' if record['paid_at'] else 'offen',
                       Evelyn_Zahlung=('erhalten' if record['received_at'] else 'offen') if row.Gruppe == 'Gruppe B' else 'nicht zutreffend',
                       Quellenpruefung='Quelldaten seit Bestätigung verändert' if source_changed else '',
-                      partner_ready=bool(valid and not record['closed_at'] and not record['paid_at'] and row.Art=='Bestellung' and row['Erlös_Brutto'] > 0))
+                      partner_ready=bool(valid and not neutralized and not record['closed_at'] and not record['paid_at'] and row.Art=='Bestellung' and row['Erlös_Brutto'] > 0))
         records.append(record)
     return pd.concat([result.reset_index(drop=True), pd.DataFrame(records)], axis=1)
 

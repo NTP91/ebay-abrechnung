@@ -103,6 +103,8 @@ def prepare_partner_export(rows, payouts=None, orders=None, statement_type='part
     """Enrich only the export, resolving original transaction and order fields."""
     if statement_type not in ('partner', 'group_b_evelyn'):
         raise ValueError('Unbekannte Abrechnungsart.')
+    if 'Neutralisiert' in rows and rows.Neutralisiert.astype(bool).any():
+        raise ValueError('Vollständig neutralisierte/stornierte Positionen dürfen nicht in einer Partnerabrechnung erscheinen.')
     if rows.empty or rows['Gruppe'].nunique() != 1 or (statement_type == 'partner' and rows['Partner'].nunique() != 1):
         raise ValueError('Partnerexport benötigt genau einen Partner und eine Gruppe.')
     partner, group = rows.iloc[0]['Partner'], rows.iloc[0]['Gruppe']

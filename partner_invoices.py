@@ -171,6 +171,8 @@ def upload(partner, filename, content, scope='Rechnung'):
         if business.empty: raise ValueError('Keine abrechenbaren Partnerpositionen vorhanden.')
         art='Erstattung' if scope=='Gutschriften' else 'Bestellung'
         rows=business[(business.Partner==partner)&(business.Art==art)&~business.closed_at.astype(bool)&~business.paid_at.astype(bool)&~business['Prüfhinweis'].astype(bool)&~business.Quellenpruefung.astype(bool)&~api_holds.mask(business)]
+        if art == 'Bestellung' and 'Neutralisiert' in rows:
+            rows=rows[~rows.Neutralisiert]
         rows=rows[~rows.reviewed_at.astype(bool)]
         if rows.empty: raise ValueError('Keine offenen abrechenbaren Positionen für diesen Partner.')
         extracted=invoice_parser.extract(content,filename)

@@ -56,7 +56,7 @@ def eligible_rows(master, states):
     bad = set(master.loc[master['Prüfhinweis'].astype(bool), 'Auszahlung Nr.'])
     paid = {payout for payout, block in master.groupby('Auszahlung Nr.') if core.payout_receipt_confirmed(block)}
     business = position_workflow.positions(master, states)
-    return business[business['Auszahlung Nr.'].isin((unlocked - bad) & paid) & (business['Erlös_Brutto'] > 0) & (business.Art == 'Bestellung') & ~business['closed_at'].astype(bool) & ~business.Quellenpruefung.astype(bool) & ~api_holds.mask(business)].copy()
+    return business[business['Auszahlung Nr.'].isin((unlocked - bad) & paid) & (business['Erlös_Brutto'] > 0) & (business.Art == 'Bestellung') & ~business.get('Neutralisiert',False) & ~business['closed_at'].astype(bool) & ~business.Quellenpruefung.astype(bool) & ~api_holds.mask(business)].copy()
 
 
 def lexware_create_ready(selected, totals, api_key, confirmations):

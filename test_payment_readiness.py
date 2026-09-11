@@ -37,6 +37,25 @@ class PaymentReadinessTests(unittest.TestCase):
         incoming.approve(record['id'],'Offline test')
         return record
 
+    def test_fully_refunded_order_line_never_becomes_partner_payment(self):
+        sale=payout('neutral','sale','26-15088-68974',sku='MAH-00422',amount='1150,00')
+        refund=payout('neutral','refund','26-15088-68974',sku='MAH-00422',amount='-1150,00',kind='Rückerstattung')
+        for frame in (sale,refund): frame['Artikelnummer']='820045421018'
+        self.seed([sale,refund])
+        rows=workflow.positions()
+        case=rows[rows.Bestellnummer=='26-15088-68974']
+        self.assertEqual(case.Partner.unique().tolist(),['FS'])
+        self.assertEqual(round(case['Erlös_Brutto'].sum(),2),0)
+        self.assertTrue(case.Neutralisiert.all())
+        self.assertFalse(case.partner_ready.any())
+        self.assertIn('vollständig neutralisiert / storniert',case[case.Art=='Bestellung'].iloc[0].Bearbeitungsstatus)
+        self.assertIn('separat zu klären',case[case.Art=='Erstattung'].iloc[0].Bearbeitungsstatus)
+        self.assertTrue(studio_view.partner_rows(rows).empty)
+        with self.assertRaisesRegex(ValueError,'neutralisierte'):
+            prepare_partner_export(case[case.Art=='Bestellung'])
+        with self.assertRaisesRegex(ValueError,'Keine Gruppe-B-Bestellungen'):
+            core.build_invoice_payload(core.load_master_data(),'neutral','contact',True)
+
     def test_group_a_new_positions_after_approved_invoice_remain_payable(self):
         self.seed([payout('p1','old','old',sku='BA / 1')])
         first=self.approve(workflow.positions(),number='FIRST')

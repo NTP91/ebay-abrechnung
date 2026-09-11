@@ -46,6 +46,25 @@ def clean(value):
     return str(value).strip()
 
 
+def neutralized_mask(rows):
+    """Fully refunded economic order lines; never infer cancellation from order alone."""
+    result = pd.Series(False, index=rows.index, dtype=bool)
+    keys = ['Bestellnummer', 'Artikelnummer', 'SKU', 'Partner']
+    required = set(keys + ['Art', 'Erlös_Brutto'])
+    if rows.empty or not required.issubset(rows.columns):
+        return result
+    eligible = rows['Art'].isin(['Bestellung', 'Erstattung'])
+    eligible &= rows[keys].apply(lambda column: column.map(clean).astype(bool)).all(axis=1)
+    for _, block in rows.loc[eligible].groupby(keys, dropna=False):
+        kinds = set(block['Art'])
+        amounts = block['Erlös_Brutto'].map(lambda value: Decimal(str(value)).quantize(Decimal('.01')))
+        if kinds == {'Bestellung', 'Erstattung'} and amounts.sum() == Decimal('0.00') \
+                and amounts[block['Art'] == 'Bestellung'].sum() > 0 \
+                and amounts[block['Art'] == 'Erstattung'].sum() < 0:
+            result.loc[block.index] = True
+    return result
+
+
 def canonicalize(frame):
     result = frame.copy().fillna('')
     for field, aliases in FIELDS.items():
@@ -414,7 +433,8 @@ def build_invoice_payload(master, payout_id, contact_id, money_received=False):
     if not (related['Titelquelle'] == 'Bestellbericht').all():
         raise ValueError('Zuordnung fehlt: verbindlicher Bestellbericht-Titel fehlt.')
     import api_holds
-    sales = payout[(payout['Gruppe'] == 'Gruppe B') & (payout['Art'] == 'Bestellung') & (payout['Erlös_Brutto'] > 0) & ~api_holds.mask(payout)]
+    neutralized = neutralized_mask(master)
+    sales = payout[(payout['Gruppe'] == 'Gruppe B') & (payout['Art'] == 'Bestellung') & (payout['Erlös_Brutto'] > 0) & ~api_holds.mask(payout) & ~neutralized.reindex(payout.index,fill_value=False)]
     # Match the UI's completion/source gates without opening a nested write transaction.
     import position_workflow
     from contextlib import closing
