@@ -122,6 +122,16 @@ class EbaySyncTests(unittest.TestCase):
         self.assertEqual(raw.iloc[0]['Auszahlung Nr.'],'p1')
         self.assertFalse(core.load_master_data().API_Hold.any())
 
+    def test_funds_processing_sale_without_fee_basis_amount_does_not_crash(self):
+        row=sale(pid='');row['transactionStatus']='FUNDS_PROCESSING';del row['totalFeeBasisAmount']
+        result=self.run_sync(FakeClient([row]))
+        self.assertEqual(result['status'],'success',result)
+        self.assertTrue(core.load_master_data().empty)
+        raw=core.read_master(core.PAYOUTS_DB_PATH)
+        self.assertEqual(len(raw),1)
+        self.assertEqual(raw.iloc[0]['Auszahlung Nr.'],'')
+        self.assertEqual(core.parse_money(raw.iloc[0]['Betrag abzügl. Kosten']),core.Decimal('119.00'))
+
     def test_locked_extra_position_is_not_imported_and_checkpoint_not_advanced(self):
         self.run_sync()
         with core.ledger() as db:

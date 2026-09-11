@@ -174,7 +174,7 @@ def adapt(rows, payouts, raw, orders):
                 raise ValueError('Mehrere API-Bewegungen passen auf dieselbe CSV-Zeile; Prüfung erforderlich.')
             matched_legacy[index]=key;known+=1;continue
         gross=value
-        if kind=='SALE':
+        if kind=='SALE' and transaction.get('totalFeeBasisAmount'):
             gross=eur(transaction['totalFeeBasisAmount'])
             if lines and sum((eur(line['feeBasisAmount']) for line in lines),Decimal(0))!=gross:
                 raise ValueError('API-Artikelbeträge stimmen nicht mit dem Bestellgesamtbetrag überein.')
