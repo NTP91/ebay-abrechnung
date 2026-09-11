@@ -7,11 +7,26 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from filelock import FileLock
+from atomic_io import replace_file
 
 FILE = 'Settlement_API_Holds.json'
 
 
 def load(directory):
+    import supabase_store
+    if supabase_store.enabled():
+        import core
+        copies=[]
+        saved, _ = supabase_store.get_json('state/holds.json', default=None)
+        if saved: copies.append(saved)
+        with core.ledger() as db:
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='api_hold_evidence'").fetchone():
+                record=db.execute('SELECT document FROM api_hold_evidence WHERE id=1').fetchone()
+                if record: copies.append(json.loads(record[0]))
+        if not copies: return {'version':0,'observations':[]}
+        newest=[d for d in copies if d['version']==max(c['version'] for c in copies)]
+        if any(d!=newest[0] for d in newest): raise ValueError('API-Hold-Nachweise widersprüchlich; Abrechnung gesperrt.')
+        return newest[0]
     directory = Path(directory)
     copies = []
     if (directory / FILE).exists():
@@ -64,6 +79,21 @@ def ingest(directory, snapshot):
                 fields = ('orderId', 'transactionId', 'transactionType', 'transactionStatus',
                           'transactionDate', 'bookingEntry', 'amount', 'payoutId', 'references', 'transactionMemo')
                 observations.append({'at': snapshot['fetched_at'], 'transaction': {k: row[k] for k in fields if k in row}})
+    import supabase_store
+    if supabase_store.enabled():
+        import core
+        document=load(directory)
+        encode=lambda row: json.dumps(row,ensure_ascii=False,sort_keys=True)
+        merged={encode(row):row for row in document['observations']+observations}
+        if set(merged)=={encode(row) for row in document['observations']}: return document
+        document={'version':document['version']+1,'observations':[merged[k] for k in sorted(merged)]}
+        text=json.dumps(document,ensure_ascii=False)
+        with core.ledger() as db:
+            db.execute('CREATE TABLE IF NOT EXISTS api_hold_evidence (id INTEGER PRIMARY KEY, document TEXT NOT NULL)')
+            db.execute('INSERT OR REPLACE INTO api_hold_evidence VALUES(1,?)',(text,));db.commit()
+        _, version=supabase_store.get('state/holds.json',required=False)
+        supabase_store.put_json('state/holds.json',document,version)
+        return document
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     with FileLock(str(directory / 'Master_Payouts.csv') + '.lock'), FileLock(str(directory / 'Master_Orders.csv') + '.lock'), FileLock(str(directory / FILE) + '.lock'):
@@ -83,7 +113,7 @@ def ingest(directory, snapshot):
             output.write(text)
             output.flush()
             os.fsync(output.fileno())
-        os.replace(temporary, directory / FILE)
+        replace_file(temporary, directory / FILE)
         return document
 
 

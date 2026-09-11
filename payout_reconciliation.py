@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+from atomic_io import replace_file
 import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -24,6 +25,19 @@ def snapshot(row):
 
 
 def load():
+    import supabase_store
+    if supabase_store.enabled():
+        copies=[]
+        saved,_=supabase_store.get_json('state/reconciliation.json',default=None)
+        if saved: copies.append(saved)
+        with core.ledger() as db:
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='manual_payout_reconciliation'").fetchone():
+                row=db.execute('SELECT document FROM manual_payout_reconciliation WHERE id=1').fetchone()
+                if row: copies.append(json.loads(row[0]))
+        if not copies:return dict(version=0,payouts={},audit=[])
+        newest=[v for v in copies if v['version']==max(x['version'] for x in copies)]
+        if any(v!=newest[0] for v in newest):raise ValueError('Widersprüchliche Payout-Abgleichssicherungen; Freigabe gesperrt.')
+        return newest[0]
     directory = Path(core.PAYOUTS_DB_PATH).parent
     copies = []
     path = directory/FILE
@@ -126,10 +140,15 @@ def save(payout, bank, decisions, actor, note, expected_version, expected_source
             db.execute('INSERT OR REPLACE INTO manual_payout_reconciliation VALUES(1,?)',(encoded,))
             core.audit(db,payout,'Manueller Payout-Abgleich: '+actor.strip()+'; '+note.strip())
             db.commit()
+        import supabase_store
+        if supabase_store.enabled():
+            _,version=supabase_store.get('state/reconciliation.json',required=False)
+            supabase_store.put('state/reconciliation.json',encoded.encode('utf-8'),version)
+            return inspect(payout,document=document)
         temporary=(directory/FILE).with_suffix('.json.tmp')
         with temporary.open('w',encoding='utf-8') as f:
             f.write(encoded);f.flush();os.fsync(f.fileno())
-        os.replace(temporary,directory/FILE)
+        replace_file(temporary,directory/FILE)
         return inspect(payout,document=document)
 
 

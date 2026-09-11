@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import os
+from atomic_io import replace_file
 from pathlib import Path
 import re
 import sqlite3
@@ -28,6 +29,19 @@ def iso(value):
 
 
 def load(directory):
+    import supabase_store
+    if supabase_store.enabled():
+        copies=[]
+        saved,_=supabase_store.get_json('state/ebay_sync.json',default=None)
+        if saved: copies.append(saved)
+        with core.ledger() as db:
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='ebay_sync_state'").fetchone():
+                row=db.execute('SELECT document FROM ebay_sync_state WHERE id=1').fetchone()
+                if row: copies.append(json.loads(row[0]))
+        if not copies:return dict(version=0,watermark=None,payouts={},transactions={},runs=[])
+        latest=[c for c in copies if c['version']==max(c['version'] for c in copies)]
+        if any(c!=latest[0] for c in latest):raise ValueError('API-Importhistorie widersprüchlich; Sicherung prüfen.')
+        return latest[0]
     copies=[]; directory=Path(directory)
     if (directory/FILE).exists():
         copies.append(json.loads((directory/FILE).read_text(encoding='utf-8')))
@@ -50,6 +64,14 @@ def load(directory):
 def save(directory, document):
     document['version']+=1
     text=json.dumps(document,ensure_ascii=False)
+    import supabase_store
+    if supabase_store.enabled():
+        with core.ledger() as db:
+            db.execute('CREATE TABLE IF NOT EXISTS ebay_sync_state (id INTEGER PRIMARY KEY, document TEXT NOT NULL)')
+            db.execute('INSERT OR REPLACE INTO ebay_sync_state VALUES(1,?)',(text,));db.commit()
+        _,version=supabase_store.get('state/ebay_sync.json',required=False)
+        supabase_store.put_json('state/ebay_sync.json',document,version)
+        return
     directory=Path(directory)
     with closing(sqlite3.connect(directory/'Settlement_State.sqlite3')) as db:
         db.execute('PRAGMA synchronous=FULL')
@@ -58,7 +80,7 @@ def save(directory, document):
     temporary=(directory/FILE).with_suffix('.tmp')
     with temporary.open('w',encoding='utf-8') as out:
         out.write(text);out.flush();os.fsync(out.fileno())
-    os.replace(temporary,directory/FILE)
+    replace_file(temporary,directory/FILE)
 
 
 def eur(value):

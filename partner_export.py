@@ -60,7 +60,9 @@ def recipient_details(key):
     """Editable recipient master data; rates are deliberately not configurable."""
     path = Path(os.environ.get('PAYMENT_RECIPIENTS_PATH', Path(__file__).with_name('billing_recipients.json')))
     try:
-        config = json.loads(path.read_text(encoding='utf-8-sig'))
+        import supabase_store
+        config = (supabase_store.get_json('config/billing_recipients.json')[0] if supabase_store.enabled()
+                  else json.loads(path.read_text(encoding='utf-8-sig')))
         if config['schema_version'] != 1:
             raise ValueError('Nicht unterstützte Empfänger-Stammdatenversion.')
         recipient = config['recipients'][key]

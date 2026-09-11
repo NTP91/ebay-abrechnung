@@ -2,6 +2,7 @@
 import hashlib
 import json
 from datetime import date, datetime, timezone
+from pathlib import Path
 import pandas as pd
 import core
 import api_holds
@@ -93,6 +94,34 @@ def payout_status(positions):
     return result
 
 
+def _later_hold_on_bound_invoice(row, chosen, invoice_id, db, active_holds):
+    """Allow receipt evidence only for an immutable line invoiced before its hold."""
+    if not invoice_id or not row.Lexware_uebertragen:
+        return False
+    records = list(db.execute(
+        'SELECT id,attempt,snapshot FROM payouts WHERE invoice_id=? ORDER BY id',
+        (str(invoice_id),),
+    ))
+    snapshots = {record['snapshot'] for record in records if record['snapshot']}
+    if (not records or any(record['attempt'] != 'created' for record in records)
+            or len(snapshots) != 1 or row['Auszahlung Nr.'] not in {record['id'] for record in records}):
+        return False
+    try:
+        payload = json.loads(next(iter(snapshots)))
+    except (TypeError, ValueError):
+        return False
+    description = f"eBay-Bestellnummer: {row['Bestellnummer']}\nSKU: {row.SKU}"
+    matching_lines = [item for item in payload.get('lineItems', []) if item.get('description') == description]
+    matching_rows = chosen[
+        (chosen['Bestellnummer'] == row['Bestellnummer']) & (chosen.SKU == row.SKU)
+    ]
+    invoice_at = api_holds.stamp(payload.get('voucherDate'))
+    holds = active_holds.get(row['Bestellnummer'], [])
+    hold_dates = [api_holds.stamp(hold.get('transactionDate')) for hold in holds]
+    return (len(matching_lines) == 1 and len(matching_rows) == 1 and invoice_at is not None
+            and bool(hold_dates) and all(hold_at is not None and hold_at > invoice_at for hold_at in hold_dates))
+
+
 def confirm(keys, action, event_date, expected_sources=None, invoice_id=None, actor='', override_reason='', override_confirmed=False):
     """Invoice-backed review and explicit payments; no network or payout-wide changes."""
     if action not in ('review', 'partner_paid', 'evelyn_received', 'refund_settled'):
@@ -112,13 +141,16 @@ def confirm(keys, action, event_date, expected_sources=None, invoice_id=None, ac
             raise ValueError('Positionen nicht mehr eindeutig vorhanden. Ansicht aktualisieren.')
         if expected_sources is not None and any(expected_sources.get(row.position_key) != source_snapshot(row) for _, row in chosen.iterrows()):
             raise ValueError('Abrechnungsdaten verändert. Bitte erneut prüfen.')
+        active_holds = api_holds.active(api_holds.load(Path(core.PAYOUTS_DB_PATH).parent))
         with core.ledger() as db:
             db.execute('BEGIN IMMEDIATE')
             if action=='review':
                 import partner_invoices
                 partner_invoices.authorize_review(db,invoice_id,chosen,actor,override_reason,override_confirmed)
             for _, row in chosen.iterrows():
-                if row.get('API_Hold', False):
+                later_invoiced_hold = (action == 'evelyn_received' and row.get('API_Hold', False)
+                    and _later_hold_on_bound_invoice(row, chosen, invoice_id, db, active_holds))
+                if row.get('API_Hold', False) and not later_invoiced_hold:
                     raise ValueError('API-Einbehalt: Position gesperrt; bestehende Bestätigungen bleiben erhalten.')
                 if row['Prüfhinweis'] or row.Quellenpruefung or row.Gruppe not in ('Gruppe A','Gruppe B') or row.Art=='Gebühr':
                     raise ValueError('Ungeklärte Positionen können nicht bestätigt werden.')

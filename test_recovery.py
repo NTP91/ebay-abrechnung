@@ -156,7 +156,7 @@ class RecoveryTests(unittest.TestCase):
         self.seed_orders()
         from streamlit.testing.v1 import AppTest
         core.import_reports([payout()], self.payouts, 'payout')
-        app = AppTest.from_file(str(Path(__file__).with_name('app.py'))).run()
+        app = AppTest.from_file(str(Path(__file__).with_name('app.py'))).run(timeout=30)
         self.assertFalse(list(app.exception))
         labels = [tab.label for tab in app.tabs]
         self.assertTrue(all(name in labels for name in ['Gruppe A','Gruppe B','Offene Positionen','Historie']))

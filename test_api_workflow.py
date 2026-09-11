@@ -94,6 +94,21 @@ class ApiWorkflowTests(unittest.TestCase):
             self.send()
         self.http.post.assert_not_called()
 
+    def test_finances_api_payout_status_is_valid_receipt_evidence(self):
+        payouts = core.read_master(core.PAYOUTS_DB_PATH)
+        payouts['Auszahlungsstatus'] = 'PAYOUT'
+        payouts.to_csv(core.PAYOUTS_DB_PATH, sep=';', index=False, encoding='utf-8-sig')
+        core.confirm_received('7700379513')
+        with core.ledger() as db:
+            self.assertEqual(db.execute("SELECT status FROM payouts WHERE id='7700379513'").fetchone()[0], 'Geld eingegangen')
+
+    def test_nonfinal_payout_status_stays_blocked(self):
+        payouts = core.read_master(core.PAYOUTS_DB_PATH)
+        payouts['Auszahlungsstatus'] = 'In Bearbeitung'
+        payouts.to_csv(core.PAYOUTS_DB_PATH, sep=';', index=False, encoding='utf-8-sig')
+        with self.assertRaisesRegex(ValueError, 'eBay-Nachweis'):
+            core.confirm_received('7700379513')
+
     def test_closed_data_changes_blocked(self):
         core.confirm_received('7700379513')
         self.send()

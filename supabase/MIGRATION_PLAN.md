@@ -1,5 +1,10 @@
 # Supabase-Schema-Migrationsplan — Durchstarter / ebay-abrechnung
 
+> **Cutover-Status 11.09.2026:** Der nachstehende Text dokumentiert den früheren
+> Schema-only-Plan. Operativ maßgeblich sind jetzt die versionierten,
+> SHA-256-geprüften Objekte in `payment_runtime_objects` und
+> `payment_runtime_chunks`; lokale Dateien sind kein Laufzeit-Fallback mehr.
+
 Status: **Nur Schema (DDL). Keine Datenmigration, keine App-Umschaltung, kein Storage-Bucket.**
 
 ## Umfang dieser Migration

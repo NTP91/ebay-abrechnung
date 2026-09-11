@@ -1,20 +1,20 @@
-param(
-    [string]$DataDir = (Join-Path $env:LOCALAPPDATA 'PaymentTool-Test\recover-6e82d0d-20260903\test-data'),
-    [int]$Port = 8511
-)
+param([int]$Port = 8511)
 $ErrorActionPreference = 'Stop'
-$repoPath = $PSScriptRoot
+$repoPath = (Resolve-Path -LiteralPath $PSScriptRoot).Path
 $branch = git -C $repoPath branch --show-current
 if ($branch -ne 'codex/recover-payout-settlement') { throw 'Start nur auf codex/recover-payout-settlement erlaubt.' }
-if (-not (Test-Path -LiteralPath $DataDir -PathType Container)) { throw 'Datenverzeichnis fehlt. Vorhandenen Recovery-Datenbestand mit Register verwenden.' }
 if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue) { throw "Port $Port ist bereits belegt. Vorhandene Instanz nicht verändert." }
 $pythonPath = (Get-Command python -ErrorAction Stop).Source
-$oldDataDir = $env:PAYMENT_DATA_DIR
+$required = @('SUPABASE_ACCESS_TOKEN','SUPABASE_PROJECT_REF')
+foreach ($name in $required) { if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) { throw "$name fehlt." } }
+$oldBackend = $env:PAYMENT_BACKEND
 try {
-    $env:PAYMENT_DATA_DIR = (Resolve-Path -LiteralPath $DataDir).Path
-    $process = Start-Process -FilePath $pythonPath -ArgumentList @('-m', 'streamlit', 'run', 'app.py', '--server.address=127.0.0.1', "--server.port=$Port", '--server.headless=true', '--browser.gatherUsageStats=false', '--server.fileWatcherType=none', '--theme.base=light', '--theme.primaryColor=#246bfe', '--theme.backgroundColor=#f5f7fb', '--theme.secondaryBackgroundColor=#ffffff', '--theme.textColor=#17243c') -WorkingDirectory $repoPath -WindowStyle Hidden -RedirectStandardOutput (Join-Path $DataDir 'recovery.stdout.log') -RedirectStandardError (Join-Path $DataDir 'recovery.stderr.log') -PassThru
-    $process.Id | Set-Content -LiteralPath (Join-Path $DataDir 'recovery.pid')
+    $env:PAYMENT_BACKEND = 'supabase'
+    $logDir = Join-Path ([IO.Path]::GetTempPath()) 'payment-tool-runtime'
+    New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+    $process = Start-Process -FilePath $pythonPath -ArgumentList @('-m', 'streamlit', 'run', 'app.py', '--server.address=127.0.0.1', "--server.port=$Port", '--server.headless=true', '--browser.gatherUsageStats=false', '--server.fileWatcherType=none') -WorkingDirectory $repoPath -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logDir 'recovery.stdout.log') -RedirectStandardError (Join-Path $logDir 'recovery.stderr.log') -PassThru
+    $process.Id | Set-Content -LiteralPath (Join-Path $logDir 'recovery.pid')
 } finally {
-    $env:PAYMENT_DATA_DIR = $oldDataDir
+    $env:PAYMENT_BACKEND = $oldBackend
 }
 Write-Output "Recovery-Version: http://127.0.0.1:$Port"

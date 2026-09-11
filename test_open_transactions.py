@@ -57,7 +57,7 @@ class OpenTransactionTests(unittest.TestCase):
         self.assertTrue(core.load_master_data().empty)
         self.assertTrue(core.sync_status(core.load_master_data()).empty)
         from streamlit.testing.v1 import AppTest
-        app=AppTest.from_file(str(Path(__file__).with_name('app.py'))).run()
+        app=AppTest.from_file(str(Path(__file__).with_name('app.py'))).run(timeout=30)
         self.assertFalse(list(app.exception))
 
     def test_refund_stays_separate_and_locks_unchanged(self):

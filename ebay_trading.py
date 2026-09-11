@@ -10,6 +10,8 @@ from ebay_readonly import EbayError
 
 URL = 'https://api.ebay.com/ws/api.dll'
 NS = 'urn:ebay:apis:eBLBaseComponents'
+NSMAP = {'e': NS}
+ALLOWED = {'GetMyMessages', 'GetMemberMessages', 'GetFeedback'}
 
 
 def _text(node, name, default=''):
@@ -27,6 +29,8 @@ class TradingClient:
         self.rest = rest_client
 
     def call(self, name, body):
+        if name not in ALLOWED:
+            raise EbayError('Nicht freigegebener Trading-Leseaufruf.')
         token = self.rest.access_token()
         xml = ('<?xml version="1.0" encoding="utf-8"?>'
                f'<{name}Request xmlns="{NS}"><RequesterCredentials>'
@@ -45,9 +49,41 @@ class TradingClient:
         ack = _text(root, 'Ack')
         if ack not in ('Success', 'Warning'):
             code = _text(root, 'ErrorCode') or 'unbekannt'
-            message = _text(root, 'LongMessage') or _text(root, 'ShortMessage')
-            raise EbayError(f'Trading API {name}: {code} · {message}')
+            raise EbayError(f'Trading API {name}: {code}')
         return root
+
+    @staticmethod
+    def _message(row):
+        folder=_text(row,'FolderID'); text=_text(row,'Text')
+        tags={node.tag.rsplit('}',1)[-1].casefold() for node in row.iter()}
+        response=row.findtext('e:ResponseDetails/e:Content',default='',namespaces=NSMAP) or ''
+        return {'external_id':_text(row,'MessageID') or _text(row,'ExternalMessageID'),
+                'order_id':_text(row,'OrderID'),'line_item_id':_text(row,'OrderLineItemID'),
+                'transaction_id':_text(row,'TransactionID'),'item_id':_text(row,'ItemID'),
+                'subject':_text(row,'Subject'),'text':text,'event_at':_text(row,'ReceiveDate') or _text(row,'CreationDate'),
+                'status':_text(row,'Read'),'sender':_text(row,'Sender'),'recipient':_text(row,'RecipientUserID'),
+                'sender_role':'buyer' if folder=='0' else 'seller' if folder=='1' else 'unknown',
+                'reply_present':_text(row,'Replied').casefold()=='true' or bool(response.strip()),
+                'response_text':response.strip(),'folder_id':folder,
+                'attachment_present':bool(tags & {'messagemedia','mediaurl','attachment','image'}) or any(word in text.casefold() for word in ('anhang','foto','bild','photo'))}
+
+    def my_message_headers(self,start,end):
+        def stamp(value):
+            if value.tzinfo is None:value=value.replace(tzinfo=timezone.utc)
+            return value.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000Z')
+        result={}
+        for folder in ('0','1','2'):
+            page=1
+            while True:
+                root=self.call('GetMyMessages',f'<DetailLevel>ReturnHeaders</DetailLevel><StartTime>{stamp(start)}</StartTime><EndTime>{stamp(end)}</EndTime><FolderID>{folder}</FolderID><Pagination><EntriesPerPage>200</EntriesPerPage><PageNumber>{page}</PageNumber></Pagination>')
+                for node in root.findall('.//{'+NS+'}Message'):
+                    row=self._message(node);row['folder_id']=folder
+                    row['sender_role']='buyer' if folder=='0' else 'seller' if folder=='1' else 'unknown'
+                    if row['external_id']:result[row['external_id']]=row
+                pages=int(_text(root,'TotalNumberOfPages') or '1')
+                if page>=pages:break
+                page+=1
+        return list(result.values())
 
     def my_messages(self, days=90):
         """Read all available Inbox/Sent/Deleted message headers, then bodies in batches."""

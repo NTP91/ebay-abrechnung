@@ -77,6 +77,21 @@ class PaymentReadinessTests(unittest.TestCase):
             db.execute("UPDATE payouts SET invoice_id='RE0089',attempt='created',snapshot=? WHERE id='old'",(json.dumps(old),));db.commit()
         ready=studio_view.eligible_rows(core.load_master_data(),core.sync_status(core.load_master_data()))
         self.assertEqual(ready.Bestellnummer.tolist(),['new'])
+        from streamlit.testing.v1 import AppTest
+        invoice_history=studio_view.invoice_history
+        with patch.object(studio_view,'invoice_history',side_effect=lambda:invoice_history()) as history_call:
+            app=AppTest.from_file('app.py').run(timeout=30)
+        history_call.assert_called()
+        self.assertFalse(app.exception)
+        metrics={metric.label:metric.value for metric in app.metric}
+        self.assertEqual(metrics['Neu für Evelyn'],'1')
+        self.assertEqual(metrics['Neu abrechnungsfähig'],'1 Positionen')
+        self.assertEqual(metrics['Prüfung erforderlich'],'0 Positionen')
+        self.assertEqual(metrics['Hold im neuen Payout'],'0 Positionen')
+        self.assertNotIn('Offene Positionen',metrics)
+        self.assertIn('Neue Evelyn-Abrechnung herunterladen',[button.label for button in app.get('download_button')])
+        evelyn_history=next(expander for expander in app.expander if expander.label.startswith('Historie ·'))
+        self.assertFalse(evelyn_history.proto.expanded)
         http=Mock();http.get.return_value.status_code=200
         http.get.return_value.json.return_value={'content':[{'id':'contact','roles':{'customer':{'number':16335}}}]}
         http.post.return_value.status_code=201;http.post.return_value.json.return_value={'id':'real-draft-simulated'}
@@ -93,6 +108,58 @@ class PaymentReadinessTests(unittest.TestCase):
         workflow.confirm(new.position_key.tolist(),'partner_paid',date.today())
         result=workflow.positions().set_index('Bestellnummer')
         self.assertTrue(result.loc['new','closed_at']);self.assertFalse(result.loc['old','closed_at'])
+
+    def test_stale_studio_view_module_is_reloaded_without_data_changes(self):
+        from streamlit.testing.v1 import AppTest
+        self.seed([payout('p1','old','old',sku='NB / 1')])
+        before=workflow.positions()[list(workflow.FIELDS)].copy()
+        current=studio_view.evelyn_overview
+        def old_overview(*args):
+            result=current(*args)
+            return {key:result[key] for key in ('bound','ready','review','held','new_payouts','total')}
+        for replacement in (None,old_overview):
+            with self.subTest(replacement='missing' if replacement is None else 'old keys'):
+                with patch.object(studio_view,'evelyn_overview',replacement):
+                    app=AppTest.from_file('app.py').run(timeout=30)
+                self.assertFalse(app.exception)
+                self.assertEqual(before.to_dict('records'),workflow.positions()[list(workflow.FIELDS)].to_dict('records'))
+                self.assertIn('Gruppe B',[tab.label for tab in app.tabs])
+
+    def test_group_b_invoice_payment_action_ignores_new_unreviewed_positions(self):
+        from streamlit.testing.v1 import AppTest
+        self.seed([payout('p1','old','old',sku='NB / 1')])
+        self.approve(workflow.positions(),number='NB-OLD')
+        self.seed([payout('p2','new','new',sku='NB / 2')])
+
+        app=AppTest.from_file('app.py').run(timeout=30)
+        self.assertFalse(app.exception)
+        self.assertIn('Partner bezahlt',[button.label for button in app.button])
+        metrics={metric.label:metric.value for metric in app.metric}
+        self.assertEqual(metrics['In freigegebener Rechnung'],'1 Positionen')
+        self.assertEqual(metrics['Neu für nächste Rechnung'],'1 Positionen')
+        self.assertNotIn('Offene Partnerpositionen gesamt',metrics)
+        self.assertNotIn('Offener Gesamtbetrag brutto',metrics)
+        self.assertTrue(any('NB-OLD' in caption.value for caption in app.caption))
+
+        next(button for button in app.button if button.label=='Partner bezahlt').click().run()
+        self.assertIn('Verbindlich bestätigen',[button.label for button in app.button])
+        next(button for button in app.button if button.label=='Verbindlich bestätigen').click().run()
+        result=workflow.positions().set_index('Bestellnummer')
+        self.assertTrue(result.loc['old','paid_at'])
+        self.assertFalse(result.loc['old','closed_at'])
+        self.assertFalse(result.loc['old','received_at'])
+        self.assertFalse(result.loc['new','reviewed_at'])
+        self.assertFalse(result.loc['new','paid_at'])
+        self.assertTrue(any('bezahlt / Partnerabrechnung abgeschlossen' in message.value for message in app.markdown))
+        self.assertTrue(any('Zahlungsdatum:' in caption.value for caption in app.caption))
+        self.assertTrue(any('Payouts: p1' in caption.value for caption in app.caption))
+        self.assertIn('Originalrechnung öffnen',[button.label for button in app.get('download_button')])
+        history=next(expander for expander in app.expander if expander.label.startswith('Rechnungshistorie'))
+        self.assertFalse(history.proto.expanded)
+        with patch.object(incoming,'stored_original',None):
+            stale=AppTest.from_file('app.py').run(timeout=30)
+        self.assertFalse(stale.exception)
+        self.assertIn('Originalrechnung öffnen',[button.label for button in stale.get('download_button')])
 
     def test_payload_never_includes_a_reviewed_position_with_changed_source(self):
         self.seed([payout('p1','changed','changed'),payout('p1','good','good')])

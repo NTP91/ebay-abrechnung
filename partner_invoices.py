@@ -40,6 +40,12 @@ def money(value):
 
 def reconcile(extracted, expected, all_rows, allocated):
     errors=list(extracted.get('errors',[])); warnings=list(extracted['warnings']); matched=[]; remaining=list(expected['items'])
+    if not extracted.get('number'):
+        warnings.append('Rechnungsnummer nicht sicher erkannt.')
+    if extracted.get('payouts'):
+        actual_payouts=set(extracted['payouts']); expected_payouts={row['payout'] for row in expected['items']}
+        if actual_payouts!=expected_payouts:
+            errors.append('Payout-Nummern stimmen nicht: Erwartet '+', '.join(sorted(expected_payouts))+', Rechnung '+', '.join(sorted(actual_payouts))+'.')
     identities_complete=bool(extracted['items'])
     for index,item in enumerate(extracted['items'],1):
         order=item.get('order','').strip(); sku=item.get('sku','').strip()
@@ -48,9 +54,9 @@ def reconcile(extracted, expected, all_rows, allocated):
             known=all_rows[all_rows.Bestellnummer==order] if not all_rows.empty else all_rows
             errors.append(prefix+('Bestellung gehört zu einem anderen Partner.' if not known.empty and not (known.Partner==expected['partner']).any() else 'Zusätzliche/unbekannte oder nicht mehr offene Position; kein abrechenbarer Payout im erwarteten Bestand.'))
             continue
-        if not order or not sku:
-            warnings.append(prefix+'Bestellnummer oder SKU fehlt.'); identities_complete=False; continue
-        candidates=[row for row in remaining if row['order']==order and row['sku']==sku]
+        if not order:
+            warnings.append(prefix+'Bestellnummer fehlt.'); identities_complete=False; continue
+        candidates=[row for row in remaining if row['order']==order and (not sku or row['sku']==sku)]
         if not candidates:
             same_order=[row for row in expected['items'] if row['order']==order]
             if same_order and not any(row['sku']==sku for row in same_order):
@@ -65,7 +71,8 @@ def reconcile(extracted, expected, all_rows, allocated):
                     errors.append(prefix+'Zusätzliche/unbekannte oder nicht mehr offene Position; kein abrechenbarer Payout im erwarteten Bestand.')
             continue
         if len(candidates)>1:
-            exact=[r for r in candidates if item.get('net') and _same_money(item['net'],r['net'])]
+            exact=[r for r in candidates if ((item.get('gross') and _same_money(item['gross'],r['gross'])) or
+                                               (item.get('net') and _same_money(item['net'],r['net'])))]
             if exact: candidates=exact
             elif len({r['net'] for r in candidates})>1:
                 warnings.append(prefix+'Mehrere Payouttransaktionen; Betrag nicht eindeutig zuordenbar.'); identities_complete=False; continue
@@ -74,15 +81,16 @@ def reconcile(extracted, expected, all_rows, allocated):
             errors.append(prefix+'Position bereits in Rechnung '+allocated[wanted['key']]+' enthalten.')
         for field in ('article','quantity'):
             if not item.get(field): warnings.append(prefix+('Artikelname' if field=='article' else 'Menge')+' fehlt.')
-        if item.get('article') and ' '.join(item['article'].split())!=' '.join(wanted['article'].split()):
+        if item.get('article') and _article_text(item['article'])!=_article_text(wanted['article']):
             errors.append(prefix+'Artikelbezeichnung stimmt nicht.')
+        if item.get('payout') and item['payout'].strip()!=wanted['payout']:
+            errors.append(prefix+'Payout-Nummer stimmt nicht; erwartet '+wanted['payout']+'.')
         if item.get('quantity'):
             try:
                 if Decimal(item['quantity'].replace(',','.'))!=1: errors.append(prefix+'Menge stimmt nicht; erwartet 1.')
             except InvalidOperation: warnings.append(prefix+'Menge nicht sicher lesbar.')
-        if not (item.get('net') or item.get('net_after')): warnings.append(prefix+'Netto-Positionsbetrag fehlt.')
+        if not (item.get('net') or item.get('net_after') or item.get('gross')): warnings.append(prefix+'Positionsbetrag fehlt.')
         if not (item.get('gross') or item.get('net_after')): warnings.append(prefix+'Positionsbetrag nach Rabatt fehlt.')
-        if not (item.get('rate') or item.get('discount')): warnings.append(prefix+'Rabattangabe fehlt.')
         for field in ('net','net_after','gross','discount','rate'):
             if not item.get(field): continue
             label={'net':'Netto vor Rabatt','net_after':'Netto nach Rabatt','gross':'Positionsbetrag brutto','discount':'Rabatt netto','rate':'Rabattsatz'}[field]
@@ -118,6 +126,16 @@ def _same_money(a,b):
     except ValueError: return False
 
 
+def _article_text(value):
+    value=re.sub(r'-\n(?=[a-zäöüß])','',str(value))
+    return ' '.join(value.replace('-\n','-').split())
+
+
+def _invoice_date(value):
+    try: return datetime.strptime(value,'%d.%m.%Y').date()
+    except (TypeError,ValueError): return None
+
+
 def list_invoices(partner=None):
     with core.ledger() as db:
         rows=db.execute('SELECT record FROM partner_invoices ORDER BY rowid DESC').fetchall()
@@ -125,12 +143,27 @@ def list_invoices(partner=None):
     return [r for r in records if partner is None or r['partner']==partner]
 
 
+def stored_original(record):
+    """Return the immutable original only while its stored hash still matches."""
+    import supabase_store
+    if supabase_store.enabled():
+        raw,_=supabase_store.get('partner-invoices/'+record['file_ref'],required=False)
+        return raw if raw is not None and hashlib.sha256(raw).hexdigest()==record['file_hash'] else None
+    path=Path(core.PAYOUTS_DB_PATH).parent/'Partner_Invoices'/record['file_ref']
+    if path.name!=record['file_ref'] or not path.is_file(): return None
+    return path if hashlib.sha256(path.read_bytes()).hexdigest()==record['file_hash'] else None
+
+
 def upload(partner, filename, content, scope='Rechnung'):
     suffix=Path(filename).suffix.lower()
     if suffix not in ('.pdf','.xlsx','.csv') or not content or len(content)>20*1024*1024:
         raise ValueError('PDF, XLSX oder CSV mit maximal 20 MB erforderlich.')
     digest=hashlib.sha256(content).hexdigest()
-    with core.FileLock(core.PAYOUTS_DB_PATH+'.lock'),core.FileLock(core.ORDERS_DB_PATH+'.lock'):
+    import supabase_store
+    from contextlib import nullcontext
+    first=nullcontext() if supabase_store.enabled() else core.FileLock(core.PAYOUTS_DB_PATH+'.lock')
+    second=nullcontext() if supabase_store.enabled() else core.FileLock(core.ORDERS_DB_PATH+'.lock')
+    with first,second:
         with core.ledger() as db:
             duplicate=db.execute('SELECT record FROM partner_invoices WHERE file_hash=?',(digest,)).fetchone()
             if duplicate: return json.loads(duplicate[0]),True
@@ -140,8 +173,17 @@ def upload(partner, filename, content, scope='Rechnung'):
         rows=business[(business.Partner==partner)&(business.Art==art)&~business.closed_at.astype(bool)&~business.paid_at.astype(bool)&~business['Prüfhinweis'].astype(bool)&~business.Quellenpruefung.astype(bool)&~api_holds.mask(business)]
         rows=rows[~rows.reviewed_at.astype(bool)]
         if rows.empty: raise ValueError('Keine offenen abrechenbaren Positionen für diesen Partner.')
-        expected=expected_statement(rows)
         extracted=invoice_parser.extract(content,filename)
+        invoice_date=_invoice_date(extracted['invoice_date'])
+        if invoice_date is not None:
+            payout_source=core.read_master(core.PAYOUTS_DB_PATH)
+            if {'Auszahlung Nr.','Auszahlungsdatum'}.issubset(payout_source.columns):
+                source_dates=core.pd.to_datetime(payout_source['Auszahlungsdatum'],dayfirst=True,errors='coerce').dt.date
+                date_by_payout=dict(zip(payout_source['Auszahlung Nr.'].astype(str),source_dates))
+                payout_dates=rows['Auszahlung Nr.'].astype(str).map(date_by_payout)
+                rows=rows[payout_dates.isna() | (payout_dates<=invoice_date)]
+                if rows.empty: raise ValueError('Keine zum Rechnungsdatum offenen abrechenbaren Positionen für diesen Partner.')
+        expected=expected_statement(rows)
         number_key=partner+'|'+invoice_parser.norm(extracted['number']) if extracted['number'] else None
         with core.ledger() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -153,13 +195,19 @@ def upload(partner, filename, content, scope='Rechnung'):
                     report['errors'].append('Rechnungsnummer für diesen Partner bereits vorhanden: '+extracted['number'])
                     report['status']='deviation'; number_key=None
             invoice_id=str(uuid.uuid4())
-            directory=Path(core.PAYOUTS_DB_PATH).parent/'Partner_Invoices'; directory.mkdir(exist_ok=True)
-            stored_name=digest+suffix; path=directory/stored_name
-            if path.exists():
-                if hashlib.sha256(path.read_bytes()).hexdigest()!=digest: raise ValueError('Originaldatei-Hash widersprüchlich.')
+            stored_name=digest+suffix
+            if supabase_store.enabled():
+                existing,version=supabase_store.get('partner-invoices/'+stored_name,required=False)
+                if existing is not None and hashlib.sha256(existing).hexdigest()!=digest: raise ValueError('Originaldatei-Hash widersprüchlich.')
+                if existing is None: supabase_store.put('partner-invoices/'+stored_name,content,version)
             else:
-                with path.open('xb') as output:
-                    output.write(content);output.flush();os.fsync(output.fileno())
+                directory=Path(core.PAYOUTS_DB_PATH).parent/'Partner_Invoices'; directory.mkdir(exist_ok=True)
+                path=directory/stored_name
+                if path.exists():
+                    if hashlib.sha256(path.read_bytes()).hexdigest()!=digest: raise ValueError('Originaldatei-Hash widersprüchlich.')
+                else:
+                    with path.open('xb') as output:
+                        output.write(content);output.flush();os.fsync(output.fileno())
             record=dict(id=invoice_id,partner=partner,file_name=Path(filename).name,file_ref=stored_name,file_hash=digest,
                         uploaded_at=now(),invoice_number=extracted['number'],invoice_date=extracted['invoice_date'],
                         extracted=extracted,expected=expected,report=report,approved_at='',approved_by='',approval_mode='',override_reason='')
@@ -182,8 +230,7 @@ def authorize_review(db, invoice_id, chosen, actor, reason, override_confirmed):
         raise ValueError('Manuelle Freigabe benötigt ausdrückliche Bestätigung und eine nachvollziehbare Begründung.')
     expected={r['key']:r for r in record['expected']['items']}
     if set(chosen.position_key)!=set(expected): raise ValueError('Positionsumfang stimmt nicht mit der Eingangsrechnung überein.')
-    path=Path(core.PAYOUTS_DB_PATH).parent/'Partner_Invoices'/record['file_ref']
-    if path.name!=record['file_ref'] or not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest()!=record['file_hash']:
+    if stored_original(record) is None:
         raise ValueError('Originalrechnung fehlt oder wurde verändert; Freigabe gesperrt.')
     for _,position in chosen.iterrows():
         if expected[position.position_key]['source']!=workflow.source_snapshot(position):

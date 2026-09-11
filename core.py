@@ -14,10 +14,14 @@ import sqlite3
 import hashlib
 import requests
 import zipfile
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
+from atomic_io import replace_file
+import supabase_store
+from functools import lru_cache
 
-ORDERS_DB_PATH = str(Path(os.environ.get('PAYMENT_DATA_DIR', '.')) / 'Master_Orders.csv')
-PAYOUTS_DB_PATH = str(Path(os.environ.get('PAYMENT_DATA_DIR', '.')) / 'Master_Payouts.csv')
+DATA_DIR = Path(os.environ.get('PAYMENT_DATA_DIR') or Path(__file__).resolve().parent).expanduser().resolve()
+ORDERS_DB_PATH = str(DATA_DIR / 'Master_Orders.csv')
+PAYOUTS_DB_PATH = str(DATA_DIR / 'Master_Payouts.csv')
 
 FIELDS = {
     'Bestellnummer': ['bestellnummer', 'order number', 'order id'],
@@ -156,6 +160,10 @@ def read_report(file, kind='payout'):
 
 
 def read_master(path):
+    if supabase_store.enabled():
+        key = 'source/orders.csv' if Path(path).name == 'Master_Orders.csv' else 'source/payouts.csv'
+        raw, _ = supabase_store.get(key)
+        return canonicalize(pd.read_csv(io.BytesIO(raw), sep=';', dtype=str, keep_default_na=False))
     if not os.path.exists(path):
         return canonicalize(pd.DataFrame())
     # Never convert a corrupt existing database into an empty database.
@@ -169,7 +177,7 @@ def import_reports(frames, path, kind, details=None):
     # Initialize/check the register before the first CSV is written.
     with ledger():
         pass
-    with FileLock(str(path) + '.lock'):
+    with (nullcontext() if supabase_store.enabled() else FileLock(str(path) + '.lock')):
         existing = read_master(path)
         incoming = canonicalize(pd.concat(frames, ignore_index=True)).drop_duplicates()
         if kind == 'payout':
@@ -235,19 +243,30 @@ def import_reports(frames, path, kind, details=None):
         count = len(merged) - len(existing)
         if merged.equals(existing.reset_index(drop=True)):
             return 0
+        if supabase_store.enabled():
+            output = io.StringIO()
+            merged.to_csv(output, sep=';', index=False)
+            current_key = 'source/orders.csv' if kind == 'orders' else 'source/payouts.csv'
+            _, version = supabase_store.get(current_key)
+            supabase_store.put(current_key, output.getvalue().encode('utf-8-sig'), version)
+            return max(0, count)
         destination = Path(path)
         fd, temporary = tempfile.mkstemp(prefix='.import-', suffix='.csv', dir=destination.parent)
         os.close(fd)
         try:
             merged.to_csv(temporary, sep=';', index=False, encoding='utf-8-sig')
-            os.replace(temporary, destination)
+            replace_file(temporary, destination)
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
         return max(0, count)
 
 
+@lru_cache(maxsize=1)
 def partner_config():
+    if supabase_store.enabled():
+        value, _ = supabase_store.get_json('config/partners.json')
+        return value
     return json.loads(Path(__file__).with_name('partners.json').read_text(encoding='utf-8'))
 
 
@@ -400,8 +419,9 @@ def build_invoice_payload(master, payout_id, contact_id, money_received=False):
     import position_workflow
     from contextlib import closing
     database = Path(PAYOUTS_DB_PATH).with_name('Settlement_State.sqlite3')
-    if database.exists():
-        with closing(sqlite3.connect(database.resolve().as_uri()+'?mode=ro', uri=True)) as db:
+    context = ledger() if supabase_store.enabled() else (closing(sqlite3.connect(database.resolve().as_uri()+'?mode=ro', uri=True)) if database.exists() else nullcontext(None))
+    with context as db:
+        if db is not None:
             db.row_factory = sqlite3.Row
             if db.execute("SELECT 1 FROM sqlite_master WHERE name='position_workflow'").fetchone():
                 saved = {row['position_key']: dict(row) for row in db.execute('SELECT position_key,closed_at,source FROM position_workflow')}
@@ -441,6 +461,20 @@ FOLLOWUP = {
 @contextmanager
 def ledger():
     """Mirror locks independently; rebuilding SQLite cannot release a reservation."""
+    if supabase_store.enabled():
+        raw, version = supabase_store.get('state/settlement.sqlite3')
+        connection = supabase_store.sqlite_from_bytes(raw)
+        connection.row_factory = sqlite3.Row
+        before = supabase_store.sqlite_to_bytes(connection)
+        try:
+            yield connection
+        finally:
+            connection.rollback()
+            after = supabase_store.sqlite_to_bytes(connection)
+            connection.close()
+            if after != before:
+                supabase_store.put('state/settlement.sqlite3', after, version)
+        return
     path = Path(PAYOUTS_DB_PATH).with_name('Settlement_State.sqlite3')
     guard = path.with_name('Settlement_Locks.json')
     workflow_guard = path.with_name('Settlement_Workflow.json')
@@ -504,19 +538,19 @@ def ledger():
                 json.dump(corrections, output, ensure_ascii=False)
                 output.flush()
                 os.fsync(output.fileno())
-            os.replace(temporary, correction_guard)
+            replace_file(temporary, correction_guard)
             temporary = guard.with_suffix('.json.tmp')
             with temporary.open('w', encoding='utf-8') as output:
                 json.dump(records, output, ensure_ascii=False)
                 output.flush()
                 os.fsync(output.fileno())
-            os.replace(temporary, guard)
+            replace_file(temporary, guard)
             temporary = workflow_guard.with_suffix('.json.tmp')
             with temporary.open('w', encoding='utf-8') as output:
                 json.dump(workflow_records, output, ensure_ascii=False)
                 output.flush()
                 os.fsync(output.fileno())
-            os.replace(temporary, workflow_guard)
+            replace_file(temporary, workflow_guard)
 
 
 def audit(db, payout_id, event):
@@ -554,13 +588,21 @@ def sync_status(master):
         return pd.read_sql_query('SELECT id AS Auszahlung, status AS Status, invoice_id AS Entwurf, attempt AS Sperre FROM payouts ORDER BY id', db)
 
 
+def payout_receipt_confirmed(block):
+    """Accept the final receipt evidence emitted by CSV and Finances API imports."""
+    if block.empty or 'eBay-Auszahlungsstatus' not in block:
+        return False
+    statuses = block['eBay-Auszahlungsstatus'].map(clean).str.casefold()
+    return bool(statuses.isin({'betrag überwiesen', 'payout'}).all())
+
+
 def confirm_received(payout_id):
     master = load_master_data()
     block = master[master['Auszahlung Nr.'] == str(payout_id)]
     if block.empty or block['Prüfhinweis'].astype(bool).any():
         raise ValueError('Zuordnung fehlt.')
     # Confirmation supplements, but cannot override, missing transfer evidence.
-    if not (block['eBay-Auszahlungsstatus'] == 'Betrag überwiesen').all():
+    if not payout_receipt_confirmed(block):
         raise ValueError('eBay-Nachweis „Betrag überwiesen“ fehlt.')
     sync_status(master)
     with ledger() as db:
@@ -644,6 +686,17 @@ def create_invoice_draft(api_key, payout_id, prior_invoices_checked=False, http=
 
 def backup_data():
     """Consistent CSV + SQLite snapshot; never export credentials."""
+    if supabase_store.enabled():
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as archive:
+            for key, name in (('source/payouts.csv','Master_Payouts.csv'),('source/orders.csv','Master_Orders.csv'),
+                              ('state/settlement.sqlite3','Settlement_State.sqlite3')):
+                archive.writestr(name, supabase_store.get(key)[0])
+            for key, name in (('state/holds.json','Settlement_API_Holds.json'),('state/ebay_sync.json','Settlement_Ebay_Sync.json'),
+                              ('state/reconciliation.json','Settlement_Payout_Reconciliation.json')):
+                raw, _ = supabase_store.get(key, required=False)
+                if raw is not None: archive.writestr(name, raw)
+        return output.getvalue()
     output = io.BytesIO()
     with FileLock(PAYOUTS_DB_PATH + '.lock'), FileLock(ORDERS_DB_PATH + '.lock'):
         with tempfile.TemporaryDirectory() as folder:

@@ -9,6 +9,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from filelock import FileLock
+from atomic_io import replace_file
 
 from ebay_readonly import EbayError
 
@@ -52,6 +53,10 @@ def cache_path(data_dir):
 
 
 def load_snapshot(data_dir):
+    import supabase_store
+    if supabase_store.enabled():
+        result,_=supabase_store.get_json('state/trust_risk/latest.json',default=None)
+        return result
     path = cache_path(data_dir)
     if not path.exists():
         return None
@@ -68,6 +73,12 @@ def save_snapshot(data_dir, snapshot):
     # Persist restrictive evidence before publishing the new UI cache.
     import api_holds
     api_holds.ingest(data_dir, snapshot)
+    import supabase_store
+    if supabase_store.enabled():
+        _,version=supabase_store.get('state/trust_risk/latest.json',required=False)
+        supabase_store.put_json('state/trust_risk/latest.json',snapshot,version)
+        supabase_store.put_json('state/trust_risk/runs/'+now_utc().strftime('%Y%m%dT%H%M%S')+'-'+uuid.uuid4().hex+'.json',snapshot,0)
+        return
     path = cache_path(data_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     with FileLock(str(path) + '.lock'):
@@ -82,7 +93,7 @@ def save_snapshot(data_dir, snapshot):
             output.write(text)
             output.flush()
             os.fsync(output.fileno())
-        os.replace(temporary, path)
+        replace_file(temporary, path)
 
 
 def collect(client, payout_orders=(), progress=None):

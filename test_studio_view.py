@@ -8,6 +8,11 @@ from test_recovery import payout
 
 
 class StudioViewTests(unittest.TestCase):
+    def test_lexware_button_requires_key_scope_and_all_three_confirmations(self):
+        self.assertFalse(studio_view.lexware_create_ready(['p1'], {'gross': 1}, '', (True, True, True)))
+        self.assertFalse(studio_view.lexware_create_ready(['p1'], {'gross': 1}, 'key', (True, False, True)))
+        self.assertTrue(studio_view.lexware_create_ready(['p1'], {'gross': 1}, 'key', (True, True, True)))
+
     def test_register_timestamp_is_rendered_in_berlin_without_iso_details(self):
         values=core.pd.Series(['2026-09-03T14:03:19.099308+00:00','unlesbar'])
         self.assertEqual(studio_view.local_datetime(values).tolist(),['03.09.2026 16:03','nicht bekannt'])
@@ -40,6 +45,14 @@ class StudioViewTests(unittest.TestCase):
         with core.ledger() as db:
             db.execute("UPDATE payouts SET attempt='pending' WHERE id='p2'")
             db.commit()
+        ready=studio_view.eligible_rows(master,core.sync_status(master))
+        self.assertEqual(set(ready['Auszahlung Nr.']),{'p3'})
+
+    def test_unconfirmed_payout_is_not_shown_as_lexware_ready(self):
+        payouts=core.read_master(core.PAYOUTS_DB_PATH)
+        payouts.loc[payouts['Auszahlung Nr.']=='p2','Auszahlungsstatus']='In Bearbeitung'
+        payouts.to_csv(core.PAYOUTS_DB_PATH,sep=';',index=False,encoding='utf-8-sig')
+        master=core.load_master_data()
         ready=studio_view.eligible_rows(master,core.sync_status(master))
         self.assertEqual(set(ready['Auszahlung Nr.']),{'p3'})
 

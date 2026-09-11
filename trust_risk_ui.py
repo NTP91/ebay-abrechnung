@@ -6,7 +6,88 @@ import pandas as pd
 import streamlit as st
 
 import trust_risk as risk
+import audit_case_store
+import trust_risk_reporting as reporting
 from ebay_readonly import Client, EbayError, secrets_config
+
+
+CATEGORY_LABELS = {
+    'not_as_described': 'Nicht wie beschrieben', 'wrong_item': 'Falscher Artikel',
+    'defective': 'Defekt', 'used_instead_of_new': 'Gebraucht statt neu',
+    'opened_used': 'Geöffnet/benutzt', 'empty_consumed': 'Leer/verbraucht',
+    'incomplete_parts': 'Teile fehlen', 'wrong_variant': 'Falsche Variante',
+    'item_not_received': 'Nicht erhalten', 'other_complaint': 'Sonstige Beschwerde',
+}
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_audit_cases():
+    return audit_case_store.load()
+
+
+def _local_times(series):
+    values = pd.to_datetime(series, errors='coerce', utc=True)
+    return values.dt.tz_convert('Europe/Berlin').dt.strftime('%d.%m.%Y %H:%M').fillna('')
+
+
+def render_case_check():
+    st.subheader('Operative Qualitätsauswertung')
+    st.caption('Echte, eindeutig zugeordnete Kundenfälle. Holds, Verkäuferantworten und neutrale Nachrichten sind ausgeschlossen.')
+    try:
+        data = load_audit_cases()
+    except Exception:
+        st.warning('Die Supabase-Prüfdaten sind derzeit nicht lesbar. Zugangsdaten und Verbindung prüfen.')
+        return
+    report=reporting.aggregate(pd.DataFrame(data['cases']),pd.DataFrame(data['orders']))
+    if not report['total']:
+        st.info('Noch keine eindeutig zugeordneten Qualitätsfälle vorhanden.')
+        return
+    top=report['partners_by_cases'].iloc[0]
+    repeated=int((report['skus'].Kennzeichnung=='Wiederholt auffällig').sum())
+    for col,label,value in zip(st.columns(4),['Echte Qualitätsfälle','Top-Partner','Wiederholt auffällige SKUs','Priorität 1'],
+                               [report['total'],f"{top.Partner} · {int(top['Fälle'])}",repeated,len(report['priority'])]):
+        col.metric(label,value)
+    st.caption('Absolute Fallzahlen und volumenbereinigte Quoten sind getrennt ausgewiesen. Mehrere Signale desselben Falls erhöhen die Fallzahl nicht.')
+    partner_tab,group_tab,sku_tab,problem_tab,priority_tab,negative_tab,cases_tab=st.tabs(
+        ['Partnerquoten','Gruppen','SKU-Quoten','Problemarten','Priorität 1','Negative Bewertungen','Alle Fälle'])
+    with partner_tab:
+        st.markdown('**Nach Fehlerquote**')
+        table=report['partners'].copy()
+        for column in ('Anteil','Fälle je 100 Bestellungen','Fehlerquote'):
+            table[column]=table[column].map(lambda value:f'{value:.2f} %' if pd.notna(value) else '—')
+        st.dataframe(table,hide_index=True,width='stretch')
+        st.caption(f'Mindestfallzahl für eine belastbare Quotenbewertung: {reporting.MIN_CASES_FOR_RATE}; Mindestvolumen: {reporting.MIN_ORDER_VOLUME} Bestellpositionen.')
+        st.markdown('**Nach absoluten Qualitätsfällen**')
+        absolute=report['partners_by_cases'][['Partner','Bestellungen','Fälle','Fehlerquote','Datenbasis']].copy()
+        absolute['Fehlerquote']=absolute['Fehlerquote'].map(lambda value:f'{value:.2f} %' if pd.notna(value) else '—')
+        st.dataframe(absolute,hide_index=True,width='stretch')
+    with group_tab:
+        st.dataframe(report['groups'],hide_index=True,width='stretch')
+    with sku_tab:
+        for heading, source in [('Top-SKUs nach Fehlerquote',report['skus_by_rate']),('Top-SKUs nach absoluten Fällen',report['skus_by_cases'])]:
+            st.markdown(f'**{heading}**')
+            table=source.head(20).copy()
+            table['Fehlerquote']=table['Fehlerquote'].map(lambda value:f'{value:.2f} %' if pd.notna(value) else '—')
+            st.dataframe(table,hide_index=True,width='stretch')
+        if not report['unresolved_skus'].empty:
+            st.markdown('**Nicht aufgelöste Partnerpräfixe**')
+            st.dataframe(report['unresolved_skus'],hide_index=True,width='stretch')
+        st.caption('Wiederholungsfälle und hohe Fehlerquoten werden getrennt gekennzeichnet. Kleine Stichproben bleiben sichtbar, fließen aber nicht allein in Priorität 1 ein.')
+    with problem_tab:
+        st.dataframe(report['problems'],hide_index=True,width='stretch')
+    with priority_tab:
+        st.dataframe(report['priority'],hide_index=True,width='stretch')
+    with negative_tab:
+        st.dataframe(report['negative'],hide_index=True,width='stretch')
+    with cases_tab:
+        filters=st.columns(2)
+        partners=sorted(report['cases'].Partner.unique())
+        selected_partners=filters[0].multiselect('Partner filtern',partners,key='audit-case-partners')
+        available=report['cases'][report['cases'].Partner.isin(selected_partners)] if selected_partners else report['cases']
+        selected_skus=filters[1].multiselect('SKU filtern',sorted(available.SKU.unique()),key='audit-case-skus')
+        visible=available[available.SKU.isin(selected_skus)] if selected_skus else available
+        st.caption(f'{len(visible)} von {report["total"]} Qualitätsfällen angezeigt.')
+        st.dataframe(visible,hide_index=True,width='stretch',height=520)
 
 
 def render(data_dir, catalogue, orders, raw):
@@ -45,6 +126,7 @@ def render(data_dir, catalogue, orders, raw):
     if not snapshot:
         st.info('Noch kein API-Datenstand vorhanden. Account-Status, Fälle und Holds sind nicht verfügbar.')
         st.write('Payout 7718008497 · Bank-Kontrollwert: **491,80 €**. Ein API-Abgleich liegt noch nicht vor.')
+        render_case_check()
         return
     stamp = risk.local_date(snapshot.get('fetched_at'))
     st.caption('Datenstand: ' + (stamp.strftime('%d.%m.%Y %H:%M') if stamp else 'unbekannt') + ' · Finanztransaktionen: letzte 90 Tage; Referenz-Payout zusätzlich separat abgefragt.')
@@ -64,7 +146,7 @@ def render(data_dir, catalogue, orders, raw):
     for col, label, value in zip(st.columns(6), ['Account-Status', 'Offene Rückgaben', 'Payment Disputes', 'Aktive Holds¹', 'Kritische Vorgänge', 'Heute bearbeiten'], values):
         col.metric(label, value)
     st.caption('¹ Erkannte Hold-Transaktionen im 90-Tage-Abruf, keine garantierte Gesamtzahl aller aktiven Einbehalte. Fristen beziehen sich auf Europe/Berlin.')
-    brief, details = st.tabs(['Tagesüberblick', 'Fälle & Daten'])
+    brief, details, case_check = st.tabs(['Tagesüberblick', 'Fälle & Daten', 'Trust/Risk Check'])
     with brief:
         with st.container(border=True):
             st.subheader('KI-Audit · regelbasierte Auswertung')
@@ -115,6 +197,8 @@ def render(data_dir, catalogue, orders, raw):
                     st.json(value['data'])
                 else:
                     st.warning(value.get('error', 'Nicht verfügbar'))
+    with case_check:
+        render_case_check()
     with st.container(border=True):
         st.subheader('Finances-Prüfung · Payout 7718008497')
         check = risk.finance_check(snapshot)

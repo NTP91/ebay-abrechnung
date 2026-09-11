@@ -14,7 +14,7 @@ Verpasste Daten werden beim nächsten erfolgreichen Lauf nachgeholt.
 Die Automation führt im Repository aus:
 
 ```powershell
-python ebay_sync.py --data-dir "$env:LOCALAPPDATA\PaymentTool-Test\recover-6e82d0d-20260903\test-data" --trigger automatic
+python ebay_sync.py --data-dir "C:\Users\servi\Dropbox\Durchstarter" --trigger automatic
 ```
 
 Der CLI-Einstieg verweigert andere Branches als `codex/recover-payout-settlement`.

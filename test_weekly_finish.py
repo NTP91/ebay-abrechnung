@@ -107,6 +107,11 @@ class WeeklyFinishTests(unittest.TestCase):
         self.assertEqual(http.get.call_count,1)
         row=workflow.positions().query("Gruppe == 'Gruppe B'").iloc[0]
         workflow.confirm([row.position_key],'evelyn_received',date.today())
+        history=studio_view.invoice_history()['draft']
+        self.assertEqual(history['Zahlungsstatus'],'Zahlung von Evelyn erhalten')
+        self.assertEqual(history['Abschlussstatus'],'offen')
+        self.assertEqual(history['Positionen'],1)
+        self.assertGreater(history['Betrag'],Decimal(0))
         with self.assertRaisesRegex(ValueError,'Bereits erhaltene'):
             draft_correction.discard('mock-key','draft',True,http)
         self.assertEqual(http.get.call_count,1)
@@ -129,6 +134,8 @@ class WeeklyFinishTests(unittest.TestCase):
         self.assertTrue(workflow.positions().closed_at.astype(bool).all())
         self.assertNotIn('Bezahlt / abgeschlossen',[b.label for b in app.button])
         self.assertNotIn('Einzelabrechnung herunterladen',[b.label for b in app.get('download_button')])
+        self.assertIn('Originalrechnung öffnen',[b.label for b in app.get('download_button')])
+        self.assertTrue(any('bezahlt / Partnerabrechnung abgeschlossen' in message.value for message in app.markdown))
         self.assertEqual(workflow.payout_status(workflow.positions())['p1'],'abgeschlossen')
 
     def test_ui_one_weekly_statement_for_partner_across_payouts(self):
@@ -152,7 +159,7 @@ class WeeklyFinishTests(unittest.TestCase):
         self.assertEqual([b.label for b in app.button].count('An Lexware übermitteln'),1)
         self.assertIn('Lexware-Aktion',[heading.value for heading in app.subheader])
         labels=[metric.label for metric in app.metric]
-        for label in ('Offene Positionen','eBay-Auszahlungsbetrag brutto','Rabatt 0,5 % netto','Rechnungsbetrag brutto'):
+        for label in ('Neu für Evelyn','Neuer eBay-Auszahlungsbetrag brutto','Neuer Rabatt 0,5 % netto','Neue Rechnungssumme brutto'):
             self.assertIn(label,labels)
 
     def test_evelyn_payment_is_checkbox_with_existing_confirmation(self):

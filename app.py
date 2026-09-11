@@ -1,4 +1,6 @@
 import streamlit as st
+import hashlib
+import importlib
 from pathlib import Path
 import core
 import api_holds
@@ -10,8 +12,16 @@ import draft_correction
 import partner_invoices
 import payout_reconciliation
 import trust_risk_ui
+import supabase_store
 from datetime import date
 from partner_export import export_partner_excel, prepare_partner_export
+
+supabase_store.require()
+
+if not callable(getattr(studio_view,'evelyn_overview',None)):
+    studio_view=importlib.reload(studio_view)
+if not callable(getattr(position_workflow,'_later_hold_on_bound_invoice',None)):
+    position_workflow=importlib.reload(position_workflow)
 
 st.set_page_config(page_title='Payout Studio', page_icon='💠', layout='wide', initial_sidebar_state='expanded')
 st.markdown('''<style>
@@ -67,39 +77,129 @@ def download(label, rows, key, kind='partner'):
         st.warning(f'Export benötigt Prüfung: {exc}')
 
 
-def partner_panel(rows, rate, prefix):
-    if rows.empty:
+def stored_invoice_original(record):
+    """Keep hot-reloaded app.py compatible with an older imported helper module."""
+    resolver=getattr(partner_invoices,'stored_original',None)
+    if callable(resolver): return resolver(record)
+    path=Path(core.PAYOUTS_DB_PATH).parent/'Partner_Invoices'/record['file_ref']
+    if path.name!=record['file_ref'] or not path.is_file(): return None
+    return path if hashlib.sha256(path.read_bytes()).hexdigest()==record['file_hash'] else None
+
+
+def invoice_history_panel(partner, rows, records, key):
+    invoices=[record for record in records if record['partner']==partner and record['expected']['scope']=='Rechnung']
+    if not invoices:
+        return
+    with st.expander(f'Rechnungshistorie · {len(invoices)}',expanded=False):
+        for record in invoices:
+            expected=record['expected']['items']; keys={item['key'] for item in expected}
+            invoice_rows=rows[rows.position_key.isin(keys)] if not rows.empty else rows
+            complete=len(invoice_rows)==len(keys)
+            paid=bool(complete and invoice_rows.paid_at.astype(bool).all())
+            closed=bool(complete and invoice_rows.closed_at.astype(bool).all())
+            payment_dates=sorted({str(value) for value in invoice_rows.paid_at if value}) if complete else []
+            payouts=sorted({item['payout'] for item in expected})
+            with st.container(border=True):
+                st.markdown(f"**{record['invoice_number'] or record['file_name']}** · {record['invoice_date'] or 'Datum nicht erkannt'} · **{euros(float(record['expected']['total']))}** · {len(expected)} Positionen")
+                if paid:
+                    st.badge('bezahlt / Partnerabrechnung abgeschlossen',icon=':material/check_circle:',color='green')
+                elif record['approved_at']:
+                    st.badge('geprüft/freigegeben · Zahlung offen',icon=':material/schedule:',color='orange')
+                elif record['report']['status']=='matched':
+                    st.badge('geprüft · Freigabe offen',icon=':material/verified:',color='blue')
+                else:
+                    st.badge('Prüfung offen',icon=':material/error:',color='gray')
+                st.caption('Zahlungsdatum: '+(', '.join(payment_dates) if payment_dates else 'offen'))
+                st.caption('Payouts: '+(', '.join(payouts) if payouts else 'nicht auf dem Beleg angegeben'))
+                if paid and not closed and not invoice_rows.empty and invoice_rows.iloc[0].Gruppe=='Gruppe B':
+                    st.caption('Partnerseite abgeschlossen · Evelyn-Zahlung und Gesamtabschluss bleiben davon getrennt.')
+                action_col,details_col=st.columns([1,1.8],vertical_alignment='center')
+                original=stored_invoice_original(record)
+                with action_col:
+                    if original is None:
+                        st.error('Original fehlt oder Hash abweichend.')
+                    else:
+                        content=original if isinstance(original,bytes) else original.read_bytes()
+                        st.download_button('Originalrechnung öffnen',content,record['file_name'],'application/pdf',key=key+'-'+record['id']+'-history-original',icon=':material/open_in_new:')
+                with details_col:
+                    with st.popover('Details',icon=':material/list_alt:'):
+                        upload_stamp=studio_view.local_datetime(core.pd.Series([record['uploaded_at']])).iloc[0]
+                        approval_stamp=studio_view.local_datetime(core.pd.Series([record['approved_at']])).iloc[0] if record['approved_at'] else 'offen'
+                        st.caption(f'Upload: {upload_stamp} · Freigabe: {approval_stamp}')
+                        detail=core.pd.DataFrame(expected)
+                        st.dataframe(detail[['order','sku']].rename(columns={'order':'Bestellnummer','sku':'SKU'}),hide_index=True,use_container_width=True)
+
+
+def partner_panel(rows, rate, prefix, history_rows=None):
+    history_rows=rows if history_rows is None else history_rows
+    if rows.empty and history_rows.empty:
         st.info('Aktuell keine offenen Partnerabrechnungen für diese Auswahl.')
         return
-    try:
-        summary = studio_view.partner_summary(rows)
-    except ValueError as exc:
-        st.warning(str(exc))
-        return
-    summary = summary.set_index('Partner')
-    for partner, partner_block in rows.groupby('Partner'):
+    invoice_records=partner_invoices.list_invoices()
+    history_keys=set(history_rows.position_key) if not history_rows.empty else set()
+    history_partners={record['partner'] for record in invoice_records
+                      if record['expected']['scope']=='Rechnung' and history_keys.intersection(item['key'] for item in record['expected']['items'])}
+    partners=sorted(set(rows.Partner) | history_partners)
+    for partner in partners:
+        partner_block=rows[rows.Partner==partner] if not rows.empty else rows
+        partner_history=history_rows[history_rows.Partner==partner] if not history_rows.empty else history_rows
         with st.container(border=True):
-            values=summary.loc[partner]
+            awaiting_payment=partner_block[partner_block.reviewed_at.astype(bool) & ~partner_block.paid_at.astype(bool)]
+            next_invoice=partner_block[~partner_block.reviewed_at.astype(bool)]
+            group_a_waits_for_all=not next_invoice.empty and not partner_history.empty and partner_history.iloc[0].Gruppe=='Gruppe A'
             st.subheader(partner)
-            for col,label,value in zip(st.columns(4),['Offene Positionen','eBay-Auszahlungsbetrag brutto',f'Rabatt {rate} netto','Rechnungsbetrag brutto'],[str(len(partner_block)),euros(values['eBay-Brutto']),euros(values['Rabatt netto']),euros(values['Rechnungsbetrag'])]):
-                col.metric(label,value)
-            st.caption('Rabatt wird auf den Nettobetrag berechnet und anschließend vom Bruttobetrag abgezogen.')
             payout_ids=sorted(partner_block['Auszahlung Nr.'].unique())
-            unreviewed=int((~partner_block.reviewed_at.astype(bool)).sum())
-            status='Partnerrechnung geprüft' if not unreviewed else f'{unreviewed} '+('Position noch nicht geprüft' if unreviewed==1 else 'Positionen noch nicht geprüft')
-            st.caption(f"Kumulative Sammelabrechnung aus {len(payout_ids)} Payout{'s' if len(payout_ids)!=1 else ''} · {status}. Payoutnummern bleiben in Export und Historie nachvollziehbar.")
-            download_col,action_col,_=st.columns([1.3,1.5,2])
-            with download_col:
-                statement_block=partner_block[~partner_block.reviewed_at.astype(bool)]
-                if statement_block.empty:
-                    st.caption('Alle Positionen bereits auf freigegebenen Partnerbelegen. Originalbelege unten verfügbar.')
-                else:
-                    download('Einzelabrechnung herunterladen', statement_block, prefix+'_'+partner)
-                    if len(statement_block)!=len(partner_block):
-                        st.caption('Download enthält nur die noch nicht auf freigegebenen Partnerbelegen enthaltenen Positionen.')
-            with action_col:
-                workflow_panel(partner_block,prefix+'_'+partner,action_only=True)
-            invoice_panel(partner_block,prefix+'_'+partner)
+            if payout_ids:
+                st.caption(f"{len(payout_ids)} Payout{'s' if len(payout_ids)!=1 else ''} im noch nicht abgeschlossenen Partnerbestand. Jede Statusstufe wird separat ausgewiesen.")
+            else:
+                st.caption('Aktuell keine neue oder zahlungsoffene Partnerposition. Abgeschlossene Rechnungen bleiben hier auffindbar.')
+            payment_col,new_col=st.columns(2)
+            with payment_col:
+                with st.container(border=True):
+                    st.markdown('**Freigegebene Rechnung · Zahlung offen**')
+                    covered=set()
+                    for record in invoice_records:
+                        if record['partner']!=partner:
+                            continue
+                        if not record['approved_at'] or record['expected']['scope']!='Rechnung':
+                            continue
+                        invoice_keys={item['key'] for item in record['expected']['items']}
+                        invoice_rows=awaiting_payment[awaiting_payment.position_key.isin(invoice_keys)]
+                        if invoice_rows.empty:
+                            continue
+                        covered.update(invoice_rows.position_key)
+                        st.metric('In freigegebener Rechnung',f'{len(invoice_rows)} Positionen')
+                        st.metric('Zahlung offen',euros(partner_invoices.confirmed_payment_total(invoice_rows)))
+                        st.caption(f"{record['invoice_number'] or record['file_name']} · geprüft/freigegeben · Partnerzahlung noch offen")
+                        label='Bezahlt / abgeschlossen' if invoice_rows.iloc[0].Gruppe=='Gruppe A' else 'Partner bezahlt'
+                        if group_a_waits_for_all:
+                            st.caption('Zahlungsabschluss erst möglich, wenn alle aktuell offenen Positionen dieses Partners geprüft sind.')
+                        elif st.button(label,key=prefix+'_'+partner+'-'+record['id']+'-partner-paid',icon=':material/check_circle:',use_container_width=True):
+                            st.session_state['confirmation_request']=(invoice_rows.copy(),'partner_paid',label)
+                    if awaiting_payment.empty:
+                        st.caption('Aktuell wartet keine freigegebene Partnerrechnung auf Zahlung.')
+                    elif set(awaiting_payment.position_key)-covered:
+                        st.warning('Geprüfte Positionen ohne eindeutigen freigegebenen Rechnungsbezug; Zahlung gesperrt.')
+            with new_col:
+                with st.container(border=True):
+                    st.markdown('**Neu für nächste Rechnung**')
+                    if next_invoice.empty:
+                        st.caption('Keine neuen abrechnungsfähigen Positionen.')
+                    else:
+                        try:
+                            pending=studio_view.partner_summary(next_invoice).iloc[0]
+                        except ValueError as exc:
+                            st.warning('Neue Abrechnung benötigt Prüfung: '+str(exc))
+                        else:
+                            st.metric('Neu für nächste Rechnung',f'{len(next_invoice)} Positionen')
+                            st.metric('Neue offene Rechnungssumme',euros(pending['Rechnungsbetrag']))
+                            st.caption('Noch nicht geprüft/freigegeben · nicht in einer bestehenden Partnerrechnung gebunden.')
+                            if group_a_waits_for_all and awaiting_payment.empty:
+                                st.caption('Zahlungsabschluss erst möglich, wenn alle aktuell offenen Positionen dieses Partners geprüft sind.')
+                            download('Einzelabrechnung herunterladen',next_invoice,prefix+'_'+partner)
+            st.caption(f'Neu abrechnungsfähig: Rabatt {rate} wird auf den Nettobetrag berechnet. Bezahlte Belege bleiben hier in der Rechnungshistorie und zusätzlich unter Historie → Positionsstatus sichtbar.')
+            invoice_history_panel(partner,partner_history,invoice_records,prefix+'_'+partner)
+            invoice_panel(next_invoice,prefix+'_'+partner)
 
 
 def invoice_report(record, key, allow_approval=True):
@@ -123,9 +223,10 @@ def invoice_report(record, key, allow_approval=True):
         st.caption('Zugehöriger Sollbestand zum Upload-Zeitpunkt')
         expected_table=core.pd.DataFrame(record['expected']['items'])
         st.dataframe(expected_table[['order','sku','article','quantity','net','gross','rate','payout']].rename(columns={'order':'Bestellnummer','sku':'SKU','article':'Artikel','quantity':'Menge','net':'Netto vor Rabatt','gross':'Positionsbetrag brutto','rate':'Rabatt %','payout':'Payoutnummer'}),hide_index=True,use_container_width=True)
-        stored=Path(core.PAYOUTS_DB_PATH).parent/'Partner_Invoices'/record['file_ref']
-        if stored.name==record['file_ref'] and stored.is_file():
-            st.download_button('Originalrechnung herunterladen',stored.read_bytes(),record['file_name'],key=key+'-original',icon=':material/download:')
+        stored=stored_invoice_original(record)
+        if stored is not None:
+            content=stored if isinstance(stored,bytes) else stored.read_bytes()
+            st.download_button('Originalrechnung herunterladen',content,record['file_name'],key=key+'-original',icon=':material/download:')
     if allow_approval and not record['approved_at'] and status!='deviation':
         actor=st.text_input('Freigebende Person',value='Patrick',key=key+'-actor')
         reason=''; override=False
@@ -165,7 +266,7 @@ def invoice_panel(rows, key, scope='Rechnung', expanded=False, choose_partner=Fa
 
 
 @st.dialog('Vorgang bestätigen')
-def confirm_dialog(rows, action, label):
+def confirm_dialog(rows, action, label, invoice_id=None):
     st.write(f"**{label}** · {len(rows)} Positionen")
     st.write('Partner: '+', '.join(sorted(rows.Partner.unique())))
     st.write('Payouts: '+', '.join(sorted(rows['Auszahlung Nr.'].unique())))
@@ -179,7 +280,7 @@ def confirm_dialog(rows, action, label):
     st.dataframe(rows[['Bestellnummer','SKU','Angebotstitel','Erlös_Brutto']], hide_index=True)
     if st.button('Verbindlich bestätigen', type='primary'):
         try:
-            position_workflow.confirm(rows.position_key.tolist(), action, date.today(),
+            position_workflow.confirm(rows.position_key.tolist(), action, date.today(), invoice_id=invoice_id,
                 expected_sources={r.position_key:position_workflow.source_snapshot(r) for _,r in rows.iterrows()})
             st.session_state.pop('confirmation_request',None)
             st.rerun()
@@ -190,9 +291,9 @@ def confirm_dialog(rows, action, label):
         st.rerun()
 
 
-def checkbox_confirmation(key, rows, action, label):
+def checkbox_confirmation(key, rows, action, label, invoice_id=None):
     if st.session_state.get(key):
-        st.session_state['confirmation_request']=(rows.copy(),action,label)
+        st.session_state['confirmation_request']=(rows.copy(),action,label,invoice_id)
         st.session_state[key]=False
 
 
@@ -327,6 +428,7 @@ try:
     ready=studio_view.eligible_rows(master,states)
     business=position_workflow.positions(master,states)
     partner_ready=studio_view.partner_rows(business)
+    partner_invoice_ready=partner_ready[~partner_ready.reviewed_at.astype(bool)] if not partner_ready.empty else partner_ready
     business_payout_status=position_workflow.payout_status(business)
     raw=core.read_master(core.PAYOUTS_DB_PATH)
     open_rows=studio_view.open_positions(raw)
@@ -344,10 +446,10 @@ def close_incoming_invoice():
 @st.dialog('Händlerrechnung hochladen', width='large', on_dismiss=close_incoming_invoice)
 def incoming_invoice_dialog():
     st.caption('Partner auswählen und die Rechnung gegen die bestehende Einzelabrechnung prüfen.')
-    if partner_ready.empty:
-        st.info('Aktuell keine offenen Partnerabrechnungen. Vorhandene Belege findest du unter Historie → Eingangsrechnungen.')
+    if partner_invoice_ready.empty:
+        st.info('Aktuell keine neuen abrechnungsfähigen Partnerpositionen. Freigegebene Belege findest du beim Partner und unter Historie → Eingangsrechnungen.')
     else:
-        invoice_panel(partner_ready, 'import-invoice', expanded=True, choose_partner=True)
+        invoice_panel(partner_invoice_ready, 'import-invoice', expanded=True, choose_partner=True)
     if st.button('Schließen',key='close-incoming-invoice'):
         close_incoming_invoice()
         st.rerun()
@@ -460,50 +562,91 @@ with group_a:
     st.caption('Rechnung hochladen → automatisch prüfen → freigeben. Danach erscheint „Bezahlt / abgeschlossen“.')
     st.caption('PP · BA · MK · 001 — 0,5 % Rabatt. Unabhängig von Patrick → Evelyn. Abschluss erst nach Prüfung und bestätigter Partnerzahlung.')
     with st.container(border=True):
-        partner_panel(partner_ready[partner_ready.Gruppe=='Gruppe A'] if not partner_ready.empty else partner_ready,'0,5 %','Gruppe_A')
+        partner_panel(partner_ready[partner_ready.Gruppe=='Gruppe A'] if not partner_ready.empty else partner_ready,'0,5 %','Gruppe_A',business[business.Gruppe=='Gruppe A'] if not business.empty else business)
 
 with group_b:
     b_ready=ready[ready.Gruppe=='Gruppe B'] if not ready.empty else ready
-    b_open=business[(business.Gruppe=='Gruppe B') & (business.Art=='Bestellung') & (business['Erlös_Brutto']>0) & ~business.closed_at.astype(bool) & ~business['Prüfhinweis'].astype(bool) & ~business.Quellenpruefung.astype(bool) & ~api_holds.mask(business)] if not business.empty else business
+    evelyn=studio_view.evelyn_overview(business,b_ready,invoices)
+    if not {'new_ready','new_review','new_held','prior_held'}.issubset(evelyn):
+        studio_view=importlib.reload(studio_view)
+        invoices=studio_view.invoice_history()
+        evelyn=studio_view.evelyn_overview(business,b_ready,invoices)
+    transferred_rows=evelyn['bound']
     with st.container(border=True):
         st.subheader('Partner → Patrick')
         st.caption('Einzelabrechnungen für MH, NB und weitere zugeordnete Partner · 3,5 % Rabatt')
-        partner_panel(partner_ready[partner_ready.Gruppe=='Gruppe B'] if not partner_ready.empty else partner_ready,'3,5 %','Partner_Patrick')
+        partner_panel(partner_ready[partner_ready.Gruppe=='Gruppe B'] if not partner_ready.empty else partner_ready,'3,5 %','Partner_Patrick',business[business.Gruppe=='Gruppe B'] if not business.empty else business)
     with st.container(border=True):
         st.subheader('Gesamtabrechnung Gruppe B an Evelyn')
-        transmitted=sum(item['Positionen'] or 0 for item in invoices.values() if not item['discarded'])
-        available=sorted(b_ready['Auszahlung Nr.'].unique()) if not b_ready.empty else []
+        active_invoices=[item for item in invoices.values() if not item['discarded']]
+        transmitted=len(evelyn['bound'])
+        st.markdown('**Bereits fakturiert**')
+        if not active_invoices:
+            st.caption('Noch kein Evelyn-Beleg gespeichert.')
+        for item in active_invoices:
+            invoice_date=studio_view.local_datetime(core.pd.Series([item['Datum']])).iloc[0].split()[0] if item['Datum'] else 'Datum nicht gespeichert'
+            amount=euros(item['Betrag']) if item['Betrag'] is not None else 'Betrag nicht gespeichert'
+            with st.container(border=True):
+                st.markdown(f"**{item['Belegnummer']}** · {invoice_date} · **{amount}** · {item['Positionen']} Positionen")
+                badge_col,payment_col,close_col=st.columns([.8,1.45,1],vertical_alignment='center')
+                badge_col.badge('fakturiert',color='blue',icon=':material/receipt_long:')
+                payment_col.badge('bezahlt' if item['Zahlungsstatus'].endswith('erhalten') else item['Zahlungsstatus'],color='green' if item['Zahlungsstatus'].endswith('erhalten') else 'orange',icon=':material/account_balance:')
+                close_col.badge('abgeschlossen' if item['Abschlussstatus']=='abgeschlossen' else 'Abschluss offen',color='green' if item['Abschlussstatus']=='abgeschlossen' else 'gray',icon=':material/check_circle:')
+                st.caption('Payouts: '+', '.join(item['Payouts']))
+
+        st.markdown('**Neu für nächste Rechnung**')
+        chosen=evelyn['new_ready']
+        available=sorted(chosen['Auszahlung Nr.'].unique()) if not chosen.empty else []
         selected=available
-        chosen=b_ready
         totals=None
         if not chosen.empty:
             try:
                 totals=prepare_partner_export(chosen,statement_type='group_b_evelyn')['totals']['Rechnung']
             except ValueError as exc:
                 st.warning(str(exc))
-        all_totals=None
-        if not b_open.empty:
-            try:
-                all_totals=prepare_partner_export(b_open,statement_type='group_b_evelyn')['totals']['Rechnung']
-            except ValueError as exc:
-                st.warning('Gesamtübersicht benötigt Prüfung: '+str(exc))
+        visible_totals=totals or {'ebay':0,'discount':0,'gross':0}
+        for col,label,value in zip(st.columns(4),['Neu für Evelyn','Neuer eBay-Auszahlungsbetrag brutto','Neuer Rabatt 0,5 % netto','Neue Rechnungssumme brutto'],[str(len(chosen)),euros(visible_totals['ebay']),euros(visible_totals['discount']),euros(visible_totals['gross'])]):
+            col.metric(label,value)
+        if totals:
+            st.caption('Diese Summen enthalten ausschließlich Positionen des nächsten Lexware-Entwurfs.')
+        else:
+            st.info('Aktuell keine neuen Gruppe-B-Positionen für einen Lexware-Entwurf freigegeben.')
+        status_cols=st.columns(3)
+        status_cols[0].metric('Neu abrechnungsfähig',f"{len(evelyn['new_ready'])} Positionen")
+        status_cols[1].metric('Prüfung erforderlich',f"{len(evelyn['new_review'])} Positionen")
+        status_cols[2].metric('Hold im neuen Payout',f"{len(evelyn['new_held'])} Positionen")
+        st.caption('Neue Payouts seit dem letzten Beleg: '+(', '.join(evelyn['new_payouts']) if evelyn['new_payouts'] else 'keine'))
+        st.caption(f"Hold-Positionen gesamt: {len(evelyn['held'])} · davon {len(evelyn['new_held'])} im neuen Payout · {len(evelyn['prior_held'])} aus älteren Payouts")
+        if not evelyn['new_review'].empty:
+            with st.expander(f"Prüfung erforderlich · {len(evelyn['new_review'])} neue Positionen"):
+                st.dataframe(evelyn['new_review'][['Auszahlung Nr.','Bestellnummer','Partner','SKU','Erlös_Brutto','Bearbeitungsstatus']],hide_index=True,use_container_width=True)
+        if not evelyn['new_held'].empty:
+            with st.expander(f"Durch Hold blockiert · {len(evelyn['new_held'])} im neuen Payout"):
+                st.dataframe(evelyn['new_held'][['Auszahlung Nr.','Bestellnummer','Partner','SKU','Erlös_Brutto','API_Hold_Hinweis']],hide_index=True,use_container_width=True)
+        if not evelyn['prior_held'].empty:
+            with st.expander(f"Ältere Hold-Positionen · {len(evelyn['prior_held'])} · nicht neu"):
+                st.dataframe(evelyn['prior_held'][['Auszahlung Nr.','Bestellnummer','Partner','SKU','Erlös_Brutto','API_Hold_Hinweis']],hide_index=True,use_container_width=True)
 
-        if all_totals:
-            for col,label,value in zip(st.columns(4),['Offene Positionen','eBay-Auszahlungsbetrag brutto','Rabatt 0,5 % netto','Rechnungsbetrag brutto'],[str(len(b_open)),euros(all_totals['ebay']),euros(all_totals['discount']),euros(all_totals['gross'])]):
-                col.metric(label,value)
-            st.caption('Rabatt wird auf den Nettobetrag berechnet und anschließend vom Bruttobetrag abgezogen.')
-
-        can_create=bool(selected and totals and api_key and st.session_state.get('lexware-received') and st.session_state.get('lexware-prior') and st.session_state.get('lexware-once'))
+        can_create=studio_view.lexware_create_ready(
+            selected, totals, api_key,
+            (st.session_state.get('lexware-received'), st.session_state.get('lexware-prior'), st.session_state.get('lexware-once')),
+        )
         download_col,lexware_col,_=st.columns([1.25,1.75,1.5],vertical_alignment='center')
         with download_col:
-            if all_totals:
-                download('Gesamtübersicht herunterladen',b_open,'Gruppe_B_Gesamt_Evelyn','group_b_evelyn')
+            if totals:
+                download('Neue Evelyn-Abrechnung herunterladen',chosen,'Gruppe_B_Neu_Evelyn','group_b_evelyn')
         with lexware_col:
             create_clicked=st.button('An Lexware übermitteln',type='primary',disabled=not can_create,use_container_width=True,key='lexware-create',icon=':material/lock:')
-        st.caption('Die Gesamtübersicht enthält alle aktuell offenen Gruppe-B-Positionen. Der Lexware-Entwurf enthält ausschließlich noch nicht übertragene, fachlich freigegebene Positionen.')
-        if transmitted:
-            active_payouts=sorted(business.loc[business.Lexware_uebertragen,'Auszahlung Nr.'].unique()) if not business.empty else []
-            st.caption(f"Entwurf: {transmitted} Positionen · Payouts "+', '.join(active_payouts))
+        st.caption('Anzeige, Download und Lexware-Entwurf enthalten ausschließlich noch nicht übertragene, fachlich freigegebene Positionen. Frühere Entwürfe bleiben separat gebunden.')
+
+        with st.expander(f'Historie · {len(invoices)} Evelyn-Belege',expanded=False):
+            for item in sorted(invoices.values(),key=lambda record:record['Datum'],reverse=True):
+                invoice_date=studio_view.local_datetime(core.pd.Series([item['Datum']])).iloc[0].split()[0] if item['Datum'] else 'Datum nicht gespeichert'
+                amount=euros(item['Betrag']) if item['Betrag'] is not None else 'Betrag nicht gespeichert'
+                st.markdown(f"**{item['Belegnummer']}** · {invoice_date} · {amount} · {item['Positionen']} Positionen")
+                st.caption('Payouts: '+', '.join(item['Payouts']))
+                st.caption(f"Zahlungsstatus: {item['Zahlungsstatus']} · Abschlussstatus: {item['Abschlussstatus']}")
+                st.divider()
 
         with st.container(border=True):
             st.subheader('Lexware-Aktion')
@@ -512,18 +655,19 @@ with group_b:
                 st.checkbox('eBay-Geldeingang geprüft',key='lexware-received')
                 st.checkbox('Kein bestehender Beleg in Lexware',key='lexware-prior')
                 st.checkbox('Genau einen Entwurf erstellen',key='lexware-once')
-                transferred_rows=business[business.Lexware_uebertragen & (business.Art=='Bestellung') & (business['Erlös_Brutto']>0)] if not business.empty else business
                 if not transferred_rows.empty:
                     invoice_map=dict(zip(states.Auszahlung,states.Entwurf))
                     transferred_rows=transferred_rows.copy()
                     transferred_rows['invoice_scope']=transferred_rows['Auszahlung Nr.'].map(invoice_map)
                     for invoice_id,payment_rows in transferred_rows.groupby('invoice_scope'):
+                        invoice_record=invoices.get(invoice_id,{})
+                        st.caption(invoice_record.get('Belegnummer',str(invoice_id)))
                         outstanding=payment_rows[~payment_rows.received_at.astype(bool) & ~payment_rows.closed_at.astype(bool)]
                         if outstanding.empty:
                             st.checkbox('Zahlung von Evelyn erhalten',value=True,disabled=True,key='evelyn-paid-'+str(invoice_id))
                         else:
                             payment_key='evelyn-payment-'+str(invoice_id)
-                            st.checkbox('Zahlung von Evelyn erhalten',key=payment_key,on_change=checkbox_confirmation,args=(payment_key,outstanding,'evelyn_received','Zahlung von Evelyn erhalten'))
+                            st.checkbox('Zahlung von Evelyn erhalten',key=payment_key,on_change=checkbox_confirmation,args=(payment_key,outstanding,'evelyn_received','Zahlung von Evelyn erhalten',invoice_id))
                 else:
                     st.checkbox('Zahlung von Evelyn erhalten',value=False,disabled=True,key='evelyn-payment-none')
             with status_col:

@@ -98,8 +98,7 @@ Nach einem Rechnerneustart im Repository PowerShell öffnen und ausführen:
 .\Start-Recovery.ps1
 ```
 
-Das Skript prüft Branch und Port und verwendet den bestehenden isolierten Datenbestand:
-`%LOCALAPPDATA%\PaymentTool-Test\recover-6e82d0d-20260903\test-data`.
+Das Skript prüft Branch und Port und verwendet standardmäßig den Datenbestand direkt im aktuellen Dropbox-Durchstarter-Arbeitsverzeichnis. Ein operativer Start aus einem OneDrive-Pfad wird abgelehnt.
 Es startet die App im Hintergrund. Einen bereits belegten Port verändert es nicht.
 Die frühere, vollständig für HTTP gesperrte Kopie wird nicht mehr gestartet.
 In dieser Version kann ausschließlich der Nutzer über die vorhandenen Bestätigungen
