@@ -157,7 +157,7 @@ class WeeklyFinishTests(unittest.TestCase):
         action=next(button for button in app.button if button.label=='An Lexware übermitteln')
         self.assertTrue(action.disabled)
         self.assertEqual([b.label for b in app.button].count('An Lexware übermitteln'),1)
-        self.assertIn('Lexware-Aktion',[heading.value for heading in app.subheader])
+        self.assertIn('Lexware-Übertragung vorbereiten',[heading.value for heading in app.subheader])
         labels=[metric.label for metric in app.metric]
         for label in ('Neu für Evelyn','Neuer eBay-Auszahlungsbetrag brutto','Neuer Rabatt 0,5 % netto','Neue Rechnungssumme brutto'):
             self.assertIn(label,labels)

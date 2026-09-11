@@ -584,19 +584,6 @@ with group_b:
         st.subheader('Gesamtabrechnung Gruppe B an Evelyn')
         active_invoices=[item for item in invoices.values() if not item['discarded']]
         transmitted=len(evelyn['bound'])
-        st.markdown('**Bereits fakturiert**')
-        if not active_invoices:
-            st.caption('Noch kein Evelyn-Beleg gespeichert.')
-        for item in active_invoices:
-            invoice_date=studio_view.local_datetime(core.pd.Series([item['Datum']])).iloc[0].split()[0] if item['Datum'] else 'Datum nicht gespeichert'
-            amount=euros(item['Betrag']) if item['Betrag'] is not None else 'Betrag nicht gespeichert'
-            with st.container(border=True):
-                st.markdown(f"**{item['Belegnummer']}** · {invoice_date} · **{amount}** · {item['Positionen']} Positionen")
-                badge_col,payment_col,close_col=st.columns([.8,1.45,1],vertical_alignment='center')
-                badge_col.badge('fakturiert',color='blue',icon=':material/receipt_long:')
-                payment_col.badge('bezahlt' if item['Zahlungsstatus'].endswith('erhalten') else item['Zahlungsstatus'],color='green' if item['Zahlungsstatus'].endswith('erhalten') else 'orange',icon=':material/account_balance:')
-                close_col.badge('abgeschlossen' if item['Abschlussstatus']=='abgeschlossen' else 'Abschluss offen',color='green' if item['Abschlussstatus']=='abgeschlossen' else 'gray',icon=':material/check_circle:')
-                st.caption('Payouts: '+', '.join(item['Payouts']))
 
         st.markdown('**Neu für nächste Rechnung**')
         chosen=evelyn['new_ready']
@@ -615,6 +602,38 @@ with group_b:
             st.caption('Diese Summen enthalten ausschließlich Positionen des nächsten Lexware-Entwurfs.')
         else:
             st.info('Aktuell keine neuen Gruppe-B-Positionen für einen Lexware-Entwurf freigegeben.')
+
+        can_create=studio_view.lexware_create_ready(
+            selected, totals, api_key,
+            (st.session_state.get('lexware-received'), st.session_state.get('lexware-prior'), st.session_state.get('lexware-once')),
+        )
+        with st.container(border=True):
+            st.subheader('Lexware-Übertragung vorbereiten')
+            if totals:
+                st.write(f"**Aktueller Umfang:** {len(chosen)} Positionen · {euros(totals['gross'])} brutto · Payout {', '.join(selected)}")
+                st.caption('Payoutnachweise: '+', '.join(selected))
+            check_col,status_col=st.columns([1.1,1.5],vertical_alignment='top')
+            with check_col:
+                st.checkbox('eBay-Geldeingang geprüft',key='lexware-received')
+                st.checkbox('Kein bestehender Beleg in Lexware',key='lexware-prior')
+                st.checkbox('Genau einen Entwurf erstellen',key='lexware-once')
+            with status_col:
+                if b_ready.empty:
+                    st.warning('Aktuell sind keine neuen Positionen für Lexware freigegeben. Bereits übertragene Positionen bleiben gesperrt; weitere Positionen benötigen zuerst eine vollständig geklärte Payout-Zuordnung.')
+                elif not api_key:
+                    st.info(f'{len(chosen)} Positionen sind fachlich bereit. Für die Übermittlung den API-Key unter „Lexware-Verbindung“ hinterlegen und die drei Sicherheitsprüfungen bestätigen.')
+                else:
+                    st.success(f'{len(chosen)} Positionen sind fachlich bereit. Die Übermittlung wird erst nach allen drei Sicherheitsbestätigungen aktiv.')
+                st.caption(f'{len(b_ready)} neu für Lexware bereit · {transmitted} bereits früher übertragen.')
+                st.caption('Button-Sichtbarkeit ändert keine fachliche Freigabe oder Sperre.')
+            download_col,lexware_col,_=st.columns([1.25,1.75,1.5],vertical_alignment='center')
+            with download_col:
+                if totals:
+                    download('Neue Evelyn-Abrechnung herunterladen',chosen,'Gruppe_B_Neu_Evelyn','group_b_evelyn')
+            with lexware_col:
+                create_clicked=st.button('An Lexware übermitteln',type='primary',disabled=not can_create,use_container_width=True,key='lexware-create',icon=':material/lock:')
+            st.caption('Anzeige, Download und Lexware-Entwurf enthalten ausschließlich noch nicht übertragene, fachlich freigegebene Positionen. Frühere Entwürfe bleiben separat gebunden.')
+
         status_cols=st.columns(3)
         status_cols[0].metric('Neu abrechnungsfähig',f"{len(evelyn['new_ready'])} Positionen")
         status_cols[1].metric('Prüfung erforderlich',f"{len(evelyn['new_review'])} Positionen")
@@ -631,19 +650,21 @@ with group_b:
             with st.expander(f"Ältere Hold-Positionen · {len(evelyn['prior_held'])} · nicht neu"):
                 st.dataframe(evelyn['prior_held'][['Auszahlung Nr.','Bestellnummer','Partner','SKU','Erlös_Brutto','API_Hold_Hinweis']],hide_index=True,use_container_width=True)
 
-        can_create=studio_view.lexware_create_ready(
-            selected, totals, api_key,
-            (st.session_state.get('lexware-received'), st.session_state.get('lexware-prior'), st.session_state.get('lexware-once')),
-        )
-        download_col,lexware_col,_=st.columns([1.25,1.75,1.5],vertical_alignment='center')
-        with download_col:
-            if totals:
-                download('Neue Evelyn-Abrechnung herunterladen',chosen,'Gruppe_B_Neu_Evelyn','group_b_evelyn')
-        with lexware_col:
-            create_clicked=st.button('An Lexware übermitteln',type='primary',disabled=not can_create,use_container_width=True,key='lexware-create',icon=':material/lock:')
-        st.caption('Anzeige, Download und Lexware-Entwurf enthalten ausschließlich noch nicht übertragene, fachlich freigegebene Positionen. Frühere Entwürfe bleiben separat gebunden.')
-
         with st.expander(f'Historie · {len(invoices)} Evelyn-Belege',expanded=False):
+            st.markdown('**Bereits fakturiert**')
+            if not active_invoices:
+                st.caption('Noch kein Evelyn-Beleg gespeichert.')
+            for item in active_invoices:
+                invoice_date=studio_view.local_datetime(core.pd.Series([item['Datum']])).iloc[0].split()[0] if item['Datum'] else 'Datum nicht gespeichert'
+                amount=euros(item['Betrag']) if item['Betrag'] is not None else 'Betrag nicht gespeichert'
+                with st.container(border=True):
+                    st.markdown(f"**{item['Belegnummer']}** · {invoice_date} · **{amount}** · {item['Positionen']} Positionen")
+                    badge_col,payment_col,close_col=st.columns([.8,1.45,1],vertical_alignment='center')
+                    badge_col.badge('fakturiert',color='blue',icon=':material/receipt_long:')
+                    payment_col.badge('bezahlt' if item['Zahlungsstatus'].endswith('erhalten') else item['Zahlungsstatus'],color='green' if item['Zahlungsstatus'].endswith('erhalten') else 'orange',icon=':material/account_balance:')
+                    close_col.badge('abgeschlossen' if item['Abschlussstatus']=='abgeschlossen' else 'Abschluss offen',color='green' if item['Abschlussstatus']=='abgeschlossen' else 'gray',icon=':material/check_circle:')
+                    st.caption('Payouts: '+', '.join(item['Payouts']))
+            st.divider()
             for item in sorted(invoices.values(),key=lambda record:record['Datum'],reverse=True):
                 invoice_date=studio_view.local_datetime(core.pd.Series([item['Datum']])).iloc[0].split()[0] if item['Datum'] else 'Datum nicht gespeichert'
                 amount=euros(item['Betrag']) if item['Betrag'] is not None else 'Betrag nicht gespeichert'
@@ -651,41 +672,21 @@ with group_b:
                 st.caption('Payouts: '+', '.join(item['Payouts']))
                 st.caption(f"Zahlungsstatus: {item['Zahlungsstatus']} · Abschlussstatus: {item['Abschlussstatus']}")
                 st.divider()
-
-        with st.container(border=True):
-            st.subheader('Lexware-Aktion')
-            check_col,status_col=st.columns([1.1,1.5],vertical_alignment='top')
-            with check_col:
-                st.checkbox('eBay-Geldeingang geprüft',key='lexware-received')
-                st.checkbox('Kein bestehender Beleg in Lexware',key='lexware-prior')
-                st.checkbox('Genau einen Entwurf erstellen',key='lexware-once')
-                if not transferred_rows.empty:
-                    invoice_map=dict(zip(states.Auszahlung,states.Entwurf))
-                    transferred_rows=transferred_rows.copy()
-                    transferred_rows['invoice_scope']=transferred_rows['Auszahlung Nr.'].map(invoice_map)
-                    for invoice_id,payment_rows in transferred_rows.groupby('invoice_scope'):
-                        invoice_record=invoices.get(invoice_id,{})
-                        st.caption(invoice_record.get('Belegnummer',str(invoice_id)))
-                        outstanding=payment_rows[~payment_rows.received_at.astype(bool) & ~payment_rows.closed_at.astype(bool)]
-                        if outstanding.empty:
-                            st.checkbox('Zahlung von Evelyn erhalten',value=True,disabled=True,key='evelyn-paid-'+str(invoice_id))
-                        else:
-                            payment_key='evelyn-payment-'+str(invoice_id)
-                            st.checkbox('Zahlung von Evelyn erhalten',key=payment_key,on_change=checkbox_confirmation,args=(payment_key,outstanding,'evelyn_received','Zahlung von Evelyn erhalten',invoice_id))
-                else:
-                    st.checkbox('Zahlung von Evelyn erhalten',value=False,disabled=True,key='evelyn-payment-none')
-            with status_col:
-                if b_ready.empty:
-                    st.warning('Aktuell sind keine neuen Positionen für Lexware freigegeben. Bereits übertragene Positionen bleiben gesperrt; weitere Positionen benötigen zuerst eine vollständig geklärte Payout-Zuordnung.')
-                elif not api_key:
-                    st.info(f'{len(chosen)} Positionen sind fachlich bereit. Für die Übermittlung den API-Key unter „Lexware-Verbindung“ hinterlegen und die drei Sicherheitsprüfungen bestätigen.')
-                else:
-                    st.success(f'{len(chosen)} Positionen sind fachlich bereit. Die Übermittlung wird erst nach allen drei Sicherheitsbestätigungen aktiv.')
-                st.caption(f'{len(b_ready)} neu für Lexware bereit · {transmitted} bereits früher übertragen.')
-                st.caption('Button-Sichtbarkeit ändert keine fachliche Freigabe oder Sperre.')
-                if totals:
-                    st.write(f"**Neuer Entwurfsumfang:** {len(chosen)} Positionen · {euros(totals['gross'])} brutto")
-                    st.caption('Payoutnachweise: '+', '.join(selected))
+            if not transferred_rows.empty:
+                invoice_map=dict(zip(states.Auszahlung,states.Entwurf))
+                transferred_rows=transferred_rows.copy()
+                transferred_rows['invoice_scope']=transferred_rows['Auszahlung Nr.'].map(invoice_map)
+                for invoice_id,payment_rows in transferred_rows.groupby('invoice_scope'):
+                    invoice_record=invoices.get(invoice_id,{})
+                    st.caption(invoice_record.get('Belegnummer',str(invoice_id)))
+                    outstanding=payment_rows[~payment_rows.received_at.astype(bool) & ~payment_rows.closed_at.astype(bool)]
+                    if outstanding.empty:
+                        st.checkbox('Zahlung von Evelyn erhalten',value=True,disabled=True,key='evelyn-paid-'+str(invoice_id))
+                    else:
+                        payment_key='evelyn-payment-'+str(invoice_id)
+                        st.checkbox('Zahlung von Evelyn erhalten',key=payment_key,on_change=checkbox_confirmation,args=(payment_key,outstanding,'evelyn_received','Zahlung von Evelyn erhalten',invoice_id))
+            else:
+                st.checkbox('Zahlung von Evelyn erhalten',value=False,disabled=True,key='evelyn-payment-none')
 
         if create_clicked:
             try:
