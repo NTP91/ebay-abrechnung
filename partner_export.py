@@ -31,6 +31,11 @@ CENT = Decimal('.01')
 # does not read "Gutschriften" (which implies a formal credit note already
 # issued) for refunds on a position they may not have been paid for yet.
 DISPLAY_NAMES = {'Rechnung': 'Rechnung', 'Gutschriften': 'Erstattungen-Abzüge'}
+# GESAMTABRECHNUNG (Rechnung sheet only): sales basis, partner discount, final
+# sales amount - never netted against Gutschriften, which stays its own,
+# separately settled sheet with its own closing line. Shared by
+# _closing_statement_rows and _fill_sheet so their row math can never drift.
+FINALE_LINE_COUNT = 3
 MONTHS = {
     'jan': 1, 'feb': 2, 'mär': 3, 'märz': 3, 'mar': 3, 'mrz': 3,
     'apr': 4, 'mai': 5, 'may': 5, 'jun': 6, 'jul': 7, 'aug': 8,
@@ -254,7 +259,7 @@ def _closing_statement_rows(name, item_count):
         return dict(start=start, note_row=note_row, visible_last=note_row)
     section_header_row = note_row + 2
     finale_start = section_header_row + 1
-    final_row = finale_start + 4 + 1
+    final_row = finale_start + FINALE_LINE_COUNT + 1
     return dict(start=start, note_row=note_row, section_header_row=section_header_row,
                 finale_start=finale_start, final_row=final_row, visible_last=final_row)
 
@@ -316,7 +321,6 @@ def _fill_sheet(xml, model, name):
     start = layout['start']
     helper_first = layout['visible_last'] + 3
     rechnung_totals, gutschriften_totals = model['totals']['Rechnung'], model['totals']['Gutschriften']
-    final_amount = rechnung_totals['gross'] + gutschriften_totals['gross']
     created_on = datetime.now().strftime('%d.%m.%Y')
     is_refund_sheet = name == 'Gutschriften'
     title = ('ERSTATTUNGEN / ABZÜGE – ' if is_refund_sheet else 'PARTNERABRECHNUNG – ') + str(model['partner'])
@@ -385,17 +389,20 @@ def _fill_sheet(xml, model, name):
     if name == 'Rechnung':
         # Closing statement for the merchant: only already-computed
         # calculate_sheet totals, nothing recalculated with a new rule.
+        # Sales and refunds are separate documents settled separately (Variant
+        # B): this sheet's final amount is the sales total only, never netted
+        # against Gutschriften - that sheet carries its own closing line.
         row_from(9, layout['section_header_row'], {'A': 'GESAMTABRECHNUNG'})
         rate_pct = f"{model['rate']*100:.1f}".replace('.', ',') + ' %'
         finale_lines = [
             ('Verkaufs-/Abrechnungsbasis brutto', rechnung_totals['ebay']),
             (f'abzgl. Partnerabzug {rate_pct} auf Netto', -rechnung_totals['discount']),
             ('Regulärer Abrechnungsbetrag', rechnung_totals['gross']),
-            ('abzgl. Erstattungen / Abzüge', gutschriften_totals['gross']),
         ]
+        assert len(finale_lines) == FINALE_LINE_COUNT
         for offset, (label, value) in enumerate(finale_lines):
             row_from(19, layout['finale_start'] + offset, {'A': label, 'K': value})
-        row_from(23, layout['final_row'], {'A': 'FINALER RECHNUNGSBETRAG', 'K': final_amount})
+        row_from(23, layout['final_row'], {'A': 'FINALER RECHNUNGSBETRAG', 'K': rechnung_totals['gross']})
     # Formula-only calculation rows, outside the print area and hidden. This
     # keeps exactly eleven visible columns and avoids fragile array formulas.
     # G: undiscounted net; H: rounded line net; I: running net; J: running VAT.
@@ -427,7 +434,7 @@ def _fill_sheet(xml, model, name):
     ET.SubElement(merges, TAG('mergeCell'), {'ref': f'A{layout["note_row"]}:K{layout["note_row"]}'})
     if name == 'Rechnung':
         ET.SubElement(merges, TAG('mergeCell'), {'ref': f'A{layout["section_header_row"]}:K{layout["section_header_row"]}'})
-        for number in range(layout['finale_start'], layout['finale_start'] + 4):
+        for number in range(layout['finale_start'], layout['finale_start'] + FINALE_LINE_COUNT):
             ET.SubElement(merges, TAG('mergeCell'), {'ref': f'A{number}:J{number}'})
         ET.SubElement(merges, TAG('mergeCell'), {'ref': f'A{layout["final_row"]}:J{layout["final_row"]}'})
     merges.set('count', str(len(merges)))

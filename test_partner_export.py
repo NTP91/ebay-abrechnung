@@ -230,6 +230,31 @@ class PartnerExportTests(unittest.TestCase):
                       'Refund-Payout:','Refund-ID:','Refund brutto:','Partnerwirkung:','Status:'):
             self.assertIn(label,refund_extra)
 
+    def test_finale_amount_never_nets_refunds(self):
+        """GESAMTABRECHNUNG on the Rechnung sheet is that sheet's own closing
+        amount - the sales invoice. Gutschriften is a separate document with
+        its own closing line (asserted elsewhere) and must never be blended
+        into this sheet's final figure, even though a real refund exists."""
+        master = self.seed(refund=True)
+        model = prepare_partner_export(master)
+        self.assertLess(model['totals']['Gutschriften']['gross'], Decimal('0'))  # a real refund is present
+
+        book = load_workbook(io.BytesIO(export_partner_excel(master)), data_only=True)
+        rechnung = book[DISPLAY_NAMES['Rechnung']]
+        layout = _closing_statement_rows('Rechnung', len(model['Rechnung']))
+        regular_row = layout['finale_start'] + 2  # third finale line: 'Regulärer Abrechnungsbetrag'
+        self.assertEqual(rechnung.cell(row=regular_row, column=1).value, 'Regulärer Abrechnungsbetrag')
+        regular_value = Decimal(str(rechnung.cell(row=regular_row, column=11).value))
+        self.assertEqual(rechnung.cell(row=layout['final_row'], column=1).value, 'FINALER RECHNUNGSBETRAG')
+        final_value = Decimal(str(rechnung.cell(row=layout['final_row'], column=11).value))
+
+        self.assertEqual(final_value, regular_value)
+        self.assertEqual(final_value, model['totals']['Rechnung']['gross'])
+        self.assertNotEqual(final_value, model['totals']['Rechnung']['gross'] + model['totals']['Gutschriften']['gross'])
+        finale_labels = [rechnung.cell(row=r, column=1).value
+                         for r in range(layout['finale_start'], layout['final_row'] + 1)]
+        self.assertFalse(any('Erstattung' in (label or '') for label in finale_labels))
+
 
 @unittest.skipUnless(os.environ.get('EBAY_REAL_MASTER_DIR'),'Set EBAY_REAL_MASTER_DIR for original imported data')
 class RealPartnerExportTests(unittest.TestCase):
