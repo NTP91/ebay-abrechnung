@@ -169,21 +169,13 @@ def prepare_partner_export(rows, payouts=None, orders=None, statement_type='part
         item['payout_id'] = payout_id
         result['Gutschriften' if is_refund else 'Rechnung'].append(item)
     result['totals'] = {name: calculate_sheet(result[name], rate) for name in ('Rechnung', 'Gutschriften')}
-    # Same net-then-VAT formula as every other position (calculate_sheet just
-    # above); this only makes its already-computed pieces individually
-    # traceable per row - it never recomputes any amount with a different rule.
-    rate_label = f"{rate*100:.1f}".replace('.', ',') + ' %'
-    for item in result['Rechnung']:
+    # Zusatztext is identical for every item, sale or refund: eBay-Bestellnummer/
+    # SKU/Payout only. finance_id and the calculate_sheet-derived net/discount/
+    # gross stay on the item dict for internal use (traceability, totals) but are
+    # deliberately not rendered into the customer-facing text - refunds and sales
+    # share one visible table, not a separate refund breakdown.
+    for item in result['Rechnung'] + result['Gutschriften']:
         item['extra'] += '\nPayout: ' + item['payout_id']
-    for item in result['Gutschriften']:
-        item['extra'] += (
-            '\nFinance-/Refund-ID: ' + item['finance_id']
-            + '\nRefund-Payout: ' + item['payout_id']
-            + f"\ntatsächlicher Refund netto: {item['net']:.2f} EUR"
-            + f"\n{rate_label} Partnerabzug (auf Netto): {item['discount']:.2f} EUR"
-            + f"\nAuswirkung auf offenen Partneranspruch: {item['gross']:.2f} EUR"
-            + '\nStatus: Rückerstattung – mindert den offenen Partneranspruch; eBay-Refund-Bruttobetrag (Spalte K) bleibt unverändert.'
-        )
     return result
 
 
@@ -390,11 +382,16 @@ def export_partner_excel(rows, payouts=None, orders=None, statement_type='partne
     model = prepare_partner_export(rows, payouts, orders, statement_type)
     output = io.BytesIO()
     with zipfile.ZipFile(TEMPLATE) as source, zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as target:
+        # Rechnung is the one and only layout source. Both worksheet XML entries
+        # are built from this same template, so column widths, styles, merges
+        # and the visible table shape cannot drift apart between the two tabs -
+        # sheet2's own template bytes are never used as a structural source.
+        master_template = source.read('xl/worksheets/sheet1.xml')
         for entry in source.infolist():
             content = source.read(entry.filename)
             if entry.filename in ('xl/worksheets/sheet1.xml', 'xl/worksheets/sheet2.xml'):
                 name = 'Rechnung' if entry.filename.endswith('sheet1.xml') else 'Gutschriften'
-                content = _fill_sheet(content, model, name)
+                content = _fill_sheet(master_template, model, name)
             elif entry.filename == 'xl/workbook.xml':
                 workbook = ET.fromstring(content)
                 for sheet in workbook.find(TAG('sheets')):

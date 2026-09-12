@@ -56,18 +56,10 @@ def check_workbook(case, blob, rows, rate, recipient):
             case.assertEqual(sheet[f'F{number}'].value, 'Stück')
             case.assertEqual(sheet[f'G{number}'].value, original['eBay_Netto'])
             case.assertEqual(sheet[f'C{number}'].value, original['Angebotstitel'])
-            base_extra='eBay-Bestellnummer: '+original['Bestellnummer']+'\nSKU: '+original['SKU']
-            rate_label=f'{rate*100:.1f}'.replace('.',',')+' %'
-            case.assertTrue(sheet[f'D{number}'].value.startswith(base_extra))
-            case.assertIn('Payout: '+str(original['Auszahlung Nr.']),sheet[f'D{number}'].value)
-            if kind=='Erstattung':
-                case.assertIn(rate_label+' Partnerabzug (auf Netto)',sheet[f'D{number}'].value)
-                case.assertIn('Finance-/Refund-ID: '+str(original['Transaktionsnummer']),sheet[f'D{number}'].value)
-                case.assertIn('Refund-Payout: '+str(original['Auszahlung Nr.']),sheet[f'D{number}'].value)
-                case.assertIn('Auswirkung auf offenen Partneranspruch',sheet[f'D{number}'].value)
-            else:
-                case.assertNotIn('Partnerabzug',sheet[f'D{number}'].value)
-                case.assertNotIn('Partnerbetrag',sheet[f'D{number}'].value)
+            # Identical Zusatztext schema for sales and refunds alike: eBay-Bestellnummer/SKU/Payout only.
+            expected_extra=('eBay-Bestellnummer: '+original['Bestellnummer']+'\nSKU: '+original['SKU']
+                             +'\nPayout: '+str(original['Auszahlung Nr.']))
+            case.assertEqual(sheet[f'D{number}'].value, expected_extra)
             case.assertIsInstance(sheet[f'A{number}'].value, datetime)
             case.assertTrue(sheet[f'C{number}'].alignment.wrap_text)
             case.assertEqual(sheet[f'G{number}'].alignment.horizontal, 'right')
@@ -196,6 +188,42 @@ class PartnerExportTests(unittest.TestCase):
         path.write_text(json.dumps(config),encoding='utf-8')
         with patch.dict(os.environ,{'PAYMENT_RECIPIENTS_PATH':str(path)}):
             self.assertEqual(recipient_details('evelyn')[1],'TEST-STRASSE (synthetisch)')
+
+    def test_rechnung_and_gutschriften_never_drift_apart(self):
+        """Regression guard: Rechnung is the only layout source. Not partner-
+        specific - this must hold for any partner/SKU that produces both a
+        sale and a refund row, not just MH."""
+        import partner_export
+        master = self.seed(refund=True)
+        with patch.object(partner_export, '_fill_sheet', wraps=partner_export._fill_sheet) as spy:
+            blob = export_partner_excel(master)
+        # Both tabs must be built from the exact same template bytes (Rechnung's) -
+        # this is what makes divergence structurally impossible, not just coincidental.
+        self.assertEqual(spy.call_count, 2)
+        xml_rechnung = spy.call_args_list[0][0][0]
+        xml_gutschriften = spy.call_args_list[1][0][0]
+        self.assertEqual(xml_rechnung, xml_gutschriften)
+
+        book = load_workbook(io.BytesIO(blob), data_only=True)
+        rechnung, gutschriften = book[DISPLAY_NAMES['Rechnung']], book[DISPLAY_NAMES['Gutschriften']]
+
+        headers_r = [rechnung.cell(row=14, column=c).value for c in range(1, 12)]
+        headers_g = [gutschriften.cell(row=14, column=c).value for c in range(1, 12)]
+        self.assertEqual(headers_r, headers_g)  # identical labels AND order
+
+        widths_r = [rechnung.column_dimensions[c].width for c in 'ABCDEFGHIJK']
+        widths_g = [gutschriften.column_dimensions[c].width for c in 'ABCDEFGHIJK']
+        self.assertEqual(widths_r, widths_g)
+        self.assertEqual(rechnung.max_column, gutschriften.max_column)
+
+        # Zusatztext schema: identical shape for a sale row and a refund row alike.
+        sale_extra = rechnung['D15'].value
+        refund_extra = gutschriften['D15'].value
+        for extra in (sale_extra, refund_extra):
+            self.assertRegex(extra, r'^eBay-Bestellnummer: .+\nSKU: .+\nPayout: .+$')
+            for forbidden in ('Finance-', 'Refund-ID', 'Partnerabzug', 'Partnerbetrag',
+                              'Auswirkung auf', 'Status:', 'Refund-Payout', 'Refund netto'):
+                self.assertNotIn(forbidden, extra)
 
 
 @unittest.skipUnless(os.environ.get('EBAY_REAL_MASTER_DIR'),'Set EBAY_REAL_MASTER_DIR for original imported data')
