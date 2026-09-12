@@ -118,6 +118,22 @@ def linked_refunds(rows, sale_index):
     return rows.loc[indices]
 
 
+def refund_links(rows):
+    """Map every unambiguous refund row index to exactly one sale row index.
+
+    The mapping uses the same strict order-line identity as refund_offset and
+    linked_refunds.  Exposing it lets presentation/settlement code attach
+    original-sale metadata without inventing a second matching rule.
+    """
+    result = {}
+    for sale_index, refund_indices, _ in _refund_matches(rows):
+        for refund_index in refund_indices:
+            if refund_index in result and result[refund_index] != sale_index:
+                raise ValueError('Refund ist mehreren Verkaufspositionen zugeordnet.')
+            result[refund_index] = sale_index
+    return result
+
+
 def open_gross(rows):
     """Erlös_Brutto still open per Bestellung row after linked refunds; never negative."""
     if rows.empty or 'Erlös_Brutto' not in rows.columns:

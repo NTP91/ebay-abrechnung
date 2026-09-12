@@ -100,6 +100,8 @@ def calculate_sheet(items, rate):
         item['net_after'] = after
         item['discount'] = item['net'] - after
         item['gross'] = after + tax_to_date - previous_tax
+        item['_running_net'] = total_after
+        item['_tax_to_date'] = tax_to_date
         total_net += item['net']
         total_ebay += item['ebay']
         previous_tax = tax_to_date
@@ -109,15 +111,43 @@ def calculate_sheet(items, rate):
                 ebay=cents(total_ebay), gross_discount=cents(total_ebay-gross))
 
 
+def calculate_partner_variant_b(items, rate, refunds=False):
+    """Apply the existing calculation once per independent refund event.
+
+    Unrefunded sales retain the established combined-column calculation.
+    A sale participating in a refund pair and every refund event are calculated
+    independently with that same formula, so a full sale/refund pair cancels
+    cent-for-cent and cannot acquire a second batch-rounding effect.
+    """
+    regular = [] if refunds else [item for item in items if not item.get('_refund_pair')]
+    independent = items if refunds else [item for item in items if item.get('_refund_pair')]
+    parts = []
+    if regular:
+        for item in regular:
+            item['_independent'] = False
+        parts.append(calculate_sheet(regular, rate))
+    for item in independent:
+        item['_independent'] = True
+        parts.append(calculate_sheet([item], rate))
+    if not parts:
+        return calculate_sheet([], rate)
+    keys = ('net', 'discount', 'net_after', 'tax', 'gross', 'ebay', 'gross_discount')
+    return {key: cents(sum((part[key] for part in parts), Decimal(0))) for key in keys}
+
+
 def prepare_partner_export(rows, payouts=None, orders=None, statement_type='partner'):
     """Enrich only the export, resolving original transaction and order fields."""
     if statement_type not in ('partner', 'group_b_evelyn'):
         raise ValueError('Unbekannte Abrechnungsart.')
-    if 'Neutralisiert' in rows and rows.Neutralisiert.astype(bool).any():
-        raise ValueError('Vollständig neutralisierte/stornierte Positionen dürfen nicht in einer Partnerabrechnung erscheinen.')
     if rows.empty or rows['Gruppe'].nunique() != 1 or (statement_type == 'partner' and rows['Partner'].nunique() != 1):
         raise ValueError('Partnerexport benötigt genau einen Partner und eine Gruppe.')
     partner, group = rows.iloc[0]['Partner'], rows.iloc[0]['Gruppe']
+    if 'Neutralisiert' in rows and rows.Neutralisiert.astype(bool).any():
+        links = core.refund_links(rows)
+        paired = set(links) | set(links.values())
+        neutralized = set(rows.index[rows.Neutralisiert.astype(bool)])
+        if statement_type != 'partner' or group != 'Gruppe B' or not neutralized.issubset(paired):
+            raise ValueError('Vollständig neutralisierte/stornierte Positionen dürfen nur als vollständiges Verkauf-/Refund-Paar in die Gruppe-B-Partnerabrechnung.')
     if statement_type == 'group_b_evelyn' and group != 'Gruppe B':
         raise ValueError('Die Gesamtübersicht an Evelyn darf nur Gruppe B enthalten.')
     if group not in ('Gruppe A', 'Gruppe B') or rows['Prüfhinweis'].astype(bool).any():
@@ -131,7 +161,9 @@ def prepare_partner_export(rows, payouts=None, orders=None, statement_type='part
     result = {'partner': partner, 'group': group, 'rate': rate, 'payouts': {},
               'recipient': recipient, 'address': address, 'statement_type': statement_type,
               'Rechnung': [], 'Gutschriften': []}
-    for _, row in rows.iterrows():
+    refund_links = core.refund_links(rows)
+    refund_sales = set(refund_links.values())
+    for row_index, row in rows.iterrows():
         if row['Art'] not in ('Bestellung', 'Erstattung'):
             continue
         match, issue = core.match_order(row, orders)
@@ -167,15 +199,45 @@ def prepare_partner_export(rows, payouts=None, orders=None, statement_type='part
         is_refund = base < 0 or row['Art'] == 'Erstattung'
         item['finance_id'] = str(row['Transaktionsnummer'])
         item['payout_id'] = payout_id
+        item['_refund_pair'] = row_index in refund_sales
+        if is_refund:
+            origin = rows.loc[refund_links[row_index]] if row_index in refund_links else None
+            item.update(
+                refund_id=core.clean(row.get('Refund_ID')) or core.clean(row.get('Transaktionsnummer')),
+                refund_date=report_date(row.get('Datum')),
+                original_payout=(core.clean(row.get('Ursprungs_Payout'))
+                                 or (str(origin['Auszahlung Nr.']) if origin is not None else 'nicht eindeutig')),
+                original_invoice=core.clean(row.get('Ursprungs_Abrechnung')) or 'nicht vorhanden',
+                refund_status=core.clean(row.get('Refund_Status')) or 'Offener Refund',
+            )
         result['Gutschriften' if is_refund else 'Rechnung'].append(item)
-    result['totals'] = {name: calculate_sheet(result[name], rate) for name in ('Rechnung', 'Gutschriften')}
-    # Zusatztext is identical for every item, sale or refund: eBay-Bestellnummer/
-    # SKU/Payout only. finance_id and the calculate_sheet-derived net/discount/
-    # gross stay on the item dict for internal use (traceability, totals) but are
-    # deliberately not rendered into the customer-facing text - refunds and sales
-    # share one visible table, not a separate refund breakdown.
-    for item in result['Rechnung'] + result['Gutschriften']:
+    if statement_type == 'partner' and group == 'Gruppe B':
+        result['totals'] = {
+            'Rechnung': calculate_partner_variant_b(result['Rechnung'], rate),
+            'Gutschriften': calculate_partner_variant_b(result['Gutschriften'], rate, refunds=True),
+        }
+    else:
+        result['totals'] = {name: calculate_sheet(result[name], rate) for name in ('Rechnung', 'Gutschriften')}
+    # Sales keep the compact reference text; refunds add the audit metadata that
+    # makes each separate negative event traceable to its original settlement.
+    for item in result['Rechnung']:
         item['extra'] += '\nPayout: ' + item['payout_id']
+    for item in result['Gutschriften']:
+        order_date_text = item['date'].strftime('%d.%m.%Y') if item['date'] else 'nicht angegeben'
+        refund_date_text = item['refund_date'].strftime('%d.%m.%Y') if item.get('refund_date') else 'nicht angegeben'
+        item['extra'] = '\n'.join([
+            'eBay-Bestellnummer: ' + item['order'],
+            'Bestelldatum: ' + order_date_text,
+            'Refund-Datum: ' + refund_date_text,
+            'SKU: ' + item['extra'].split('\nSKU: ', 1)[-1],
+            'Ursprünglicher Payout: ' + item['original_payout'],
+            'Refund-Payout: ' + item['payout_id'],
+            'Ursprüngliche Abrechnung: ' + item['original_invoice'],
+            'Refund-ID: ' + (item['refund_id'] or 'nicht angegeben'),
+            'Refund brutto: ' + format_euro(item['ebay']),
+            'Partnerwirkung: ' + format_euro(item['gross']),
+            'Status: ' + item['refund_status'],
+        ])
     return result
 
 
@@ -284,11 +346,15 @@ def _fill_sheet(xml, model, name):
         if number == 1:
             row.set('ht', str(max(42, 22 * math.ceil(len(title)/45))))
         row.set('customHeight', '1')
+    previous_cumulative_helper = None
     for offset, item in enumerate(items):
         number = FIRST_ROW + offset
         helper = helper_first + offset
-        previous_tax = '0' if offset == 0 else f'J{helper-1}'
+        independent = bool(item.get('_independent'))
+        previous_tax = '0' if independent or previous_cumulative_helper is None else f'J{previous_cumulative_helper}'
         gross_formula = f'H{helper}+J{helper}-{previous_tax}'
+        if not independent:
+            previous_cumulative_helper = helper
         row = row_from(FIRST_ROW + offset % 2, number, {
             'A': item['date'] or 'Nicht angegeben', 'B': item['order'], 'C': item['article'],
             'D': item['extra'], 'E': 1, 'F': 'Stück', 'G': item['net'],
@@ -306,7 +372,7 @@ def _fill_sheet(xml, model, name):
     helper_last = helper_first + max(1, len(items)) - 1
     formulas = [f'SUM(G{helper_first}:G{helper_last})',
                 f'K{start}-K{start+2}', f'SUM(H{helper_first}:H{helper_last})',
-                f'ROUND(K{start+2}*$I$4,2)', f'K{start+2}+K{start+3}',
+                f'SUM(J{FIRST_ROW}:J{last})-K{start+2}', f'SUM(J{FIRST_ROW}:J{last})',
                 f'SUM(K{FIRST_ROW}:K{last})', f'K{start+5}-K{start+4}']
     for offset, key in enumerate(['net', 'discount', 'net_after', 'tax', 'gross', 'ebay', 'gross_discount']):
         row_from(19 + offset, start + offset, {'K': totals[key]}, {'K': formulas[offset]})
@@ -333,16 +399,20 @@ def _fill_sheet(xml, model, name):
     # Formula-only calculation rows, outside the print area and hidden. This
     # keeps exactly eleven visible columns and avoids fragile array formulas.
     # G: undiscounted net; H: rounded line net; I: running net; J: running VAT.
-    cumulative_net = Decimal(0)
+    previous_cumulative_helper = None
     for offset, item in enumerate(items or [None]):
         helper = helper_first + offset
         number = FIRST_ROW + offset
         values = {col: None for col in 'ABCDEFGHIJK'}
         if item:
-            cumulative_net += item['net_after']
-            values.update(G=item['net'], H=item['net_after'], I=cumulative_net, J=cents(cumulative_net*TAX))
+            independent = bool(item.get('_independent'))
+            values.update(G=item['net'], H=item['net_after'], I=item['_running_net'], J=item['_tax_to_date'])
+            running_formula = (f'H{helper}' if independent or previous_cumulative_helper is None
+                               else f'I{previous_cumulative_helper}+H{helper}')
             helper_formulas = {'G': f'E{number}*G{number}', 'H': f'ROUND(G{helper}*(1-H{number}),2)',
-                               'I': f'SUM(H${helper_first}:H{helper})', 'J': f'ROUND(I{helper}*I{number},2)'}
+                               'I': running_formula, 'J': f'ROUND(I{helper}*I{number},2)'}
+            if not independent:
+                previous_cumulative_helper = helper
         else:
             values.update(G=0, H=0, I=0, J=0)
             helper_formulas = {}

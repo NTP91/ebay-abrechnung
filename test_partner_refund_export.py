@@ -1,8 +1,7 @@
-"""Regression for the MH partner-Excel refund bug: the individual partner export
-(export_partner_excel / studio_view.partner_rows) must use the exact same
-refund/offset logic as the central settlement (core.refund_offset /
-core.apply_open_refunds / core.linked_refunds), not a separate, older filter
-that drops Erstattung rows before they ever reach the export.
+"""Regression for Group-B partner refund variant B.
+
+Every original sale remains positive and every refund remains one separate
+negative event.  A refund must never also shrink/remove its sale.
 
 The order numbers/amounts below mirror the real MH control set reported for
 payout 7725289401 plus the two later RE0090-linked refunds - used here only
@@ -144,23 +143,23 @@ class PartnerRefundExportTests(unittest.TestCase):
 
         refunded_orders = {order for order, _ in full_refunds} | set(bound_orders)
         open_sales = mh[mh.Art == 'Bestellung']
-        # Regular positions (plus the untouched, already-reviewed order) are all
-        # that remains as Bestellung rows; none of the refunded orders are among them.
-        self.assertEqual(sorted(open_sales.Bestellnummer), sorted(regular_orders + [reviewed_order]))
-        self.assertFalse(refunded_orders & set(open_sales.Bestellnummer))
+        # Variant B: every original unpaid sale remains visible and positive.
+        self.assertEqual(sorted(open_sales.Bestellnummer),
+                         sorted(regular_orders + [reviewed_order] + list(refunded_orders)))
+        self.assertTrue(refunded_orders.issubset(set(open_sales.Bestellnummer)))
 
         # The reviewed-and-then-refunded order passes through unmodified (history never changes)...
         settled = mh[(mh.Bestellnummer == reviewed_order) & (mh.Art == 'Bestellung')]
         self.assertEqual(len(settled), 1)
         self.assertEqual(round(float(settled.iloc[0].Erlös_Brutto), 2), 50.00)
-        # ...and its refund is a separate case, never inside the export selection.
-        self.assertNotIn(reviewed_order, mh.loc[mh.Art == 'Erstattung', 'Bestellnummer'].tolist())
+        # ...and its refund is a separate new event while history remains intact.
+        self.assertIn(reviewed_order, mh.loc[mh.Art == 'Erstattung', 'Bestellnummer'].tolist())
         cases = studio_view.partner_refund_cases(business[business.Partner == partner_name])
         self.assertEqual(cases.Bestellnummer.tolist(), [reviewed_order])
 
         # Every applicable refund is visible exactly once, tied to its own order/finance id.
         export_refunds = mh[mh.Art == 'Erstattung']
-        self.assertEqual(sorted(export_refunds.Bestellnummer), sorted(refunded_orders))
+        self.assertEqual(sorted(export_refunds.Bestellnummer), sorted(refunded_orders | {reviewed_order}))
         self.assertEqual(export_refunds.Bestellnummer.duplicated().sum(), 0)
         self.assertEqual(export_refunds.Transaktionsnummer.duplicated().sum(), 0)
 
@@ -168,13 +167,18 @@ class PartnerRefundExportTests(unittest.TestCase):
         # ("Neu für nächste Rechnung"); the already-reviewed order stays out - its historical
         # invoice is untouched and it is paid via the separate "Zahlung offen" bucket instead.
         next_invoice = mh[~mh.reviewed_at.astype(bool)]
-        self.assertNotIn(reviewed_order, next_invoice.Bestellnummer.tolist())
+        self.assertNotIn(reviewed_order, next_invoice.loc[next_invoice.Art=='Bestellung','Bestellnummer'].tolist())
+        self.assertIn(reviewed_order, next_invoice.loc[next_invoice.Art=='Erstattung','Bestellnummer'].tolist())
 
         model = prepare_partner_export(next_invoice)
         rechnung_orders = {item['order'] for item in model['Rechnung']}
         gutschrift_orders = {item['order'] for item in model['Gutschriften']}
-        self.assertEqual(rechnung_orders, set(regular_orders))
-        self.assertEqual(gutschrift_orders, refunded_orders)
+        self.assertEqual(rechnung_orders, set(regular_orders) | refunded_orders)
+        self.assertEqual(gutschrift_orders, refunded_orders | {reviewed_order})
+        for order in refunded_orders:
+            sale=next(item for item in model['Rechnung'] if item['order']==order)
+            refund=next(item for item in model['Gutschriften'] if item['order']==order)
+            self.assertEqual(sale['gross']+refund['gross'],Decimal('0.00'))
 
         blob = export_partner_excel(next_invoice)
         path = Path(self.temp.name) / f'Partner_Patrick_{partner_name}.xlsx'
@@ -186,19 +190,25 @@ class PartnerRefundExportTests(unittest.TestCase):
         gutschrift_text = '\n'.join(str(cell.value) for row in gutschriften for cell in row if cell.value is not None)
         self.assertNotIn('Keine Erstattungen vorhanden', gutschrift_text)
         self.assertNotIn(reviewed_order, rechnung_text)  # historical invoice stays out of the new export
-        for order in refunded_orders:
+        for order in refunded_orders | {reviewed_order}:
             self.assertIn(order, gutschrift_text)
         for order in regular_orders:
             self.assertIn(order, rechnung_text)
             self.assertNotIn(order, gutschrift_text)
 
-        rechnung_rows = list(rechnung.iter_rows(min_row=15, max_row=14 + len(regular_orders)))
-        self.assertEqual({row[1].value for row in rechnung_rows}, set(regular_orders))
-        gutschrift_rows = list(gutschriften.iter_rows(min_row=15, max_row=14 + len(refunded_orders)))
-        self.assertEqual({row[1].value for row in gutschrift_rows}, refunded_orders)
+        expected_sales=set(regular_orders) | refunded_orders
+        expected_refunds=refunded_orders | {reviewed_order}
+        rechnung_rows = list(rechnung.iter_rows(min_row=15, max_row=14 + len(expected_sales)))
+        self.assertEqual({row[1].value for row in rechnung_rows}, expected_sales)
+        gutschrift_rows = list(gutschriften.iter_rows(min_row=15, max_row=14 + len(expected_refunds)))
+        self.assertEqual({row[1].value for row in gutschrift_rows}, expected_refunds)
+        refund_text='\n'.join(str(row[3].value) for row in gutschrift_rows)
+        for label in ('Bestelldatum:','Refund-Datum:','Ursprünglicher Payout:',
+                      'Refund-Payout:','Refund brutto:','Partnerwirkung:','Status:'):
+            self.assertIn(label,refund_text)
 
-        rechnung_summary_row = 14 + max(1, len(regular_orders)) + 2 + 4
-        gutschrift_summary_row = 14 + max(1, len(refunded_orders)) + 2 + 4
+        rechnung_summary_row = 14 + max(1, len(expected_sales)) + 2 + 4
+        gutschrift_summary_row = 14 + max(1, len(expected_refunds)) + 2 + 4
         excel_final = round(rechnung[f'K{rechnung_summary_row}'].value + gutschriften[f'K{gutschrift_summary_row}'].value, 2)
 
         totals = model['totals']
@@ -243,10 +253,40 @@ class PartnerRefundExportTests(unittest.TestCase):
         mh = mh[mh.Partner == 'MH']
         open_sale = mh[(mh.Bestellnummer == 'order-multi') & (mh.Art == 'Bestellung')]
         self.assertEqual(len(open_sale), 1)
-        self.assertEqual(round(float(open_sale.iloc[0].Erlös_Brutto), 2), 65.00)  # 100 - 20 - 15
+        self.assertEqual(round(float(open_sale.iloc[0].Erlös_Brutto), 2), 100.00)
         refunds = mh[(mh.Bestellnummer == 'order-multi') & (mh.Art == 'Erstattung')]
         self.assertEqual(len(refunds), 2)  # each refund stays its own, separately traceable movement
         self.assertEqual(sorted(round(float(v), 2) for v in refunds.Erlös_Brutto), [-20.0, -15.0])
+        model=prepare_partner_export(mh)
+        expected=(reference_gutschriften_gross(['100.00'])
+                  +reference_gutschriften_gross(['-20.00'])
+                  +reference_gutschriften_gross(['-15.00']))
+        self.assertEqual(model['totals']['Rechnung']['gross']+model['totals']['Gutschriften']['gross'],expected)
+
+    def test_variant_b_keeps_a_negative_balance_instead_of_clipping_to_zero(self):
+        sale = payout('p-open', 'sale-negative', 'order-negative', sku='MH / 1', amount='10,00')
+        refund = payout('p-open', 'refund-negative', 'order-negative', sku='MH / 1', amount='-20,00', kind='Rückerstattung')
+        for frame in (sale, refund):
+            frame['Artikelnummer'] = 'item-negative'
+        self._finish([sale, refund])
+        mh = studio_view.partner_rows(workflow.positions()).query("Partner == 'MH'")
+        self.assertEqual(mh.Art.tolist(), ['Bestellung', 'Erstattung'])
+        model = prepare_partner_export(mh)
+        self.assertLess(model['totals']['Rechnung']['gross'] + model['totals']['Gutschriften']['gross'], 0)
+
+    def test_duplicate_refund_finance_id_is_blocked_before_export(self):
+        frames = []
+        for order in ('duplicate-a', 'duplicate-b'):
+            sale = payout('p-open', 'sale-' + order, order, sku='MH / 1', amount='20,00')
+            refund = payout('p-open', 'refund-' + order, order, sku='MH / 1', amount='-10,00', kind='Rückerstattung')
+            for frame in (sale, refund):
+                frame['Artikelnummer'] = 'item-' + order
+            frames.extend([sale, refund])
+        self._finish(frames)
+        business=workflow.positions()
+        business.loc[business.Art=='Erstattung','Transaktionsnummer']='same-refund-id'
+        with self.assertRaisesRegex(ValueError, 'Refund-ID mehrfach'):
+            studio_view.partner_rows(business)
 
     def test_refund_after_partner_payment_is_a_separate_case_not_merged(self):
         sale = payout('p-paid', 'sale-paid', 'order-paid', sku='MH / 1', amount='40,00')
@@ -267,7 +307,8 @@ class PartnerRefundExportTests(unittest.TestCase):
 
         mh = studio_view.partner_rows(business)
         mh = mh[mh.Partner == 'MH']
-        self.assertNotIn('order-paid', mh.loc[mh.Art == 'Erstattung', 'Bestellnummer'].tolist())
+        self.assertNotIn('order-paid', mh.loc[mh.Art == 'Bestellung', 'Bestellnummer'].tolist())
+        self.assertIn('order-paid', mh.loc[mh.Art == 'Erstattung', 'Bestellnummer'].tolist())
         cases = studio_view.partner_refund_cases(business[business.Partner == 'MH'])
         self.assertEqual(cases.Bestellnummer.tolist(), ['order-paid'])
         self.assertEqual(round(float(cases.iloc[0].Erlös_Brutto), 2), -40.00)
@@ -287,7 +328,8 @@ class PartnerRefundExportTests(unittest.TestCase):
         mh = studio_view.partner_rows(business)
         mh = mh[mh.Partner == 'MH']
         next_invoice = mh[~mh.reviewed_at.astype(bool)]
-        refund_rows = next_invoice[next_invoice.Art == 'Erstattung']
+        refund_rows = next_invoice[(next_invoice.Art == 'Erstattung')
+                                   & next_invoice.Bestellnummer.isin({order for order,_ in full_refunds})]
 
         raw_amounts = [amount.replace(',', '.') for _, amount in full_refunds]
         raw_sum = sum(Decimal(a) for a in raw_amounts)
@@ -296,8 +338,9 @@ class PartnerRefundExportTests(unittest.TestCase):
         self.assertEqual(sorted(round(float(v), 2) for v in refund_rows.Erlös_Brutto), sorted(float(a) for a in raw_amounts))
 
         model = prepare_partner_export(next_invoice)
-        actual_impact = model['totals']['Gutschriften']['gross']
-        expected_impact = reference_gutschriften_gross(raw_amounts)
+        actual_impact = sum(item['gross'] for item in model['Gutschriften']
+                            if item['order'] in {order for order,_ in full_refunds})
+        expected_impact = sum(reference_gutschriften_gross([amount]) for amount in raw_amounts)
         self.assertEqual(actual_impact, expected_impact)
         naive_shortcut = (raw_sum * Decimal('.965')).quantize(Decimal('.01'), rounding=ROUND_HALF_UP)
         # Whether or not this happens to coincide with the naive shortcut for this

@@ -66,26 +66,80 @@ def lexware_create_ready(selected, totals, api_key, confirmations):
 
 
 def partner_rows(business):
-    """Refund-aware, partner-agnostic selection: applies identically to every partner (MH, NB, ...).
+    """Open partner settlement rows, with Group-B refunds applied once.
 
-    Reuses the same open-amount offset as the Evelyn run (core.apply_open_refunds):
-    a not-yet-reviewed position fully refunded before payment carries no open
-    claim and drops out; a partial refund reduces it. The matching Erstattung
-    rows are added back so every partner export can show its refunds, never
-    just a filtered-out total. Positions already reviewed/paid/closed are
-    never changed retroactively - see partner_refund_cases() for refunds
-    linked to those; they surface as a separate case instead.
+    Group B uses variant B: an eligible original sale remains positive and
+    every linked refund remains a separate negative event.  The sale is never
+    reduced or removed because of that same refund.  Evelyn selection keeps
+    using core.apply_open_refunds independently and is deliberately untouched.
+
+    Group A retains its established behavior; its special cases are outside
+    this Group-B correction.
     """
     if business.empty:
         return business.copy()
-    ready = business[business.partner_ready].copy()
-    if ready.empty:
-        return ready
-    committed = ready.reviewed_at.astype(bool) if 'reviewed_at' in ready else pd.Series(False, index=ready.index)
-    fresh, settled = ready[~committed], ready[committed]
-    open_rows = core.apply_open_refunds(fresh) if not fresh.empty else fresh
-    refunds = core.linked_refunds(business, fresh.index) if not fresh.empty else business.iloc[0:0]
-    return pd.concat([open_rows, settled, refunds]).sort_index()
+    ready_a = business[(business.Gruppe == 'Gruppe A') & business.partner_ready].copy()
+    committed_a = ready_a.reviewed_at.astype(bool) if not ready_a.empty else pd.Series(False, index=ready_a.index)
+    fresh_a, settled_a = ready_a[~committed_a], ready_a[committed_a]
+    open_a = core.apply_open_refunds(fresh_a) if not fresh_a.empty else fresh_a
+    refunds_a = core.linked_refunds(business, fresh_a.index) if not fresh_a.empty else business.iloc[0:0]
+
+    valid_b = (
+        (business.Gruppe == 'Gruppe B') & (business.Art == 'Bestellung')
+        & (business['Erlös_Brutto'] > 0) & ~business['Prüfhinweis'].astype(bool)
+        & ~business.Quellenpruefung.astype(bool) & ~api_holds.mask(business)
+        & ~business.closed_at.astype(bool) & ~business.paid_at.astype(bool)
+    )
+    sales_b = business[valid_b].copy()
+    linked = core.refund_links(business)
+    normal_refund_indices = {refund for refund, sale in linked.items() if sale in set(sales_b.index)}
+    committed_b = business[
+        (business.Gruppe == 'Gruppe B') & (business.Art == 'Bestellung')
+        & (business.reviewed_at.astype(bool) | business.paid_at.astype(bool) | business.closed_at.astype(bool))
+    ]
+    historical_refund_indices = {refund for refund, sale in linked.items() if sale in set(committed_b.index)}
+    refund_indices = sorted(normal_refund_indices | historical_refund_indices)
+    refunds_b = business.loc[refund_indices].copy() if refund_indices else business.iloc[0:0].copy()
+    if not refunds_b.empty:
+        open_event = (
+            ~refunds_b['Prüfhinweis'].astype(bool) & ~refunds_b.Quellenpruefung.astype(bool)
+            & ~api_holds.mask(refunds_b) & ~refunds_b.reviewed_at.astype(bool)
+            & ~refunds_b.paid_at.astype(bool) & ~refunds_b.closed_at.astype(bool)
+        )
+        refunds_b = refunds_b[open_event].copy()
+        identities = refunds_b.apply(
+            lambda row: core.clean(row.get('Transaktionsnummer')) or row.position_key, axis=1)
+        if identities.duplicated().any():
+            raise ValueError('Refund-ID mehrfach im offenen Partner-Settlement vorhanden.')
+        refunds_b['Refund_ID'] = identities
+        invoice_by_position = {}
+        invoice_by_payout = {}
+        with core.ledger() as db:
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='partner_invoice_positions'").fetchone() \
+                    and db.execute("SELECT 1 FROM sqlite_master WHERE name='partner_invoices'").fetchone():
+                records = {row['id']: json.loads(row['record']) for row in db.execute('SELECT id,record FROM partner_invoices')}
+                for row in db.execute('SELECT position_key,invoice_id FROM partner_invoice_positions'):
+                    record = records.get(row['invoice_id'], {})
+                    invoice_by_position[row['position_key']] = record.get('invoice_number') or record.get('file_name') or row['invoice_id']
+            for row in db.execute('SELECT id,invoice_id FROM payouts WHERE invoice_id IS NOT NULL'):
+                invoice_by_payout[row['id']] = LEXWARE_DOCUMENT_NUMBERS.get(row['invoice_id'], row['invoice_id'])
+        origins = [business.loc[linked[index]] for index in refunds_b.index]
+        refunds_b['Ursprungs_Payout'] = [str(row['Auszahlung Nr.']) for row in origins]
+        refunds_b['Refund_Payout'] = refunds_b['Auszahlung Nr.'].astype(str)
+        refunds_b['Ursprungs_Abrechnung'] = [
+            invoice_by_position.get(row.position_key)
+            or (invoice_by_payout.get(str(row['Auszahlung Nr.'])) if row.Lexware_uebertragen else None)
+            or 'offene Partnerabrechnung'
+            for row in origins
+        ]
+        refunds_b['Refund_Status'] = [
+            'Später Refund · historische Partnerrechnung unverändert'
+            if bool(row.reviewed_at or row.paid_at or row.closed_at)
+            else 'Offener Refund · einmalig im nächsten Partner-Settlement'
+            for row in origins
+        ]
+
+    return pd.concat([open_a, settled_a, refunds_a, sales_b, refunds_b]).sort_index()
 
 
 def partner_refund_cases(business):

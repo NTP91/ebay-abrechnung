@@ -56,10 +56,16 @@ def check_workbook(case, blob, rows, rate, recipient):
             case.assertEqual(sheet[f'F{number}'].value, 'Stück')
             case.assertEqual(sheet[f'G{number}'].value, original['eBay_Netto'])
             case.assertEqual(sheet[f'C{number}'].value, original['Angebotstitel'])
-            # Identical Zusatztext schema for sales and refunds alike: eBay-Bestellnummer/SKU/Payout only.
-            expected_extra=('eBay-Bestellnummer: '+original['Bestellnummer']+'\nSKU: '+original['SKU']
-                             +'\nPayout: '+str(original['Auszahlung Nr.']))
-            case.assertEqual(sheet[f'D{number}'].value, expected_extra)
+            extra=sheet[f'D{number}'].value
+            if kind=='Bestellung':
+                expected_extra=('eBay-Bestellnummer: '+original['Bestellnummer']+'\nSKU: '+original['SKU']
+                                 +'\nPayout: '+str(original['Auszahlung Nr.']))
+                case.assertEqual(extra, expected_extra)
+            else:
+                for label in ('eBay-Bestellnummer:','Bestelldatum:','Refund-Datum:','SKU:',
+                              'Ursprünglicher Payout:','Refund-Payout:','Refund-ID:',
+                              'Refund brutto:','Partnerwirkung:','Status:'):
+                    case.assertIn(label,extra)
             case.assertIsInstance(sheet[f'A{number}'].value, datetime)
             case.assertTrue(sheet[f'C{number}'].alignment.wrap_text)
             case.assertEqual(sheet[f'G{number}'].alignment.horizontal, 'right')
@@ -216,14 +222,13 @@ class PartnerExportTests(unittest.TestCase):
         self.assertEqual(widths_r, widths_g)
         self.assertEqual(rechnung.max_column, gutschriften.max_column)
 
-        # Zusatztext schema: identical shape for a sale row and a refund row alike.
+        # Both tabs share one table layout; refund rows add the required audit metadata.
         sale_extra = rechnung['D15'].value
         refund_extra = gutschriften['D15'].value
-        for extra in (sale_extra, refund_extra):
-            self.assertRegex(extra, r'^eBay-Bestellnummer: .+\nSKU: .+\nPayout: .+$')
-            for forbidden in ('Finance-', 'Refund-ID', 'Partnerabzug', 'Partnerbetrag',
-                              'Auswirkung auf', 'Status:', 'Refund-Payout', 'Refund netto'):
-                self.assertNotIn(forbidden, extra)
+        self.assertRegex(sale_extra, r'^eBay-Bestellnummer: .+\nSKU: .+\nPayout: .+$')
+        for label in ('Bestelldatum:','Refund-Datum:','Ursprünglicher Payout:',
+                      'Refund-Payout:','Refund-ID:','Refund brutto:','Partnerwirkung:','Status:'):
+            self.assertIn(label,refund_extra)
 
 
 @unittest.skipUnless(os.environ.get('EBAY_REAL_MASTER_DIR'),'Set EBAY_REAL_MASTER_DIR for original imported data')

@@ -37,7 +37,7 @@ class PaymentReadinessTests(unittest.TestCase):
         incoming.approve(record['id'],'Offline test')
         return record
 
-    def test_fully_refunded_order_line_never_becomes_partner_payment(self):
+    def test_fully_refunded_group_b_order_is_shown_as_sale_and_refund_but_nets_to_zero(self):
         sale=payout('neutral','sale','26-15088-68974',sku='MAH-00422',amount='1150,00')
         refund=payout('neutral','refund','26-15088-68974',sku='MAH-00422',amount='-1150,00',kind='Rückerstattung')
         for frame in (sale,refund): frame['Artikelnummer']='820045421018'
@@ -50,9 +50,10 @@ class PaymentReadinessTests(unittest.TestCase):
         self.assertFalse(case.partner_ready.any())
         self.assertIn('vollständig neutralisiert / storniert',case[case.Art=='Bestellung'].iloc[0].Bearbeitungsstatus)
         self.assertIn('separat zu klären',case[case.Art=='Erstattung'].iloc[0].Bearbeitungsstatus)
-        self.assertTrue(studio_view.partner_rows(rows).empty)
-        with self.assertRaisesRegex(ValueError,'neutralisierte'):
-            prepare_partner_export(case[case.Art=='Bestellung'])
+        partner_rows=studio_view.partner_rows(rows)
+        self.assertEqual(partner_rows.Art.tolist(),['Bestellung','Erstattung'])
+        model=prepare_partner_export(partner_rows)
+        self.assertEqual(model['totals']['Rechnung']['gross']+model['totals']['Gutschriften']['gross'],0)
         with self.assertRaisesRegex(ValueError,'Keine Gruppe-B-Bestellungen'):
             core.build_invoice_payload(core.load_master_data(),'neutral','contact',True)
 
