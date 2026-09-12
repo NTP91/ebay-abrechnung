@@ -226,18 +226,33 @@ def invoice_history():
 
 
 def evelyn_overview(business, eligible, invoices):
-    """Disjoint read-only buckets for the next Group-B Evelyn settlement."""
+    """Disjoint read-only buckets for the next Group-B Evelyn settlement.
+
+    Refunds are matched automatically to their order line (core.refund_offset).
+    A pending position that a matching refund has fully cancelled before any
+    Evelyn payment carries no open claim and is dropped from this run; a
+    partial refund reduces its amount instead. Positions already transferred
+    to Lexware (bound) are never changed retroactively - a refund arriving
+    after payment only surfaces as a separate 'refund_cases' entry for manual
+    follow-up (repayment/credit note), leaving history untouched.
+    """
     if business.empty or not {'Gruppe','Art','Erlös_Brutto','closed_at','Lexware_uebertragen','position_key'}.issubset(business.columns):
         empty = business.iloc[0:0].copy()
         return {'bound':empty, 'ready':empty, 'review':empty, 'held':empty,
                 'new_ready':empty, 'new_review':empty, 'new_held':empty,
-                'prior_held':empty, 'new_payouts':[], 'total':Decimal(0)}
+                'prior_held':empty, 'refund_cases':empty, 'new_payouts':[], 'total':Decimal(0)}
     group_b = business[
         (business.Gruppe == 'Gruppe B') & (business.Art == 'Bestellung')
         & (business['Erlös_Brutto'] > 0) & ~business.get('Neutralisiert',False)
     ].copy()
     bound = group_b[group_b.Lexware_uebertragen].copy()
-    pending = group_b[~group_b.Lexware_uebertragen & ~group_b.closed_at.astype(bool)].copy()
+    erstattet_bound = bound.get('Erstattet_Brutto')
+    if erstattet_bound is None or bound.empty:
+        refund_cases = bound.iloc[0:0].copy()
+    else:
+        refund_cases = bound[erstattet_bound.map(lambda value: Decimal(str(value)) < Decimal('0.00'))].copy()
+    pending_all = group_b[~group_b.Lexware_uebertragen & ~group_b.closed_at.astype(bool)].copy()
+    pending = core.apply_open_refunds(pending_all)
     held_mask = api_holds.mask(pending)
     held = pending[held_mask].copy()
     eligible_keys = set(eligible.position_key) if not eligible.empty else set()
@@ -256,4 +271,4 @@ def evelyn_overview(business, eligible, invoices):
         total = prepare_partner_export(new_ready, statement_type='group_b_evelyn')['totals']['Rechnung']['gross']
     return {'bound':bound, 'ready':ready, 'review':review, 'held':held,
             'new_ready':new_ready, 'new_review':new_review, 'new_held':new_held,
-            'prior_held':prior_held, 'new_payouts':new_payouts, 'total':total}
+            'prior_held':prior_held, 'refund_cases':refund_cases, 'new_payouts':new_payouts, 'total':total}

@@ -1,9 +1,11 @@
 import tempfile
 import unittest
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import Mock, patch
 import core
 import studio_view
+import position_workflow as workflow
 from test_recovery import payout
 
 
@@ -110,6 +112,93 @@ class StudioViewTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             core.create_invoice_draft('fake',['p2','p3'],True,self.http,expected_fingerprints={'p2':'changed'})
         self.http.post.assert_not_called()
+
+
+class EvelynRefundOffsetTests(unittest.TestCase):
+    """Automatic refund netting for the Group-B Evelyn selection (studio_view.evelyn_overview)."""
+
+    def setUp(self):
+        temp=tempfile.TemporaryDirectory(); self.addCleanup(temp.cleanup)
+        self.root=Path(temp.name)
+        paths=patch.multiple(core,PAYOUTS_DB_PATH=str(self.root/'Master_Payouts.csv'),ORDERS_DB_PATH=str(self.root/'Master_Orders.csv'))
+        paths.start(); self.addCleanup(paths.stop)
+        network=patch('requests.sessions.Session.request',side_effect=AssertionError('Live HTTP forbidden'))
+        network.start(); self.addCleanup(network.stop)
+
+    def seed(self,frames,payout_id='p1',invoice=False):
+        for frame in frames:
+            frame['Transaktionsbetrag (inkl. Kosten)']=frame['Betrag abzügl. Kosten']
+            frame['Auszahlungsdatum']='03.09.2026'; frame['Auszahlungsstatus']='Betrag überwiesen'
+        core.import_reports(frames,core.ORDERS_DB_PATH,'orders')
+        core.import_reports(frames,core.PAYOUTS_DB_PATH,'payout')
+        core.sync_status(core.load_master_data())
+        if invoice:
+            with core.ledger() as db:
+                db.execute("UPDATE payouts SET attempt='created',invoice_id='draft' WHERE id=?",(payout_id,))
+                db.commit()
+
+    def overview(self):
+        business=workflow.positions()
+        master=core.load_master_data()
+        eligible=studio_view.eligible_rows(master,core.sync_status(master))
+        return studio_view.evelyn_overview(business,eligible,{})
+
+    def test_fully_refunded_pending_position_drops_out_of_the_evelyn_run(self):
+        sale=payout('p1','sale-full','order-full',sku='NB / 1',amount='119,00')
+        refund=payout('p1','refund-full','order-full',sku='NB / 1',amount='-119,00',kind='Rückerstattung')
+        for frame in (sale,refund): frame['Artikelnummer']='item-full'
+        self.seed([sale,refund])
+        overview=self.overview()
+        for bucket in ('ready','review','held','new_ready','new_review','new_held'):
+            self.assertNotIn('order-full',overview[bucket].Bestellnummer.tolist(),bucket)
+        self.assertTrue(overview['refund_cases'].empty)
+        # The refund row itself is preserved as its own movement, just outside the sale buckets.
+        business=workflow.positions()
+        self.assertIn('order-full',business.loc[business.Art=='Erstattung','Bestellnummer'].tolist())
+
+    def test_partial_refund_reduces_open_amount_but_keeps_original_for_payout_matching(self):
+        sale=payout('p1','sale-partial','order-partial',sku='NB / 1',amount='100,00')
+        refund=payout('p1','refund-partial','order-partial',sku='NB / 1',amount='-40,00',kind='Rückerstattung')
+        for frame in (sale,refund): frame['Artikelnummer']='item-partial'
+        self.seed([sale,refund])
+        business=workflow.positions()
+        original=business[(business.Bestellnummer=='order-partial')&(business.Art=='Bestellung')].iloc[0]
+        self.assertEqual(round(float(original.Erlös_Brutto),2),100.0)
+        overview=self.overview()
+        row=overview['new_ready'][overview['new_ready'].Bestellnummer=='order-partial'].iloc[0]
+        self.assertEqual(round(float(row.Erlös_Brutto),2),60.0)
+        self.assertEqual(round(float(row.Erlös_Brutto_Original),2),100.0)
+        ratio_netto=float(row.eBay_Netto)/float(original.eBay_Netto)
+        self.assertAlmostEqual(ratio_netto,0.6,places=6)
+        # Payout matching must still resolve against the true, unreduced report amount.
+        from partner_export import prepare_partner_export
+        prepared=prepare_partner_export(overview['new_ready'],statement_type='group_b_evelyn')
+        self.assertEqual(len(prepared['Rechnung']),1)
+        self.assertGreater(overview['total'],Decimal('0'))
+
+    def test_refund_after_lexware_transfer_leaves_bound_row_untouched_and_opens_a_credit_case(self):
+        sale=payout('p1','sale-bound','order-bound',sku='NB / 1',amount='80,00')
+        refund=payout('p1','refund-bound','order-bound',sku='NB / 1',amount='-80,00',kind='Rückerstattung')
+        for frame in (sale,refund): frame['Artikelnummer']='item-bound'
+        self.seed([sale,refund],invoice=True)
+        overview=self.overview()
+        self.assertEqual(overview['bound'].Bestellnummer.tolist(),['order-bound'])
+        self.assertEqual(round(float(overview['bound'].iloc[0].Erlös_Brutto),2),80.0)
+        self.assertEqual(overview['refund_cases'].Bestellnummer.tolist(),['order-bound'])
+        self.assertEqual(round(float(overview['refund_cases'].iloc[0].Erstattet_Brutto),2),-80.0)
+        self.assertTrue(overview['ready'].empty)
+        self.assertTrue(overview['review'].empty)
+
+    def test_refund_cannot_apply_twice_when_two_sale_rows_share_the_same_order_line(self):
+        first=payout('p1','sale-a','order-ambiguous',sku='NB / 1',amount='50,00')
+        second=payout('p1','sale-b','order-ambiguous',sku='NB / 1',amount='50,00')
+        refund=payout('p1','refund-ambiguous','order-ambiguous',sku='NB / 1',amount='-50,00',kind='Rückerstattung')
+        for frame in (first,second,refund): frame['Artikelnummer']='item-ambiguous'
+        self.seed([first,second,refund])
+        overview=self.overview()
+        untouched=overview['ready'][overview['ready'].Bestellnummer=='order-ambiguous']
+        self.assertEqual(len(untouched),2)
+        self.assertTrue((untouched['Erlös_Brutto'].round(2)==50.0).all())
 
 
 if __name__=='__main__':

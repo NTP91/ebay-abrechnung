@@ -663,6 +663,10 @@ with group_b:
         if not evelyn['prior_held'].empty:
             with st.expander(f"Ältere Hold-Positionen · {len(evelyn['prior_held'])} · nicht neu"):
                 st.dataframe(evelyn['prior_held'][['Auszahlung Nr.','Bestellnummer','Partner','SKU','Erlös_Brutto','API_Hold_Hinweis']],hide_index=True,use_container_width=True)
+        if not evelyn['refund_cases'].empty:
+            with st.expander(f"Rückzahlungs-/Gutschriftfälle · {len(evelyn['refund_cases'])} bereits übertragene Positionen mit späterer Erstattung"):
+                st.caption('Bereits an Lexware übertragene Positionen bleiben unverändert; hier nur zur separaten Klärung mit Evelyn.')
+                st.dataframe(evelyn['refund_cases'][['Auszahlung Nr.','Bestellnummer','Partner','SKU','Erlös_Brutto','Erstattet_Brutto']],hide_index=True,use_container_width=True)
 
         with st.expander(f'Historie · {len(invoices)} Evelyn-Belege',expanded=False):
             st.markdown('**Bereits fakturiert**')

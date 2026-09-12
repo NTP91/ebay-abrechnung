@@ -30,6 +30,8 @@ def positions(master=None, states=None):
     transport = {r.Auszahlung: r for r in states.itertuples()}
     result = master.copy()
     result['Neutralisiert'] = core.neutralized_mask(result)
+    result['Erstattet_Brutto'] = core.refund_offset(result)
+    result['Offen_Brutto'] = core.open_gross(result)
     result['position_key'] = result.apply(position_key, axis=1)
     if result.loc[result.Art != 'Gebühr', 'position_key'].duplicated().any():
         raise ValueError('Positionsstatus benötigt eindeutige Transaktionsidentitäten.')

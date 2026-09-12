@@ -130,7 +130,7 @@ def prepare_partner_export(rows, payouts=None, orders=None, statement_type='part
         candidates = payouts
         for key in ('Auszahlung Nr.', 'Bestellnummer', 'Transaktionsnummer', 'Artikelnummer'):
             candidates = candidates[candidates[key] == row[key]]
-        base = Decimal(str(row['Erlös_Brutto']))
+        base = Decimal(str(row.get('Erlös_Brutto_Original', row['Erlös_Brutto'])))
         candidates = candidates[candidates['Betrag abzügl. Kosten'].map(core.parse_money) == base]
         metadata = set()
         for _, raw in candidates.iterrows():

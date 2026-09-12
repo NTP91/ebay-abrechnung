@@ -66,6 +66,74 @@ def neutralized_mask(rows):
     return result
 
 
+def refund_offset(rows):
+    """Automatic per-order-line refund netting, independent of manual neutralized_orders confirmation.
+
+    Each Erstattung row is matched to at most one Bestellung row (same
+    Bestellnummer/Artikelnummer/SKU/Partner), so a refund can never reduce
+    more than one open claim. Ambiguous groups (more than one sale row) are
+    left unmatched rather than guessed.
+    """
+    zero = Decimal('0.00')
+    result = pd.Series(zero, index=rows.index, dtype=object)
+    keys = ['Bestellnummer', 'Artikelnummer', 'SKU', 'Partner']
+    required = set(keys + ['Art', 'Erlös_Brutto'])
+    if rows.empty or not required.issubset(rows.columns):
+        return result
+    eligible = rows['Art'].isin(['Bestellung', 'Erstattung'])
+    eligible &= rows[keys].apply(lambda column: column.map(clean).astype(bool)).all(axis=1)
+    for _, block in rows.loc[eligible].groupby(keys, dropna=False):
+        sale = block[block['Art'] == 'Bestellung']
+        refunds = block[block['Art'] == 'Erstattung']
+        if len(sale) != 1 or refunds.empty:
+            continue
+        total = sum((Decimal(str(value)).quantize(Decimal('.01')) for value in refunds['Erlös_Brutto']), zero)
+        result.loc[sale.index] = total
+    return result
+
+
+def open_gross(rows):
+    """Erlös_Brutto still open per Bestellung row after linked refunds; never negative."""
+    if rows.empty or 'Erlös_Brutto' not in rows.columns:
+        return pd.Series(dtype=object)
+    gross = rows['Erlös_Brutto'].map(lambda value: Decimal(str(value)).quantize(Decimal('.01')))
+    return (gross + refund_offset(rows)).clip(lower=Decimal('0.00'))
+
+
+def apply_open_refunds(rows):
+    """Reduce Bestellung rows to their still-open amount; drop fully refunded ones.
+
+    Refund rows themselves are never touched or removed - they remain their
+    own movement. A fully refunded row (Offen_Brutto == 0) has no open claim
+    left and is dropped from the returned frame. A partially refunded row
+    keeps its true original amount in Erlös_Brutto_Original (so payout
+    matching against the raw report still finds the real transaction) while
+    Erlös_Brutto/eBay_Netto are scaled down to the still-open share.
+    """
+    if rows.empty or 'Offen_Brutto' not in rows.columns:
+        return rows
+    offen = rows['Offen_Brutto']
+    kept = rows.loc[offen > Decimal('0.00')].copy()
+    if kept.empty:
+        return kept
+    refunded = kept.get('Erstattet_Brutto')
+    if refunded is None:
+        return kept
+    partial = refunded.map(lambda value: Decimal(str(value)) < Decimal('0.00'))
+    if partial.any():
+        original = kept.loc[partial, 'Erlös_Brutto'].map(lambda value: Decimal(str(value)))
+        open_amount = kept.loc[partial, 'Offen_Brutto']
+        ratio = open_amount / original
+        kept['eBay_Netto'] = kept['eBay_Netto'].astype(object)
+        kept['Erlös_Brutto'] = kept['Erlös_Brutto'].astype(object)
+        kept['Erlös_Brutto_Original'] = kept['Erlös_Brutto']
+        kept.loc[partial, 'eBay_Netto'] = [
+            Decimal(str(net)) * share for net, share in zip(kept.loc[partial, 'eBay_Netto'], ratio)
+        ]
+        kept.loc[partial, 'Erlös_Brutto'] = open_amount
+    return kept
+
+
 def canonicalize(frame):
     result = frame.copy().fillna('')
     for field, aliases in FIELDS.items():
