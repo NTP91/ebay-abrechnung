@@ -52,8 +52,14 @@ def check_workbook(case, blob, rows, rate, recipient):
             case.assertEqual(sheet[f'F{number}'].value, 'Stück')
             case.assertEqual(sheet[f'G{number}'].value, original['eBay_Netto'])
             case.assertEqual(sheet[f'C{number}'].value, original['Angebotstitel'])
-            case.assertEqual(sheet[f'D{number}'].value,
-                             'eBay-Bestellnummer: '+original['Bestellnummer']+'\nSKU: '+original['SKU'])
+            base_extra='eBay-Bestellnummer: '+original['Bestellnummer']+'\nSKU: '+original['SKU']
+            if kind=='Erstattung':
+                case.assertTrue(sheet[f'D{number}'].value.startswith(base_extra))
+                case.assertIn('Finance-/Refund-ID: '+str(original['Transaktionsnummer']),sheet[f'D{number}'].value)
+                case.assertIn('Refund-Payout: '+str(original['Auszahlung Nr.']),sheet[f'D{number}'].value)
+                case.assertIn('Auswirkung auf offenen Partneranspruch',sheet[f'D{number}'].value)
+            else:
+                case.assertEqual(sheet[f'D{number}'].value, base_extra)
             case.assertIsInstance(sheet[f'A{number}'].value, datetime)
             case.assertTrue(sheet[f'C{number}'].alignment.wrap_text)
             case.assertEqual(sheet[f'G{number}'].alignment.horizontal, 'right')

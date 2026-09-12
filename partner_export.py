@@ -154,8 +154,24 @@ def prepare_partner_export(rows, payouts=None, orders=None, statement_type='part
             'extra': 'eBay-Bestellnummer: ' + str(row['Bestellnummer']) + '\nSKU: ' + str(match['SKU']),
             'net': net, 'ebay': original_gross,
         }
-        result['Gutschriften' if base < 0 or row['Art'] == 'Erstattung' else 'Rechnung'].append(item)
+        is_refund = base < 0 or row['Art'] == 'Erstattung'
+        if is_refund:
+            item['finance_id'] = str(row['Transaktionsnummer'])
+            item['refund_payout'] = payout_id
+        result['Gutschriften' if is_refund else 'Rechnung'].append(item)
     result['totals'] = {name: calculate_sheet(result[name], rate) for name in ('Rechnung', 'Gutschriften')}
+    # Same net-then-VAT formula as every other position (calculate_sheet just
+    # above); this only makes its already-computed pieces individually
+    # traceable per refund - it never recomputes the impact with a different rule.
+    for item in result['Gutschriften']:
+        item['extra'] += (
+            '\nFinance-/Refund-ID: ' + item['finance_id']
+            + '\nRefund-Payout: ' + item['refund_payout']
+            + f"\ntatsächlicher Refund netto: {item['net']:.2f} EUR"
+            + f"\n3,5% Partnerabzug (auf Netto): {item['discount']:.2f} EUR"
+            + f"\nAuswirkung auf offenen Partneranspruch: {item['gross']:.2f} EUR"
+            + '\nStatus: Rückerstattung – mindert den offenen Partneranspruch; eBay-Refund-Bruttobetrag (Spalte K) bleibt unverändert.'
+        )
     return result
 
 

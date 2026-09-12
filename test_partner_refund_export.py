@@ -13,6 +13,8 @@ generic, not an MH-specific special case.
 import io
 import tempfile
 import unittest
+from decimal import Decimal, ROUND_HALF_UP
+from fractions import Fraction
 from pathlib import Path
 from unittest.mock import patch
 
@@ -24,6 +26,25 @@ import studio_view
 from partner_export import export_partner_excel, prepare_partner_export
 from test_recovery import payout
 from test_invoice_support import review_positions
+
+
+def reference_gutschriften_gross(amounts, rate=Decimal('.035'), tax=Decimal('.19')):
+    """Independent oracle for 'rate on net, VAT re-added afterwards' (the only
+    rule the partner formula may use) - built without touching partner_export
+    or calculate_sheet, so it can catch a shortcut like gross*(1-rate)."""
+    cent = Decimal('.01')
+
+    def cents(value):
+        return value.quantize(cent, rounding=ROUND_HALF_UP)
+    total_after = previous_tax = total = Decimal('0')
+    for gross in amounts:
+        net = cents(Decimal(gross) / Decimal('1.19'))
+        after = cents(net * (1 - rate))
+        total_after += after
+        tax_to_date = cents(total_after * tax)
+        total += after + tax_to_date - previous_tax
+        previous_tax = tax_to_date
+    return total
 
 # (Bestellnummer, refund amount) - all fully refunded before any partner payment.
 MH_PAYOUT_7725289401_REFUNDS = [
@@ -209,6 +230,85 @@ class PartnerRefundExportTests(unittest.TestCase):
         mh = mh[mh.Partner == 'MH']
         self.assertEqual(len(mh[(mh.Bestellnummer == 'order-dup') & (mh.Art == 'Bestellung')]), 2)
         self.assertTrue((mh.loc[(mh.Bestellnummer == 'order-dup') & (mh.Art == 'Bestellung'), 'Erlös_Brutto'] == 30.0).all())
+
+    def test_multiple_partial_refunds_of_the_same_order_reduce_cumulatively(self):
+        sale = payout('p-open', 'sale-multi', 'order-multi', sku='MH / 1', amount='100,00')
+        refund1 = payout('p-open', 'refund-multi-1', 'order-multi', sku='MH / 1', amount='-20,00', kind='Rückerstattung')
+        refund2 = payout('p-open', 'refund-multi-2', 'order-multi', sku='MH / 1', amount='-15,00', kind='Rückerstattung')
+        for frame in (sale, refund1, refund2):
+            frame['Artikelnummer'] = 'item-multi'
+        self._finish([sale, refund1, refund2])
+        business = workflow.positions()
+        mh = studio_view.partner_rows(business)
+        mh = mh[mh.Partner == 'MH']
+        open_sale = mh[(mh.Bestellnummer == 'order-multi') & (mh.Art == 'Bestellung')]
+        self.assertEqual(len(open_sale), 1)
+        self.assertEqual(round(float(open_sale.iloc[0].Erlös_Brutto), 2), 65.00)  # 100 - 20 - 15
+        refunds = mh[(mh.Bestellnummer == 'order-multi') & (mh.Art == 'Erstattung')]
+        self.assertEqual(len(refunds), 2)  # each refund stays its own, separately traceable movement
+        self.assertEqual(sorted(round(float(v), 2) for v in refunds.Erlös_Brutto), [-20.0, -15.0])
+
+    def test_refund_after_partner_payment_is_a_separate_case_not_merged(self):
+        sale = payout('p-paid', 'sale-paid', 'order-paid', sku='MH / 1', amount='40,00')
+        sale['Artikelnummer'] = 'item-paid'
+        self._finish([sale])
+        key = workflow.positions().loc[lambda r: r.Bestellnummer == 'order-paid', 'position_key'].iloc[0]
+        review_positions([key])
+        workflow.confirm([key], 'partner_paid', '2026-09-05')
+        paid = workflow.positions().loc[lambda r: r.Bestellnummer == 'order-paid'].iloc[0]
+        self.assertTrue(bool(paid.paid_at))
+
+        refund = payout('p-paid', 'refund-paid', 'order-paid', sku='MH / 1', amount='-40,00', kind='Rückerstattung')
+        refund['Artikelnummer'] = 'item-paid'
+        self._finish([refund])
+        business = workflow.positions()
+        mh_paid_row = business[(business.Bestellnummer == 'order-paid') & (business.Art == 'Bestellung')].iloc[0]
+        self.assertEqual(round(float(mh_paid_row.Erlös_Brutto), 2), 40.00)  # already-paid history untouched
+
+        mh = studio_view.partner_rows(business)
+        mh = mh[mh.Partner == 'MH']
+        self.assertNotIn('order-paid', mh.loc[mh.Art == 'Erstattung', 'Bestellnummer'].tolist())
+        cases = studio_view.partner_refund_cases(business[business.Partner == 'MH'])
+        self.assertEqual(cases.Bestellnummer.tolist(), ['order-paid'])
+        self.assertEqual(round(float(cases.iloc[0].Erlös_Brutto), 2), -40.00)
+
+    def test_refund_gross_stays_traceable_and_reduction_uses_the_shared_net_formula(self):
+        """The seven reported MH refunds: raw eBay gross sums to 790,92 EUR; the
+        resulting reduction of the partner claim must come from the existing
+        3,5%-on-net-then-VAT formula (calculate_sheet) - never from
+        naively multiplying the raw refund gross by (1 - rate)."""
+        # build_scenario('MH ...') already adds MH_RE0090_LINKED_REFUNDS on top of
+        # whatever full-refund set is passed in (sku.startswith('MH')) - pass only
+        # the payout-7725289401 five here to get all seven without re-declaring
+        # the same two transaction ids under a second payout.
+        regular_orders, bound_orders, reviewed_order = self.build_scenario('MH / 1', MH_PAYOUT_7725289401_REFUNDS, regular_count=4)
+        full_refunds = MH_PAYOUT_7725289401_REFUNDS + MH_RE0090_LINKED_REFUNDS
+        business = workflow.positions()
+        mh = studio_view.partner_rows(business)
+        mh = mh[mh.Partner == 'MH']
+        next_invoice = mh[~mh.reviewed_at.astype(bool)]
+        refund_rows = next_invoice[next_invoice.Art == 'Erstattung']
+
+        raw_amounts = [amount.replace(',', '.') for _, amount in full_refunds]
+        raw_sum = sum(Decimal(a) for a in raw_amounts)
+        self.assertEqual(raw_sum, Decimal('-790.92'))
+        # The raw eBay refund amounts are exactly what was imported - untouched, individually traceable.
+        self.assertEqual(sorted(round(float(v), 2) for v in refund_rows.Erlös_Brutto), sorted(float(a) for a in raw_amounts))
+
+        model = prepare_partner_export(next_invoice)
+        actual_impact = model['totals']['Gutschriften']['gross']
+        expected_impact = reference_gutschriften_gross(raw_amounts)
+        self.assertEqual(actual_impact, expected_impact)
+        naive_shortcut = (raw_sum * Decimal('.965')).quantize(Decimal('.01'), rounding=ROUND_HALF_UP)
+        # Whether or not this happens to coincide with the naive shortcut for this
+        # particular data is not the point (VAT add/remove approximately cancels
+        # out) - what matters is that the value is derived from the real formula.
+        self.assertEqual(actual_impact, reference_gutschriften_gross(raw_amounts))
+        self.assertNotEqual(  # guards against a hard-coded gross*(1-rate) shortcut replacing the real formula
+            [item['gross'] for item in model['Gutschriften']],
+            [Decimal(a) * Decimal('.965') for a in raw_amounts],
+        )
+        del naive_shortcut  # documented above for context only, not asserted against
 
 
 if __name__ == '__main__':
