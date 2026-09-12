@@ -265,8 +265,9 @@ def _fill_sheet(xml, model, name):
     final_amount = rechnung_totals['gross'] + gutschriften_totals['gross']
     created_on = datetime.now().strftime('%d.%m.%Y')
     is_refund_sheet = name == 'Gutschriften'
+    title = ('ERSTATTUNGEN / ABZÜGE – ' if is_refund_sheet else 'PARTNERABRECHNUNG – ') + str(model['partner'])
     metadata = {
-        1: {'A': ('ERSTATTUNGEN / ABZÜGE' if is_refund_sheet else 'PARTNERABRECHNUNG – ' + str(model['partner']))},
+        1: {'A': title},
         2: {'A': f'Abrechnungszeitraum: {period} · Erstellt am {created_on}'},
         4: {'A': model['partner'], 'C': model['group'], 'E': model['recipient'], 'G': model['rate'], 'I': TAX},
         6: {'A': model['address'], 'E': ', '.join(payout_ids)},
@@ -276,8 +277,11 @@ def _fill_sheet(xml, model, name):
         8: {},
         10: {'A': None, 'G': None},
         11: {'A': None, 'G': None},
-        12: {'A': f'Reguläre Positionen: {len(model["Rechnung"])}', 'G': f'Erstattungen / Abzüge: {len(model["Gutschriften"])}'},
-        13: {'A': None},
+        12: ({'A': f'Erstattungen: {len(model["Gutschriften"])}',
+              'G': 'Refund brutto: ' + format_euro(gutschriften_totals['ebay'])} if is_refund_sheet
+             else {'A': f'Reguläre Positionen: {len(model["Rechnung"])}', 'G': f'Erstattungen / Abzüge: {len(model["Gutschriften"])}'}),
+        13: ({'A': 'Auswirkung auf Partneranspruch: ' + format_euro(gutschriften_totals['gross'])} if is_refund_sheet
+             else {'A': None}),
     }
     for number in sorted(n for n in prototype if n <= HEADER_ROW):
         row = row_from(number, number, metadata.get(number))
@@ -285,8 +289,8 @@ def _fill_sheet(xml, model, name):
             row.set('ht', str(max(28, 18 * math.ceil(len(', '.join(payout_ids))/90))))
         if number == 4:
             row.set('ht', str(max(30, 17 * math.ceil(len(model['partner'])/35))))
-        if number == 1 and is_refund_sheet is False:
-            row.set('ht', str(max(42, 22 * math.ceil(len(metadata[1]['A'])/45))))
+        if number == 1:
+            row.set('ht', str(max(42, 22 * math.ceil(len(title)/45))))
         row.set('customHeight', '1')
     for offset, item in enumerate(items):
         number = FIRST_ROW + offset
