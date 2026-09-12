@@ -67,10 +67,11 @@ def check_workbook(case, blob, rows, rate, recipient):
                                      +'\nPayout: '+str(original['Auszahlung Nr.']))
                 case.assertEqual(extra, expected_extra)
             elif is_group_b:
-                for label in ('SKU:','Refund-Datum:','Refund-Payout:','Refund-ID:','Refund brutto:'):
+                for label in ('SKU:','Refund-Datum:','Refund-Payout:'):
                     case.assertIn(label,extra)
                 for label in ('eBay-Bestellnummer:','Bestelldatum:','Ursprünglicher Payout:',
-                              'Ursprüngliche Abrechnung:','Partnerwirkung:','Status:'):
+                              'Ursprüngliche Abrechnung:','Refund-ID:','Refund brutto:',
+                              'Partnerwirkung:','Status:'):
                     case.assertNotIn(label,extra)
             else:
                 for label in ('eBay-Bestellnummer:','Bestelldatum:','Refund-Datum:','SKU:',
@@ -262,10 +263,12 @@ class PartnerExportTests(unittest.TestCase):
         sale_extra = rechnung['D15'].value
         refund_extra = gutschriften['D15'].value
         self.assertRegex(sale_extra, r'^SKU: .+\nPayout: .+$')
-        for label in ('SKU:','Refund-Datum:','Refund-Payout:','Refund-ID:','Refund brutto:'):
+        self.assertEqual(refund_extra.count('\n'), 2)  # exactly SKU/Refund-Datum/Refund-Payout
+        for label in ('SKU:','Refund-Datum:','Refund-Payout:'):
             self.assertIn(label,refund_extra)
         for label in ('eBay-Bestellnummer:','Bestelldatum:','Ursprünglicher Payout:',
-                      'Ursprüngliche Abrechnung:','Partnerwirkung:','Status:'):
+                      'Ursprüngliche Abrechnung:','Refund-ID:','Refund brutto:',
+                      'Partnerwirkung:','Status:'):
             self.assertNotIn(label,refund_extra)
 
     def test_group_a_zusatztext_is_unaffected_by_the_group_b_compaction(self):

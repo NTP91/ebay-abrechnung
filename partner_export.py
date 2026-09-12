@@ -236,13 +236,13 @@ def prepare_partner_export(rows, payouts=None, orders=None, statement_type='part
         if group == 'Gruppe B':
             # Bestellnummer/Bestelldatum already have their own columns; internal
             # workflow/status bookkeeping (Ursprüngliche Abrechnung, Status,
-            # Partnerwirkung) stays out of the visible partner export.
+            # Partnerwirkung) stays out of the visible partner export. Refund-ID
+            # and Refund brutto are audit-only - the amount already has its own
+            # column, so they are not repeated in the Zusatztext either.
             item['extra'] = '\n'.join([
                 'SKU: ' + item['extra'].split('SKU: ', 1)[-1],
                 'Refund-Datum: ' + refund_date_text,
                 'Refund-Payout: ' + item['payout_id'],
-                'Refund-ID: ' + (item['refund_id'] or 'nicht angegeben'),
-                'Refund brutto: ' + format_euro(item['ebay']),
             ])
         else:
             order_date_text = item['date'].strftime('%d.%m.%Y') if item['date'] else 'nicht angegeben'
