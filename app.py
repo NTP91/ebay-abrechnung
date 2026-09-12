@@ -76,7 +76,8 @@ def download(label, rows, key, kind='partner'):
             st.caption('Abgeschlossen · in der Historie archiviert; kein erneuter Export.')
             return
         blob = export_partner_excel(rows, statement_type=kind)
-        st.download_button(label, blob, key+'.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', key=key, icon=':material/download:', use_container_width=True)
+        filename=key+('_746fd66' if key=='Partner_Patrick_MH' else '')+'.xlsx'
+        st.download_button(label, blob, filename, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', key=key, icon=':material/download:', use_container_width=True)
     except ValueError as exc:
         st.warning(f'Export benötigt Prüfung: {exc}')
 
