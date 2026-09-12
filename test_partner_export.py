@@ -57,27 +57,18 @@ def check_workbook(case, blob, rows, rate, recipient):
             case.assertEqual(sheet[f'G{number}'].value, original['eBay_Netto'])
             case.assertEqual(sheet[f'C{number}'].value, original['Angebotstitel'])
             extra=sheet[f'D{number}'].value
-            is_group_b = original['Gruppe'] == 'Gruppe B'
+            # Compact Zusatztext for every group: Bestellnummer/Bestelldatum
+            # already have their own columns, so they are never repeated here.
             if kind=='Bestellung':
-                if is_group_b:
-                    # Bestellnummer/Bestelldatum already have their own columns.
-                    expected_extra = 'SKU: '+original['SKU']+'\nPayout: '+str(original['Auszahlung Nr.'])
-                else:
-                    expected_extra=('eBay-Bestellnummer: '+original['Bestellnummer']+'\nSKU: '+original['SKU']
-                                     +'\nPayout: '+str(original['Auszahlung Nr.']))
+                expected_extra = 'SKU: '+original['SKU']+'\nPayout: '+str(original['Auszahlung Nr.'])
                 case.assertEqual(extra, expected_extra)
-            elif is_group_b:
+            else:
                 for label in ('SKU:','Refund-Datum:','Refund-Payout:'):
                     case.assertIn(label,extra)
                 for label in ('eBay-Bestellnummer:','Bestelldatum:','Ursprünglicher Payout:',
                               'Ursprüngliche Abrechnung:','Refund-ID:','Refund brutto:',
                               'Partnerwirkung:','Status:'):
                     case.assertNotIn(label,extra)
-            else:
-                for label in ('eBay-Bestellnummer:','Bestelldatum:','Refund-Datum:','SKU:',
-                              'Ursprünglicher Payout:','Refund-Payout:','Refund-ID:',
-                              'Refund brutto:','Partnerwirkung:','Status:'):
-                    case.assertIn(label,extra)
             case.assertIsInstance(sheet[f'A{number}'].value, datetime)
             case.assertTrue(sheet[f'C{number}'].alignment.wrap_text)
             case.assertEqual(sheet[f'G{number}'].alignment.horizontal, 'right')
@@ -271,19 +262,25 @@ class PartnerExportTests(unittest.TestCase):
                       'Partnerwirkung:','Status:'):
             self.assertNotIn(label,refund_extra)
 
-    def test_group_a_zusatztext_is_unaffected_by_the_group_b_compaction(self):
-        """The Zusatztext compaction (SKU/Payout only for sales, five fields
-        for refunds) is scoped to Group B - Group A's established, unrelated
-        format must stay byte-for-byte the same."""
+    def test_group_a_uses_the_same_compact_export_structure(self):
+        """Group A (PP/BA/MK/001) now uses the identical compact Excel
+        structure as Group B: SKU+Payout for sales, SKU/Refund-Datum/
+        Refund-Payout for refunds, no duplicate Bestellnummer/Bestelldatum,
+        no internal workflow/status/Refund-ID/amount text. Group A's money
+        logic (0,5 % discount, recipient Evelyn) must stay unchanged -
+        check_workbook verifies both the structure and the rate/recipient
+        in one pass, exactly like the equivalent Group B test does."""
         master = self.seed(sku='PP / TEST', refund=True)
-        book = load_workbook(io.BytesIO(export_partner_excel(master)), data_only=True)
+        book = check_workbook(self, export_partner_excel(master), master, Decimal('.005'), 'Evelyn')
         sale_extra = book[DISPLAY_NAMES['Rechnung']]['D15'].value
         refund_extra = book[DISPLAY_NAMES['Gutschriften']]['D15'].value
-        self.assertEqual(sale_extra, 'eBay-Bestellnummer: o1\nSKU: PP / TEST\nPayout: 7700379513')
-        for label in ('eBay-Bestellnummer:','Bestelldatum:','Refund-Datum:','SKU:',
-                      'Ursprünglicher Payout:','Refund-Payout:','Ursprüngliche Abrechnung:',
-                      'Refund-ID:','Refund brutto:','Partnerwirkung:','Status:'):
+        self.assertEqual(sale_extra, 'SKU: PP / TEST\nPayout: 7700379513')
+        for label in ('SKU:','Refund-Datum:','Refund-Payout:'):
             self.assertIn(label,refund_extra)
+        for label in ('eBay-Bestellnummer:','Bestelldatum:','Ursprünglicher Payout:',
+                      'Ursprüngliche Abrechnung:','Refund-ID:','Refund brutto:',
+                      'Partnerwirkung:','Status:'):
+            self.assertNotIn(label,refund_extra)
 
     def test_finale_amount_never_nets_refunds(self):
         """GESAMTABRECHNUNG on the Rechnung sheet is that sheet's own closing
