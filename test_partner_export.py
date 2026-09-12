@@ -57,10 +57,21 @@ def check_workbook(case, blob, rows, rate, recipient):
             case.assertEqual(sheet[f'G{number}'].value, original['eBay_Netto'])
             case.assertEqual(sheet[f'C{number}'].value, original['Angebotstitel'])
             extra=sheet[f'D{number}'].value
+            is_group_b = original['Gruppe'] == 'Gruppe B'
             if kind=='Bestellung':
-                expected_extra=('eBay-Bestellnummer: '+original['Bestellnummer']+'\nSKU: '+original['SKU']
-                                 +'\nPayout: '+str(original['Auszahlung Nr.']))
+                if is_group_b:
+                    # Bestellnummer/Bestelldatum already have their own columns.
+                    expected_extra = 'SKU: '+original['SKU']+'\nPayout: '+str(original['Auszahlung Nr.'])
+                else:
+                    expected_extra=('eBay-Bestellnummer: '+original['Bestellnummer']+'\nSKU: '+original['SKU']
+                                     +'\nPayout: '+str(original['Auszahlung Nr.']))
                 case.assertEqual(extra, expected_extra)
+            elif is_group_b:
+                for label in ('SKU:','Refund-Datum:','Refund-Payout:','Refund-ID:','Refund brutto:'):
+                    case.assertIn(label,extra)
+                for label in ('eBay-Bestellnummer:','Bestelldatum:','Ursprünglicher Payout:',
+                              'Ursprüngliche Abrechnung:','Partnerwirkung:','Status:'):
+                    case.assertNotIn(label,extra)
             else:
                 for label in ('eBay-Bestellnummer:','Bestelldatum:','Refund-Datum:','SKU:',
                               'Ursprünglicher Payout:','Refund-Payout:','Refund-ID:',
@@ -245,12 +256,30 @@ class PartnerExportTests(unittest.TestCase):
         self.assertEqual(widths_r, widths_g)
         self.assertEqual(rechnung.max_column, gutschriften.max_column)
 
-        # Both tabs share one table layout; refund rows add the required audit metadata.
+        # Both tabs share one table layout; refund rows add the required audit
+        # metadata. Group B (this fixture's SKU): compact, no duplicate
+        # Bestellnummer/Bestelldatum, no internal workflow/status fields.
         sale_extra = rechnung['D15'].value
         refund_extra = gutschriften['D15'].value
-        self.assertRegex(sale_extra, r'^eBay-Bestellnummer: .+\nSKU: .+\nPayout: .+$')
-        for label in ('Bestelldatum:','Refund-Datum:','Ursprünglicher Payout:',
-                      'Refund-Payout:','Refund-ID:','Refund brutto:','Partnerwirkung:','Status:'):
+        self.assertRegex(sale_extra, r'^SKU: .+\nPayout: .+$')
+        for label in ('SKU:','Refund-Datum:','Refund-Payout:','Refund-ID:','Refund brutto:'):
+            self.assertIn(label,refund_extra)
+        for label in ('eBay-Bestellnummer:','Bestelldatum:','Ursprünglicher Payout:',
+                      'Ursprüngliche Abrechnung:','Partnerwirkung:','Status:'):
+            self.assertNotIn(label,refund_extra)
+
+    def test_group_a_zusatztext_is_unaffected_by_the_group_b_compaction(self):
+        """The Zusatztext compaction (SKU/Payout only for sales, five fields
+        for refunds) is scoped to Group B - Group A's established, unrelated
+        format must stay byte-for-byte the same."""
+        master = self.seed(sku='PP / TEST', refund=True)
+        book = load_workbook(io.BytesIO(export_partner_excel(master)), data_only=True)
+        sale_extra = book[DISPLAY_NAMES['Rechnung']]['D15'].value
+        refund_extra = book[DISPLAY_NAMES['Gutschriften']]['D15'].value
+        self.assertEqual(sale_extra, 'eBay-Bestellnummer: o1\nSKU: PP / TEST\nPayout: 7700379513')
+        for label in ('eBay-Bestellnummer:','Bestelldatum:','Refund-Datum:','SKU:',
+                      'Ursprünglicher Payout:','Refund-Payout:','Ursprüngliche Abrechnung:',
+                      'Refund-ID:','Refund brutto:','Partnerwirkung:','Status:'):
             self.assertIn(label,refund_extra)
 
     def test_finale_amount_never_nets_refunds(self):

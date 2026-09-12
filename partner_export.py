@@ -198,7 +198,11 @@ def prepare_partner_export(rows, payouts=None, orders=None, statement_type='part
         item = {
             'date': report_date(order_date), 'order': str(row['Bestellnummer']),
             'article': str(match['Angebotstitel']),
-            'extra': 'eBay-Bestellnummer: ' + str(row['Bestellnummer']) + '\nSKU: ' + str(match['SKU']),
+            # Group B: Bestellnummer/Bestelldatum already have their own columns,
+            # so the compact Zusatztext never repeats them. Group A keeps the
+            # established, unrelated format untouched.
+            'extra': ('SKU: ' + str(match['SKU']) if group == 'Gruppe B'
+                     else 'eBay-Bestellnummer: ' + str(row['Bestellnummer']) + '\nSKU: ' + str(match['SKU'])),
             'net': net, 'ebay': original_gross,
         }
         is_refund = base < 0 or row['Art'] == 'Erstattung'
@@ -228,21 +232,33 @@ def prepare_partner_export(rows, payouts=None, orders=None, statement_type='part
     for item in result['Rechnung']:
         item['extra'] += '\nPayout: ' + item['payout_id']
     for item in result['Gutschriften']:
-        order_date_text = item['date'].strftime('%d.%m.%Y') if item['date'] else 'nicht angegeben'
         refund_date_text = item['refund_date'].strftime('%d.%m.%Y') if item.get('refund_date') else 'nicht angegeben'
-        item['extra'] = '\n'.join([
-            'eBay-Bestellnummer: ' + item['order'],
-            'Bestelldatum: ' + order_date_text,
-            'Refund-Datum: ' + refund_date_text,
-            'SKU: ' + item['extra'].split('\nSKU: ', 1)[-1],
-            'Ursprünglicher Payout: ' + item['original_payout'],
-            'Refund-Payout: ' + item['payout_id'],
-            'Ursprüngliche Abrechnung: ' + item['original_invoice'],
-            'Refund-ID: ' + (item['refund_id'] or 'nicht angegeben'),
-            'Refund brutto: ' + format_euro(item['ebay']),
-            'Partnerwirkung: ' + format_euro(item['gross']),
-            'Status: ' + item['refund_status'],
-        ])
+        if group == 'Gruppe B':
+            # Bestellnummer/Bestelldatum already have their own columns; internal
+            # workflow/status bookkeeping (Ursprüngliche Abrechnung, Status,
+            # Partnerwirkung) stays out of the visible partner export.
+            item['extra'] = '\n'.join([
+                'SKU: ' + item['extra'].split('SKU: ', 1)[-1],
+                'Refund-Datum: ' + refund_date_text,
+                'Refund-Payout: ' + item['payout_id'],
+                'Refund-ID: ' + (item['refund_id'] or 'nicht angegeben'),
+                'Refund brutto: ' + format_euro(item['ebay']),
+            ])
+        else:
+            order_date_text = item['date'].strftime('%d.%m.%Y') if item['date'] else 'nicht angegeben'
+            item['extra'] = '\n'.join([
+                'eBay-Bestellnummer: ' + item['order'],
+                'Bestelldatum: ' + order_date_text,
+                'Refund-Datum: ' + refund_date_text,
+                'SKU: ' + item['extra'].split('\nSKU: ', 1)[-1],
+                'Ursprünglicher Payout: ' + item['original_payout'],
+                'Refund-Payout: ' + item['payout_id'],
+                'Ursprüngliche Abrechnung: ' + item['original_invoice'],
+                'Refund-ID: ' + (item['refund_id'] or 'nicht angegeben'),
+                'Refund brutto: ' + format_euro(item['ebay']),
+                'Partnerwirkung: ' + format_euro(item['gross']),
+                'Status: ' + item['refund_status'],
+            ])
     return result
 
 
