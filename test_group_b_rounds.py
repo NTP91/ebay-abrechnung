@@ -2,12 +2,10 @@ import json
 import sqlite3
 import tempfile
 import unittest
-from contextlib import closing
+from contextlib import closing, contextmanager
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
-
-import sqlite3
 
 import api_holds
 import core
@@ -268,6 +266,50 @@ class GroupBRoundTests(unittest.TestCase):
 
         self.assertEqual(round_total,download_total)
         self.assertGreater(round_total,Decimal('0.00'))
+
+    def test_bootstrap_initializes_missing_round_tables_on_its_own_connection(self):
+        """bootstrap() must not rely on its caller (core.ledger()) having
+        already created the schema - it has to safeguard itself on whatever
+        connection it actually receives, exactly like link_partner_invoice()
+        already does. This bypasses core.ledger() entirely and hands
+        bootstrap() a bare connection that only has the tables that predate
+        group_b_rounds (payouts, partner_invoice_positions), reproducing an
+        old database without the round tables regardless of which ledger()
+        branch (local file or Supabase) would normally supply it.
+        """
+        bare = sqlite3.connect(':memory:')
+        bare.row_factory = sqlite3.Row
+        bare.execute('CREATE TABLE payouts (id TEXT PRIMARY KEY, status TEXT NOT NULL, '
+                     'fingerprint TEXT, invoice_id TEXT, attempt TEXT, snapshot TEXT)')
+        bare.execute('CREATE TABLE partner_invoice_positions (position_key TEXT PRIMARY KEY, invoice_id TEXT)')
+        with core.ledger() as real_db:
+            for row in real_db.execute('SELECT * FROM payouts'):
+                bare.execute('INSERT INTO payouts VALUES(?,?,?,?,?,?)', tuple(row))
+        bare.commit()
+        existing = {row[0] for row in bare.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        self.assertNotIn('group_b_rounds', existing)
+
+        @contextmanager
+        def bare_ledger():
+            try:
+                yield bare
+            except Exception:
+                bare.rollback(); raise
+
+        with patch.object(core, 'ledger', bare_ledger):
+            rounds.bootstrap(self.business, self.current, self.invoices)  # must not raise
+            rounds.bootstrap(self.business, self.current, self.invoices)  # second call: no duplicates
+
+        tables = {row[0] for row in bare.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        for name in ('group_b_rounds', 'group_b_round_positions', 'group_b_round_refunds', 'partner_invoice_rounds'):
+            self.assertIn(name, tables)
+        saved = [row['id'] for row in bare.execute('SELECT * FROM group_b_rounds ORDER BY id')]
+        self.assertEqual(saved, [rounds.ROUND_ONE, rounds.ROUND_TWO])
+        positions = [dict(row) for row in bare.execute('SELECT * FROM group_b_round_positions')]
+        self.assertEqual(len(positions), len({row['position_key'] for row in positions}))
+        refund_rows = [dict(row) for row in bare.execute('SELECT * FROM group_b_round_refunds')]
+        self.assertEqual(len(refund_rows), len({row['refund_key'] for row in refund_rows}))
+        bare.close()
 
 
 class SupabaseLedgerSchemaTests(unittest.TestCase):

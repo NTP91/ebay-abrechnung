@@ -108,6 +108,7 @@ def bootstrap(business, current_ready, invoices):
     if business.empty:
         return
     with core.ledger() as db:
+        initialize(db)
         db.execute('BEGIN IMMEDIATE')
         invoice_id, history, snapshot, r1 = _re0090(db, business, invoices)
         r1_keys = set(r1.position_key)
