@@ -1,6 +1,7 @@
 import streamlit as st
 import hashlib
 import importlib
+import pandas as pd
 from pathlib import Path
 import core
 import api_holds
@@ -10,6 +11,7 @@ import studio_view
 import position_workflow
 import draft_correction
 import partner_invoices
+import group_b_rounds
 import payout_reconciliation
 import trust_risk_ui
 import supabase_store
@@ -585,6 +587,48 @@ with group_b:
         studio_view=importlib.reload(studio_view)
         invoices=studio_view.invoice_history()
         evelyn=studio_view.evelyn_overview(business,b_ready,invoices)
+    has_re0090=any(item.get('Belegnummer')=='RE0090' and not item.get('discarded') for item in invoices.values())
+    if has_re0090:
+        group_b_rounds.bootstrap(business,evelyn['new_ready'],invoices)
+    round_view=group_b_rounds.overview(business)
+    if round_view['rounds']:
+      with st.container(border=True):
+        st.subheader('Gruppe-B-Abrechnungsrunden')
+        st.caption('Evelyn-Belege, Partneransprüche und spätere Korrekturen bleiben dauerhaft getrennten Ursprungsrunden zugeordnet.')
+        for settlement in round_view['rounds']:
+            parts=[]
+            evelyn_status=('Evelyn bezahlt' if settlement['evelyn_paid'] else
+                           'Evelyn offen · '+euros(settlement['evelyn_invoiced']))
+            for partner in settlement['partners']:
+                if partner['paid'] and partner['open'] <= 0:
+                    label=f"{partner['partner']} {euros(partner['paid'])} bezahlt"
+                else:
+                    label=f"{partner['partner']} {euros(max(partner['open'],0))} offen"
+                if partner['prior_corrections']:
+                    label+=f" · Alt-Korrektur {euros(partner['prior_corrections'])}"
+                parts.append(label)
+            st.markdown(f"**{settlement['round_id']}** | {evelyn_status} | "+' | '.join(parts))
+            st.caption('Partneransprüche '+euros(settlement['partner_claims'])+
+                       ' · Partner bezahlt '+euros(settlement['partner_paid'])+
+                       ' · Partner offen/reserviert '+euros(settlement['partner_open'])+
+                       ' · aus Evelyn-Zahlung reserviert '+euros(settlement['reserve_from_evelyn'])+
+                       ' · Patrick-Marge rechnerisch '+euros(settlement['patrick_margin'])+
+                       ' · Korrekturen '+euros(settlement['corrections'])+
+                       f" · Holds {settlement['holds']} / bezahlt gedeckt "+euros(settlement['funded_hold_reserve'])+
+                       ' / noch nicht fakturiert '+euros(settlement['unfunded_hold_reserve']))
+        if not round_view['unassigned_holds'].empty:
+            st.warning(f"{len(round_view['unassigned_holds'])} ungeklärte Hold-/Korrekturpositionen sind keiner abgeschlossenen Runde zugeschlagen und keine freie Patrick-Marge.")
+        with st.expander('Gesamtsicht je Partner',expanded=False):
+            partner_totals=[]
+            for partner, rows_for_partner in pd.DataFrame(round_view['partners']).groupby('partner') if round_view['partners'] else []:
+                partner_totals.append({'Partner':partner,
+                    'Positiver Anspruch':sum(rows_for_partner.positive),
+                    'Refunds/Korrekturen':sum(rows_for_partner.corrections),
+                    'Bereits bezahlt':sum(rows_for_partner.paid),
+                    'Noch offen':sum(rows_for_partner.open),
+                    'Aktuell zahlbar':sum(rows_for_partner.open)})
+            if partner_totals:
+                st.dataframe(pd.DataFrame(partner_totals),hide_index=True,use_container_width=True)
     transferred_rows=evelyn['bound']
     with st.container(border=True):
         st.subheader('Partner → Patrick')

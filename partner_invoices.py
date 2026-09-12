@@ -242,6 +242,8 @@ def authorize_review(db, invoice_id, chosen, actor, reason, override_confirmed):
     record.update(approved_at=now(),approved_by=actor.strip(),approval_mode='manual_override' if manual else 'automatic_match',override_reason=reason.strip() if manual else '')
     db.execute('UPDATE partner_invoices SET record=? WHERE id=?',(json.dumps(record,ensure_ascii=False),invoice_id))
     for key in expected: db.execute('INSERT INTO partner_invoice_positions VALUES(?,?)',(key,invoice_id))
+    import group_b_rounds
+    group_b_rounds.link_partner_invoice(db, invoice_id, chosen)
     core.audit(db,'',f'Eingangsrechnung {invoice_id} freigegeben: {record["approval_mode"]}; durch {actor.strip()}; Begründung {record["override_reason"]}')
 
 

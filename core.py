@@ -626,6 +626,8 @@ def ledger():
             connection.execute('CREATE TABLE IF NOT EXISTS discarded_invoices (invoice_id TEXT PRIMARY KEY, label TEXT, discarded_at TEXT, snapshot TEXT)')
             import invoice_store
             invoice_store.initialize(connection, path.parent)
+            import group_b_rounds
+            group_b_rounds.initialize(connection)
             invoice_store_ready = True
             if correction_guard.exists():
                 for saved in json.loads(correction_guard.read_text(encoding='utf-8')):
