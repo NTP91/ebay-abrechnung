@@ -198,9 +198,10 @@ def prepare_partner_export(rows, payouts=None, orders=None, statement_type='part
         item = {
             'date': report_date(order_date), 'order': str(row['Bestellnummer']),
             'article': str(match['Angebotstitel']),
-            # Bestellnummer/Bestelldatum already have their own columns, so the
-            # compact Zusatztext never repeats them - for every group.
-            'extra': 'SKU: ' + str(match['SKU']),
+            # Bestellnummer is deliberately repeated here (own column too):
+            # every export position must be independently verifiable against
+            # eBay order and payout from the Zusatztext alone.
+            'extra': 'eBay-Bestellnummer: ' + str(row['Bestellnummer']) + '\nSKU: ' + str(match['SKU']),
             'net': net, 'ebay': original_gross,
         }
         is_refund = base < 0 or row['Art'] == 'Erstattung'
@@ -222,12 +223,13 @@ def prepare_partner_export(rows, payouts=None, orders=None, statement_type='part
     for item in result['Rechnung']:
         item['extra'] += '\nPayout: ' + item['payout_id']
     for item in result['Gutschriften']:
-        # Bestellnummer/Bestelldatum already have their own columns; internal
-        # workflow/status bookkeeping and the amount (already its own column)
-        # stay out of the visible partner export - for every group.
+        # Bestellnummer is deliberately repeated (see above); Bestelldatum and
+        # internal workflow/status/amount bookkeeping stay out of the visible
+        # partner export - for every group.
         refund_date_text = item['refund_date'].strftime('%d.%m.%Y') if item.get('refund_date') else 'nicht angegeben'
         item['extra'] = '\n'.join([
-            'SKU: ' + item['extra'].split('SKU: ', 1)[-1],
+            'eBay-Bestellnummer: ' + item['order'],
+            'SKU: ' + item['extra'].split('\nSKU: ', 1)[-1],
             'Refund-Datum: ' + refund_date_text,
             'Refund-Payout: ' + item['payout_id'],
         ])

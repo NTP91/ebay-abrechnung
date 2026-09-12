@@ -203,12 +203,12 @@ class PartnerRefundExportTests(unittest.TestCase):
         gutschrift_rows = list(gutschriften.iter_rows(min_row=15, max_row=14 + len(expected_refunds)))
         self.assertEqual({row[1].value for row in gutschrift_rows}, expected_refunds)
         refund_text='\n'.join(str(row[3].value) for row in gutschrift_rows)
-        # Compact Zusatztext: no duplicate Bestellnummer/Bestelldatum (own
-        # columns already), no internal workflow/status bookkeeping, and no
-        # Refund-ID/Refund brutto (the amount already has its own column).
-        for label in ('SKU:','Refund-Datum:','Refund-Payout:'):
+        # Zusatztext: Bestellnummer deliberately repeated (own column too);
+        # no duplicate Bestelldatum, no internal workflow/status bookkeeping,
+        # no Refund-ID/Refund brutto (the amount already has its own column).
+        for label in ('eBay-Bestellnummer:','SKU:','Refund-Datum:','Refund-Payout:'):
             self.assertIn(label,refund_text)
-        for label in ('eBay-Bestellnummer:','Bestelldatum:','Ursprünglicher Payout:',
+        for label in ('Bestelldatum:','Ursprünglicher Payout:',
                       'Ursprüngliche Abrechnung:','Refund-ID:','Refund brutto:',
                       'Partnerwirkung:','Status:'):
             self.assertNotIn(label,refund_text)

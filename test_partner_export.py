@@ -57,15 +57,18 @@ def check_workbook(case, blob, rows, rate, recipient):
             case.assertEqual(sheet[f'G{number}'].value, original['eBay_Netto'])
             case.assertEqual(sheet[f'C{number}'].value, original['Angebotstitel'])
             extra=sheet[f'D{number}'].value
-            # Compact Zusatztext for every group: Bestellnummer/Bestelldatum
-            # already have their own columns, so they are never repeated here.
+            # Zusatztext for every group: Bestellnummer is deliberately
+            # repeated (own column too, for independent verifiability);
+            # Bestelldatum and internal workflow/status/amount bookkeeping
+            # are not.
             if kind=='Bestellung':
-                expected_extra = 'SKU: '+original['SKU']+'\nPayout: '+str(original['Auszahlung Nr.'])
+                expected_extra = ('eBay-Bestellnummer: '+original['Bestellnummer']+'\nSKU: '+original['SKU']
+                                  +'\nPayout: '+str(original['Auszahlung Nr.']))
                 case.assertEqual(extra, expected_extra)
             else:
-                for label in ('SKU:','Refund-Datum:','Refund-Payout:'):
+                for label in ('eBay-Bestellnummer:','SKU:','Refund-Datum:','Refund-Payout:'):
                     case.assertIn(label,extra)
-                for label in ('eBay-Bestellnummer:','Bestelldatum:','Ursprünglicher Payout:',
+                for label in ('Bestelldatum:','Ursprünglicher Payout:',
                               'Ursprüngliche Abrechnung:','Refund-ID:','Refund brutto:',
                               'Partnerwirkung:','Status:'):
                     case.assertNotIn(label,extra)
@@ -249,35 +252,36 @@ class PartnerExportTests(unittest.TestCase):
         self.assertEqual(rechnung.max_column, gutschriften.max_column)
 
         # Both tabs share one table layout; refund rows add the required audit
-        # metadata. Group B (this fixture's SKU): compact, no duplicate
-        # Bestellnummer/Bestelldatum, no internal workflow/status fields.
+        # metadata. Group B (this fixture's SKU): Bestellnummer deliberately
+        # repeated, no Bestelldatum/internal workflow/status/amount fields.
         sale_extra = rechnung['D15'].value
         refund_extra = gutschriften['D15'].value
-        self.assertRegex(sale_extra, r'^SKU: .+\nPayout: .+$')
-        self.assertEqual(refund_extra.count('\n'), 2)  # exactly SKU/Refund-Datum/Refund-Payout
-        for label in ('SKU:','Refund-Datum:','Refund-Payout:'):
+        self.assertRegex(sale_extra, r'^eBay-Bestellnummer: .+\nSKU: .+\nPayout: .+$')
+        self.assertEqual(refund_extra.count('\n'), 3)  # eBay-Bestellnummer/SKU/Refund-Datum/Refund-Payout
+        for label in ('eBay-Bestellnummer:','SKU:','Refund-Datum:','Refund-Payout:'):
             self.assertIn(label,refund_extra)
-        for label in ('eBay-Bestellnummer:','Bestelldatum:','Ursprünglicher Payout:',
+        for label in ('Bestelldatum:','Ursprünglicher Payout:',
                       'Ursprüngliche Abrechnung:','Refund-ID:','Refund brutto:',
                       'Partnerwirkung:','Status:'):
             self.assertNotIn(label,refund_extra)
 
     def test_group_a_uses_the_same_compact_export_structure(self):
-        """Group A (PP/BA/MK/001) now uses the identical compact Excel
-        structure as Group B: SKU+Payout for sales, SKU/Refund-Datum/
-        Refund-Payout for refunds, no duplicate Bestellnummer/Bestelldatum,
-        no internal workflow/status/Refund-ID/amount text. Group A's money
-        logic (0,5 % discount, recipient Evelyn) must stay unchanged -
-        check_workbook verifies both the structure and the rate/recipient
-        in one pass, exactly like the equivalent Group B test does."""
+        """Group A (PP/BA/MK/001) now uses the identical Excel structure as
+        Group B: Bestellnummer+SKU+Payout for sales, Bestellnummer/SKU/
+        Refund-Datum/Refund-Payout for refunds - Bestellnummer deliberately
+        repeated (own column too), no Bestelldatum/internal workflow/status/
+        Refund-ID/amount text. Group A's money logic (0,5 % discount,
+        recipient Evelyn) must stay unchanged - check_workbook verifies both
+        the structure and the rate/recipient in one pass, exactly like the
+        equivalent Group B test does."""
         master = self.seed(sku='PP / TEST', refund=True)
         book = check_workbook(self, export_partner_excel(master), master, Decimal('.005'), 'Evelyn')
         sale_extra = book[DISPLAY_NAMES['Rechnung']]['D15'].value
         refund_extra = book[DISPLAY_NAMES['Gutschriften']]['D15'].value
-        self.assertEqual(sale_extra, 'SKU: PP / TEST\nPayout: 7700379513')
-        for label in ('SKU:','Refund-Datum:','Refund-Payout:'):
+        self.assertEqual(sale_extra, 'eBay-Bestellnummer: o1\nSKU: PP / TEST\nPayout: 7700379513')
+        for label in ('eBay-Bestellnummer:','SKU:','Refund-Datum:','Refund-Payout:'):
             self.assertIn(label,refund_extra)
-        for label in ('eBay-Bestellnummer:','Bestelldatum:','Ursprünglicher Payout:',
+        for label in ('Bestelldatum:','Ursprünglicher Payout:',
                       'Ursprüngliche Abrechnung:','Refund-ID:','Refund brutto:',
                       'Partnerwirkung:','Status:'):
             self.assertNotIn(label,refund_extra)
