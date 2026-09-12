@@ -239,5 +239,32 @@ class GroupBRoundTests(unittest.TestCase):
         self.assertEqual(nb_two['paid'],Decimal('0.00'))
         self.assertGreater(nb_two['open'],Decimal('0.00'))
 
+    def test_mh_combined_round_total_matches_the_actual_download_button(self):
+        """The number Patrick actually downloads must equal the sum of the
+        per-round figures shown in the Gruppe-B-Abrechnungsrunden panel.
+
+        This cross-checks two independently implemented views of the same
+        open MH claim: group_b_rounds.overview() (round-scoped) and
+        studio_view.partner_rows()/partner_summary() (the exact pipeline
+        behind app.py's 'Einzelabrechnung herunterladen' button). MH here
+        has one open sale in GB-2026-001 and a second sale plus a full
+        refund pair in GB-2026-002 - none of it reviewed or paid yet, i.e.
+        the ordinary 'nothing invoiced so far' state.
+        """
+        rounds.bootstrap(self.business,self.current,self.invoices)
+        view=rounds.overview(self.business)
+        mh_rows=[row for row in view['partners'] if row['partner']=='MH']
+        self.assertEqual({row['round_id'] for row in mh_rows},{rounds.ROUND_ONE,rounds.ROUND_TWO})
+        round_total=sum((row['open'] for row in mh_rows),Decimal('0.00'))
+
+        partner_ready=studio_view.partner_rows(self.business)
+        mh_ready=partner_ready[partner_ready.Partner=='MH']
+        next_invoice=mh_ready[~mh_ready.reviewed_at.astype(bool)]
+        summary=studio_view.partner_summary(next_invoice).iloc[0]
+        download_total=Decimal(str(summary['Verbleibender Anspruch'])).quantize(Decimal('0.01'))
+
+        self.assertEqual(round_total,download_total)
+        self.assertGreater(round_total,Decimal('0.00'))
+
 if __name__ == '__main__':
     unittest.main()
