@@ -45,7 +45,8 @@ def check_workbook(case, blob, rows, rate, recipient):
         case.assertEqual(sheet['G4'].value, float(rate))
         case.assertEqual(sheet['I4'].value, .19)
         case.assertEqual(set(sheet['E6'].value.split(', ')), payout_ids)
-        case.assertEqual(sheet['A6'].value, 'Rechnungsadresse noch nicht hinterlegt')
+        # Patrick's address is now filled in centrally; Evelyn's stays deliberately unset here.
+        case.assertEqual(sheet['A6'].value, 'Lindenplatz 1\n72622 Nürtingen' if recipient=='Patrick Pfender' else 'Rechnungsadresse noch nicht hinterlegt')
         text = '\n'.join(str(cell.value) for row in sheet for cell in row if cell.value is not None)
         case.assertNotIn('provision', text.lower())
         case.assertIn('Freitext auf der Rechnung', text)
@@ -128,7 +129,7 @@ class PartnerExportTests(unittest.TestCase):
     def test_schema_sources_and_negative_refund(self):
         master = self.seed(refund=True)
         before = master.copy(deep=True)
-        book = check_workbook(self, export_partner_excel(master), master, Decimal('.035'), 'Patrick')
+        book = check_workbook(self, export_partner_excel(master), master, Decimal('.035'), 'Patrick Pfender')
         self.assertEqual(book['Rechnung']['K15'].value, 69.99)
         self.assertEqual(book['Rechnung']['J15'].value, 60.79)
         self.assertEqual(book['Rechnung']['A15'].number_format, 'dd"."mm"."yyyy')
@@ -144,7 +145,7 @@ class PartnerExportTests(unittest.TestCase):
                     master = self.seed(sku=partner+' / TEST')
                     rate = Decimal('.005') if partner in ('PP','BA','MK','001') else Decimal('.035')
                     book = check_workbook(self, export_partner_excel(master), master, rate,
-                                          'Evelyn' if rate == Decimal('.005') else 'Patrick')
+                                          'Evelyn' if rate == Decimal('.005') else 'Patrick Pfender')
                     self.assertIn('Keine Erstattungen', book[DISPLAY_NAMES['Gutschriften']]['C15'].value)
                     if partner.startswith('MH'):
                         self.assertEqual(book['Rechnung']['A4'].value, 'MH')
@@ -176,7 +177,7 @@ class PartnerExportTests(unittest.TestCase):
     def test_refund_only_and_dates(self):
         master = self.seed(refund=True)
         check_workbook(self,export_partner_excel(master[master.Art=='Erstattung']),
-                       master[master.Art=='Erstattung'],Decimal('.035'),'Patrick')
+                       master[master.Art=='Erstattung'],Decimal('.035'),'Patrick Pfender')
         for text in ('2. Sep 2026','02-Sep-26','02.09.2026','2026-09-02'):
             self.assertEqual(report_date(text),datetime(2026,9,2))
         with self.assertRaises(ValueError):
@@ -217,8 +218,8 @@ class RealPartnerExportTests(unittest.TestCase):
                 self.assertEqual(len(core.read_master(core.ORDERS_DB_PATH)),180)
                 self.assertAlmostEqual(master['Erlös_Brutto'].sum(),4427.83)
                 cases=[('BA',master[master.Partner=='BA'],'partner',Decimal('.005'),'Evelyn',1,0,'62.68','0.00'),
-                       ('NB',master[master.Partner=='NB'],'partner',Decimal('.035'),'Patrick',12,2,'2007.68','-347.11'),
-                       ('MH',master[master.Partner=='MH'],'partner',Decimal('.035'),'Patrick',25,3,'2027.21','-92.58'),
+                       ('NB',master[master.Partner=='NB'],'partner',Decimal('.035'),'Patrick Pfender',12,2,'2007.68','-347.11'),
+                       ('MH',master[master.Partner=='MH'],'partner',Decimal('.035'),'Patrick Pfender',25,3,'2027.21','-92.58'),
                        ('Gruppe_B_Evelyn',master[master.Gruppe=='Gruppe B'],'group_b_evelyn',Decimal('.005'),'Evelyn',37,5,'4160.31','-453.38')]
                 verification={}
                 for filename,rows,kind,rate,recipient,sales,refunds,gross,credit in cases:
