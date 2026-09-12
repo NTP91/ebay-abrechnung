@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "recipients": {
+    "evelyn": {
+      "name": "Evelyn",
+      "address": {
+        "name_addition": "",
+        "street": "",
+        "postal_code": "",
+        "city": "",
+        "country": ""
+      }
+    },
+    "patrick": {
+      "name": "Patrick Pfender",
+      "address": {
+        "name_addition": "",
+        "street": "Lindenplatz 1",
+        "postal_code": "72622",
+        "city": "Nürtingen",
+        "country": ""
+      }
+    }
+  }
+}

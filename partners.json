@@ -1,0 +1,18 @@
+{
+  "group_b": ["NB", "FS"],
+  "sku_prefix_overrides": {
+    "MAH-": "FS"
+  },
+  "neutralized_orders": [
+    "26-15088-68974"
+  ],
+  "multi_item_orders": {
+    "18-15098-91741": {
+      "partner": "MH",
+      "line_items": {
+        "10087571312118": 2,
+        "10087571312218": 2
+      }
+    }
+  }
+}
