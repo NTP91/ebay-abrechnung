@@ -195,6 +195,29 @@ class PartnerExportTests(unittest.TestCase):
         with patch.dict(os.environ,{'PAYMENT_RECIPIENTS_PATH':str(path)}):
             self.assertEqual(recipient_details('evelyn')[1],'TEST-STRASSE (synthetisch)')
 
+    def test_column_widths_are_compact_and_amounts_stay_right_aligned(self):
+        """Narrow/short-value columns must stay narrow, amount columns must
+        stay compact and right-aligned, and no column may be extremely wide -
+        while Artikelname/Zusatztext keep wrapping within a bounded width."""
+        master = self.seed(refund=True)
+        book = check_workbook(self, export_partner_excel(master), master, Decimal('.035'), 'Patrick Pfender')
+        sheet = book['Rechnung']
+        widths = {c: sheet.column_dimensions[c].width for c in 'ABCDEFGHIJK'}
+        narrow = {'A': 'Bestelldatum', 'E': 'Menge', 'F': 'Einheit', 'H': 'Rabatt', 'I': 'Umsatzsteuer'}
+        for column in narrow:
+            self.assertLessEqual(widths[column], 12, f'{narrow[column]} ({column}) not narrow: {widths[column]}')
+        self.assertLessEqual(widths['B'], 18, f'Bestellnummer not compact: {widths["B"]}')
+        amounts = {'G': 'VK netto', 'J': 'Rechnungsbetrag', 'K': 'eBay-Auszahlungsbetrag'}
+        for column in amounts:
+            self.assertLessEqual(widths[column], 16, f'{amounts[column]} ({column}) not compact: {widths[column]}')
+            self.assertEqual(sheet[f'{column}15'].alignment.horizontal, 'right')
+        for column in 'ABCDEFGHIJK':
+            self.assertLessEqual(widths[column], 50, f'Column {column} is extremely wide: {widths[column]}')
+        self.assertTrue(sheet['C15'].alignment.wrap_text)
+        self.assertTrue(sheet['D15'].alignment.wrap_text)
+        self.assertLessEqual(widths['C'], 50)
+        self.assertLessEqual(widths['D'], 45)
+
     def test_rechnung_and_gutschriften_never_drift_apart(self):
         """Regression guard: Rechnung is the only layout source. Not partner-
         specific - this must hold for any partner/SKU that produces both a
@@ -254,6 +277,42 @@ class PartnerExportTests(unittest.TestCase):
         finale_labels = [rechnung.cell(row=r, column=1).value
                          for r in range(layout['finale_start'], layout['final_row'] + 1)]
         self.assertFalse(any('Erstattung' in (label or '') for label in finale_labels))
+
+    def test_header_payouts_period_and_counts_match_the_actual_positions(self):
+        """Header (payout numbers, payout period, both sheets' position
+        counts) is built from the exact same rows as the line items in one
+        pass (prepare_partner_export's own loop) - never a separately
+        cached/older count or date range."""
+        order_one = payout(order='o1', transaction='t1', sku='NB / TEST', title='Produkt Eins')
+        order_two = payout(order='o2', transaction='t2', sku='NB / TEST', title='Produkt Zwei')
+        core.import_reports([order_one, order_two], core.ORDERS_DB_PATH, 'orders')
+        sale_one = payout(payout_id='7700100000', order='o1', transaction='t1', sku='NB / TEST', amount='50,00')
+        sale_one['Auszahlungsdatum'] = '01.09.2026'
+        sale_one['Transaktionsbetrag (inkl. Kosten)'] = '50,00'
+        sale_two = payout(payout_id='7700200000', order='o2', transaction='t2', sku='NB / TEST', amount='30,00')
+        sale_two['Auszahlungsdatum'] = '05.09.2026'
+        sale_two['Transaktionsbetrag (inkl. Kosten)'] = '30,00'
+        refund_two = payout(payout_id='7700200000', order='o2', transaction='refund2', sku='NB / TEST', amount='-10,00', kind='Rückerstattung')
+        refund_two['Auszahlungsdatum'] = '05.09.2026'
+        refund_two['Transaktionsbetrag (inkl. Kosten)'] = '-10,00'
+        core.import_reports([sale_one, sale_two, refund_two], core.PAYOUTS_DB_PATH, 'payout')
+        master = core.load_master_data()
+
+        book = load_workbook(io.BytesIO(export_partner_excel(master)), data_only=True)
+        rechnung, gutschriften = book[DISPLAY_NAMES['Rechnung']], book[DISPLAY_NAMES['Gutschriften']]
+
+        # Both sheets cite the full payout batch (matches the real, already-
+        # shipped MH export: both tabs list the same Lexware reference numbers),
+        # not a subset scoped to only that sheet's own rows.
+        self.assertEqual(set(rechnung['E6'].value.split(', ')), {'7700100000', '7700200000'})
+        self.assertEqual(rechnung['E7'].value, 'Auszahlungszeitraum: 01.09.2026 – 05.09.2026')
+        self.assertEqual(set(gutschriften['E6'].value.split(', ')), {'7700100000', '7700200000'})
+
+        sales = master[master.Art == 'Bestellung']
+        refunds = master[master.Art == 'Erstattung']
+        self.assertEqual(rechnung['A12'].value, f'Reguläre Positionen: {len(sales)}')
+        self.assertEqual(rechnung['G12'].value, f'Erstattungen / Abzüge: {len(refunds)}')
+        self.assertEqual(gutschriften['A12'].value, f'Erstattungen: {len(refunds)}')
 
 
 @unittest.skipUnless(os.environ.get('EBAY_REAL_MASTER_DIR'),'Set EBAY_REAL_MASTER_DIR for original imported data')
