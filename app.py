@@ -201,7 +201,7 @@ def partner_panel(rows, rate, prefix, history_rows=None):
                             if not next_refunds.empty:
                                 st.metric('Refunds / Abzüge',f"{euros(pending['Refunds'])} · {len(next_refunds)} Erstattung(en)")
                             st.metric('Verbleibender Partneranspruch',euros(pending['Verbleibender Anspruch']))
-                            st.caption('Noch nicht geprüft/freigegeben · nicht in einer bestehenden Partnerrechnung gebunden. Refunds sind einzeln im Gutschriften-Blatt der Abrechnung nachvollziehbar.')
+                            st.caption('Noch nicht geprüft/freigegeben · nicht in einer bestehenden Partnerrechnung gebunden. Refunds sind einzeln im Blatt „Erstattungen / Abzüge“ der Abrechnung nachvollziehbar.')
                             if group_a_waits_for_all and awaiting_payment.empty:
                                 st.caption('Zahlungsabschluss erst möglich, wenn alle aktuell offenen Positionen dieses Partners geprüft sind.')
                             download('Einzelabrechnung herunterladen',next_invoice,prefix+'_'+partner)

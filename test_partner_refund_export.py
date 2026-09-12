@@ -23,7 +23,7 @@ from openpyxl import load_workbook
 import core
 import position_workflow as workflow
 import studio_view
-from partner_export import export_partner_excel, prepare_partner_export
+from partner_export import export_partner_excel, prepare_partner_export, DISPLAY_NAMES
 from test_recovery import payout
 from test_invoice_support import review_positions
 
@@ -180,8 +180,8 @@ class PartnerRefundExportTests(unittest.TestCase):
         path = Path(self.temp.name) / f'Partner_Patrick_{partner_name}.xlsx'
         path.write_bytes(blob)
         book = load_workbook(io.BytesIO(path.read_bytes()), data_only=True)
-        self.assertEqual(book.sheetnames, ['Rechnung', 'Gutschriften'])
-        rechnung, gutschriften = book['Rechnung'], book['Gutschriften']
+        self.assertEqual(book.sheetnames, [DISPLAY_NAMES['Rechnung'], DISPLAY_NAMES['Gutschriften']])
+        rechnung, gutschriften = book[DISPLAY_NAMES['Rechnung']], book[DISPLAY_NAMES['Gutschriften']]
         rechnung_text = '\n'.join(str(cell.value) for row in rechnung for cell in row if cell.value is not None)
         gutschrift_text = '\n'.join(str(cell.value) for row in gutschriften for cell in row if cell.value is not None)
         self.assertNotIn('Keine Erstattungen vorhanden', gutschrift_text)

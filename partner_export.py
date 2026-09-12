@@ -26,6 +26,11 @@ HEADER_ROW = 14
 FIRST_ROW = 15
 TAX = Decimal('.19')
 CENT = Decimal('.01')
+# Internal sheet keys ('Rechnung'/'Gutschriften') drive the data model and are
+# never renamed - only the visible sheet tab/title text changes, so a merchant
+# does not read "Gutschriften" (which implies a formal credit note already
+# issued) for refunds on a position they may not have been paid for yet.
+DISPLAY_NAMES = {'Rechnung': 'Rechnung', 'Gutschriften': 'Erstattungen-Abzüge'}
 MONTHS = {
     'jan': 1, 'feb': 2, 'mär': 3, 'märz': 3, 'mar': 3, 'mrz': 3,
     'apr': 4, 'mai': 5, 'may': 5, 'jun': 6, 'jul': 7, 'aug': 8,
@@ -54,6 +59,11 @@ def report_date(value):
 
 def cents(value):
     return value.quantize(CENT, rounding=ROUND_HALF_UP)
+
+
+def format_euro(value):
+    """German-formatted currency text for header/summary cells that mix a label and value."""
+    return f'{value:,.2f} €'.replace(',', 'X').replace('.', ',').replace('X', '.')
 
 
 def recipient_details(key):
@@ -155,20 +165,26 @@ def prepare_partner_export(rows, payouts=None, orders=None, statement_type='part
             'net': net, 'ebay': original_gross,
         }
         is_refund = base < 0 or row['Art'] == 'Erstattung'
-        if is_refund:
-            item['finance_id'] = str(row['Transaktionsnummer'])
-            item['refund_payout'] = payout_id
+        item['finance_id'] = str(row['Transaktionsnummer'])
+        item['payout_id'] = payout_id
         result['Gutschriften' if is_refund else 'Rechnung'].append(item)
     result['totals'] = {name: calculate_sheet(result[name], rate) for name in ('Rechnung', 'Gutschriften')}
     # Same net-then-VAT formula as every other position (calculate_sheet just
     # above); this only makes its already-computed pieces individually
-    # traceable per refund - it never recomputes the impact with a different rule.
+    # traceable per row - it never recomputes any amount with a different rule.
+    rate_label = f"{rate*100:.1f}".replace('.', ',') + ' %'
+    for item in result['Rechnung']:
+        item['extra'] += (
+            '\nPayout: ' + item['payout_id']
+            + f"\n{rate_label} Partnerabzug (auf Netto): {item['discount']:.2f} EUR"
+            + f"\nPartnerbetrag (nach Abzug): {item['gross']:.2f} EUR"
+        )
     for item in result['Gutschriften']:
         item['extra'] += (
             '\nFinance-/Refund-ID: ' + item['finance_id']
-            + '\nRefund-Payout: ' + item['refund_payout']
+            + '\nRefund-Payout: ' + item['payout_id']
             + f"\ntatsächlicher Refund netto: {item['net']:.2f} EUR"
-            + f"\n3,5% Partnerabzug (auf Netto): {item['discount']:.2f} EUR"
+            + f"\n{rate_label} Partnerabzug (auf Netto): {item['discount']:.2f} EUR"
             + f"\nAuswirkung auf offenen Partneranspruch: {item['gross']:.2f} EUR"
             + '\nStatus: Rückerstattung – mindert den offenen Partneranspruch; eBay-Refund-Bruttobetrag (Spalte K) bleibt unverändert.'
         )
@@ -231,19 +247,39 @@ def _fill_sheet(xml, model, name):
     start = last + 2
     visible_last = start + 8
     helper_first = visible_last + 3
+    rechnung_totals, gutschriften_totals = model['totals']['Rechnung'], model['totals']['Gutschriften']
+    final_amount = rechnung_totals['gross'] + gutschriften_totals['gross']
+    created_on = datetime.now().strftime('%d.%m.%Y')
+    subtitle = 'Gesamtübersicht Gruppe B an Evelyn' if model['statement_type'] == 'group_b_evelyn' else 'Partner-Einzelabrechnung'
+    is_refund_sheet = name == 'Gutschriften'
     metadata = {
-        2: {'A': 'Gesamtübersicht Gruppe B an Evelyn' if model['statement_type'] == 'group_b_evelyn' else 'Partner-Einzelabrechnung'},
+        1: {'A': 'ERSTATTUNGEN / ABZÜGE' if is_refund_sheet else 'PARTNERABRECHNUNG'},
+        2: {'A': f'{subtitle} · Abrechnungszeitraum: {period} · Erstellt am {created_on}'},
         4: {'A': model['partner'], 'C': model['group'], 'E': model['recipient'], 'G': model['rate'], 'I': TAX},
         6: {'A': model['address'], 'E': ', '.join(payout_ids)},
         7: {'E': period},
-        13: {'A': f'{len(items)} Positionen · Jede eBay-Abrechnungstransaktion wird einzeln mit Menge 1 verarbeitet.'},
+        8: {'A': 'Verkaufs-/Abrechnungsbasis brutto: ' + format_euro(rechnung_totals['ebay']),
+            'G': f"Partner-Abzug {model['rate']*100:.1f}".replace('.', ',') + ' % (auf Netto): ' + format_euro(rechnung_totals['discount'])},
+        10: {'A': 'Regulärer Abrechnungsbetrag: ' + format_euro(rechnung_totals['gross']),
+             'G': 'Erstattungen / Abzüge: ' + format_euro(gutschriften_totals['gross'])},
+        # G is the anchor cell of the G11:K11 merge (K would silently read back as
+        # None in openpyxl - a merged, non-anchor cell always reports empty there).
+        11: {'A': 'FINALER ZAHLBETRAG', 'G': format_euro(final_amount)},
+        12: {'A': f'Reguläre Positionen: {len(model["Rechnung"])}', 'G': f'Erstattungen / Abzüge: {len(model["Gutschriften"])}'},
+        13: {'A': (f'{len(items)} Erstattungen/Abzüge · jede Rückerstattung bleibt als eigene Bewegung nachvollziehbar.' if is_refund_sheet
+                    else f'{len(items)} reguläre Positionen · jede eBay-Abrechnungstransaktion wird einzeln mit Menge 1 verarbeitet.')},
     }
     for number in sorted(n for n in prototype if n <= HEADER_ROW):
-        row = row_from(number, number, metadata.get(number))
+        # Row 11 (the final payable amount) reuses row 23's bold total style
+        # for visual prominence - a pure style borrow, no formula/merge change.
+        source = 23 if number == 11 else number
+        row = row_from(source, number, metadata.get(number))
         if number == 6:
             row.set('ht', str(max(28, 18 * math.ceil(len(', '.join(payout_ids))/90))))
         if number == 4:
             row.set('ht', str(max(30, 17 * math.ceil(len(model['partner'])/35))))
+        if number == 2:
+            row.set('ht', str(max(25, 15 * math.ceil(len(metadata[2]['A'])/110))))
         row.set('customHeight', '1')
     for offset, item in enumerate(items):
         number = FIRST_ROW + offset
@@ -328,13 +364,16 @@ def export_partner_excel(rows, payouts=None, orders=None, statement_type='partne
                 content = _fill_sheet(content, model, name)
             elif entry.filename == 'xl/workbook.xml':
                 workbook = ET.fromstring(content)
+                for sheet in workbook.find(TAG('sheets')):
+                    if sheet.get('name') in DISPLAY_NAMES:
+                        sheet.set('name', DISPLAY_NAMES[sheet.get('name')])
                 names = workbook.find(TAG('definedNames'))
                 if names is None:
                     names = ET.Element(TAG('definedNames'))
                     workbook.insert(list(workbook).index(workbook.find(TAG('sheets'))) + 1, names)
                 for index, name in enumerate(('Rechnung', 'Gutschriften')):
                     visible_last = HEADER_ROW + max(1, len(model[name])) + 10
-                    ET.SubElement(names, TAG('definedName'), {'name': '_xlnm.Print_Area', 'localSheetId': str(index)}).text = f"'{name}'!$A$1:$K${visible_last}"
+                    ET.SubElement(names, TAG('definedName'), {'name': '_xlnm.Print_Area', 'localSheetId': str(index)}).text = f"'{DISPLAY_NAMES[name]}'!$A$1:$K${visible_last}"
                 content = ET.tostring(workbook, encoding='utf-8', xml_declaration=True)
             target.writestr(entry, content)
     return output.getvalue()

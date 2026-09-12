@@ -14,7 +14,7 @@ from unittest.mock import patch
 from openpyxl import load_workbook  # Independent read-only verification.
 
 import core
-from partner_export import export_partner_excel, prepare_partner_export, report_date, calculate_sheet
+from partner_export import export_partner_excel, prepare_partner_export, report_date, calculate_sheet, DISPLAY_NAMES
 from test_recovery import payout
 
 
@@ -29,11 +29,11 @@ def reference_cents(value):
 def check_workbook(case, blob, rows, rate, recipient):
     book = load_workbook(io.BytesIO(blob), data_only=True)
     formula_book = load_workbook(io.BytesIO(blob), data_only=False)
-    case.assertEqual(book.sheetnames, ['Rechnung', 'Gutschriften'])
+    case.assertEqual(book.sheetnames, [DISPLAY_NAMES['Rechnung'], DISPLAY_NAMES['Gutschriften']])
     payout_ids = set(rows['Auszahlung Nr.'])
     for name, kind in [('Rechnung', 'Bestellung'), ('Gutschriften', 'Erstattung')]:
         expected = rows[rows.Art == kind]
-        sheet = book[name]
+        sheet = book[DISPLAY_NAMES[name]]
         last = 14 + max(1, len(expected))
         summary = last + 2
         case.assertEqual(sheet.max_column, 11)
@@ -53,13 +53,14 @@ def check_workbook(case, blob, rows, rate, recipient):
             case.assertEqual(sheet[f'G{number}'].value, original['eBay_Netto'])
             case.assertEqual(sheet[f'C{number}'].value, original['Angebotstitel'])
             base_extra='eBay-Bestellnummer: '+original['Bestellnummer']+'\nSKU: '+original['SKU']
+            rate_label=f'{rate*100:.1f}'.replace('.',',')+' %'
+            case.assertTrue(sheet[f'D{number}'].value.startswith(base_extra))
+            case.assertIn('Payout: '+str(original['Auszahlung Nr.']),sheet[f'D{number}'].value)
+            case.assertIn(rate_label+' Partnerabzug (auf Netto)',sheet[f'D{number}'].value)
             if kind=='Erstattung':
-                case.assertTrue(sheet[f'D{number}'].value.startswith(base_extra))
                 case.assertIn('Finance-/Refund-ID: '+str(original['Transaktionsnummer']),sheet[f'D{number}'].value)
                 case.assertIn('Refund-Payout: '+str(original['Auszahlung Nr.']),sheet[f'D{number}'].value)
                 case.assertIn('Auswirkung auf offenen Partneranspruch',sheet[f'D{number}'].value)
-            else:
-                case.assertEqual(sheet[f'D{number}'].value, base_extra)
             case.assertIsInstance(sheet[f'A{number}'].value, datetime)
             case.assertTrue(sheet[f'C{number}'].alignment.wrap_text)
             case.assertEqual(sheet[f'G{number}'].alignment.horizontal, 'right')
@@ -75,10 +76,10 @@ def check_workbook(case, blob, rows, rate, recipient):
             gross_sum += gross
             previous_tax = tax
             ebay += reference_cents(str(sheet[f'K{number}'].value))
-            formula = formula_book[name][f'J{number}'].value
+            formula = formula_book[DISPLAY_NAMES[name]][f'J{number}'].value
             helper=summary+11+number-15
-            case.assertEqual(formula_book[name][f'G{helper}'].value,f'=E{number}*G{number}')
-            case.assertEqual(formula_book[name][f'H{helper}'].value,f'=ROUND(G{helper}*(1-H{number}),2)')
+            case.assertEqual(formula_book[DISPLAY_NAMES[name]][f'G{helper}'].value,f'=E{number}*G{number}')
+            case.assertEqual(formula_book[DISPLAY_NAMES[name]][f'H{helper}'].value,f'=ROUND(G{helper}*(1-H{number}),2)')
             case.assertTrue(sheet.row_dimensions[helper].hidden)
             case.assertNotIn('K', formula)  # The eBay control never drives the invoice.
         expected_totals = [net_before, net_before-net_after, net_after, previous_tax,
@@ -138,7 +139,7 @@ class PartnerExportTests(unittest.TestCase):
                     rate = Decimal('.005') if partner in ('PP','BA','MK','001') else Decimal('.035')
                     book = check_workbook(self, export_partner_excel(master), master, rate,
                                           'Evelyn' if rate == Decimal('.005') else 'Patrick')
-                    self.assertIn('Keine Erstattungen', book['Gutschriften']['C15'].value)
+                    self.assertIn('Keine Erstattungen', book[DISPLAY_NAMES['Gutschriften']]['C15'].value)
                     if partner.startswith('MH'):
                         self.assertEqual(book['Rechnung']['A4'].value, 'MH')
                     if master.iloc[0].Gruppe == 'Gruppe B':
