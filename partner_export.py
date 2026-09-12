@@ -174,11 +174,7 @@ def prepare_partner_export(rows, payouts=None, orders=None, statement_type='part
     # traceable per row - it never recomputes any amount with a different rule.
     rate_label = f"{rate*100:.1f}".replace('.', ',') + ' %'
     for item in result['Rechnung']:
-        item['extra'] += (
-            '\nPayout: ' + item['payout_id']
-            + f"\n{rate_label} Partnerabzug (auf Netto): {item['discount']:.2f} EUR"
-            + f"\nPartnerbetrag (nach Abzug): {item['gross']:.2f} EUR"
-        )
+        item['extra'] += '\nPayout: ' + item['payout_id']
     for item in result['Gutschriften']:
         item['extra'] += (
             '\nFinance-/Refund-ID: ' + item['finance_id']
@@ -189,6 +185,24 @@ def prepare_partner_export(rows, payouts=None, orders=None, statement_type='part
             + '\nStatus: Rückerstattung – mindert den offenen Partneranspruch; eBay-Refund-Bruttobetrag (Spalte K) bleibt unverändert.'
         )
     return result
+
+
+def _closing_statement_rows(name, item_count):
+    """Row numbers for the note and (Rechnung sheet only) the closing summary block.
+
+    Kept as one function so _fill_sheet and export_partner_excel's print-area
+    computation can never drift apart from each other.
+    """
+    last = HEADER_ROW + max(1, item_count)
+    start = last + 2
+    note_row = start + 8
+    if name != 'Rechnung':
+        return dict(start=start, note_row=note_row, visible_last=note_row)
+    section_header_row = note_row + 2
+    finale_start = section_header_row + 1
+    final_row = finale_start + 4 + 1
+    return dict(start=start, note_row=note_row, section_header_row=section_header_row,
+                finale_start=finale_start, final_row=final_row, visible_last=final_row)
 
 
 def _set_cell(cell, value, formula=None):
@@ -244,42 +258,35 @@ def _fill_sheet(xml, model, name):
         period = 'Auszahlungszeitraum: ' + min(dates).strftime('%d.%m.%Y') + ' – ' + max(dates).strftime('%d.%m.%Y')
     items = model[name]
     last = HEADER_ROW + max(1, len(items))
-    start = last + 2
-    visible_last = start + 8
-    helper_first = visible_last + 3
+    layout = _closing_statement_rows(name, len(items))
+    start = layout['start']
+    helper_first = layout['visible_last'] + 3
     rechnung_totals, gutschriften_totals = model['totals']['Rechnung'], model['totals']['Gutschriften']
     final_amount = rechnung_totals['gross'] + gutschriften_totals['gross']
     created_on = datetime.now().strftime('%d.%m.%Y')
-    subtitle = 'Gesamtübersicht Gruppe B an Evelyn' if model['statement_type'] == 'group_b_evelyn' else 'Partner-Einzelabrechnung'
     is_refund_sheet = name == 'Gutschriften'
     metadata = {
-        1: {'A': 'ERSTATTUNGEN / ABZÜGE' if is_refund_sheet else 'PARTNERABRECHNUNG'},
-        2: {'A': f'{subtitle} · Abrechnungszeitraum: {period} · Erstellt am {created_on}'},
+        1: {'A': ('ERSTATTUNGEN / ABZÜGE' if is_refund_sheet else 'PARTNERABRECHNUNG – ' + str(model['partner']))},
+        2: {'A': f'Abrechnungszeitraum: {period} · Erstellt am {created_on}'},
         4: {'A': model['partner'], 'C': model['group'], 'E': model['recipient'], 'G': model['rate'], 'I': TAX},
         6: {'A': model['address'], 'E': ', '.join(payout_ids)},
         7: {'E': period},
-        8: {'A': 'Verkaufs-/Abrechnungsbasis brutto: ' + format_euro(rechnung_totals['ebay']),
-            'G': f"Partner-Abzug {model['rate']*100:.1f}".replace('.', ',') + ' % (auf Netto): ' + format_euro(rechnung_totals['discount'])},
-        10: {'A': 'Regulärer Abrechnungsbetrag: ' + format_euro(rechnung_totals['gross']),
-             'G': 'Erstattungen / Abzüge: ' + format_euro(gutschriften_totals['gross'])},
-        # G is the anchor cell of the G11:K11 merge (K would silently read back as
-        # None in openpyxl - a merged, non-anchor cell always reports empty there).
-        11: {'A': 'FINALER ZAHLBETRAG', 'G': format_euro(final_amount)},
+        # Rows 8/10/11 previously carried internal Lexoffice field-mapping notes;
+        # the header only needs to be compact now, so they stay blank.
+        8: {},
+        10: {'A': None, 'G': None},
+        11: {'A': None, 'G': None},
         12: {'A': f'Reguläre Positionen: {len(model["Rechnung"])}', 'G': f'Erstattungen / Abzüge: {len(model["Gutschriften"])}'},
-        13: {'A': (f'{len(items)} Erstattungen/Abzüge · jede Rückerstattung bleibt als eigene Bewegung nachvollziehbar.' if is_refund_sheet
-                    else f'{len(items)} reguläre Positionen · jede eBay-Abrechnungstransaktion wird einzeln mit Menge 1 verarbeitet.')},
+        13: {'A': None},
     }
     for number in sorted(n for n in prototype if n <= HEADER_ROW):
-        # Row 11 (the final payable amount) reuses row 23's bold total style
-        # for visual prominence - a pure style borrow, no formula/merge change.
-        source = 23 if number == 11 else number
-        row = row_from(source, number, metadata.get(number))
+        row = row_from(number, number, metadata.get(number))
         if number == 6:
             row.set('ht', str(max(28, 18 * math.ceil(len(', '.join(payout_ids))/90))))
         if number == 4:
             row.set('ht', str(max(30, 17 * math.ceil(len(model['partner'])/35))))
-        if number == 2:
-            row.set('ht', str(max(25, 15 * math.ceil(len(metadata[2]['A'])/110))))
+        if number == 1 and is_refund_sheet is False:
+            row.set('ht', str(max(42, 22 * math.ceil(len(metadata[1]['A'])/45))))
         row.set('customHeight', '1')
     for offset, item in enumerate(items):
         number = FIRST_ROW + offset
@@ -312,7 +319,21 @@ def _fill_sheet(xml, model, name):
             'eBay-Beträge dienen nur zur Kontrolle.')
     if name == 'Gutschriften':
         note += ' Erstattungen sind als negative Korrekturen dargestellt.'
-    row_from(27, start + 8, {'A': note})
+    row_from(27, layout['note_row'], {'A': note})
+    if name == 'Rechnung':
+        # Closing statement for the merchant: only already-computed
+        # calculate_sheet totals, nothing recalculated with a new rule.
+        row_from(9, layout['section_header_row'], {'A': 'GESAMTABRECHNUNG'})
+        rate_pct = f"{model['rate']*100:.1f}".replace('.', ',') + ' %'
+        finale_lines = [
+            ('Verkaufs-/Abrechnungsbasis brutto', rechnung_totals['ebay']),
+            (f'abzgl. Partnerabzug {rate_pct} auf Netto', -rechnung_totals['discount']),
+            ('Regulärer Abrechnungsbetrag', rechnung_totals['gross']),
+            ('abzgl. Erstattungen / Abzüge', gutschriften_totals['gross']),
+        ]
+        for offset, (label, value) in enumerate(finale_lines):
+            row_from(19, layout['finale_start'] + offset, {'A': label, 'K': value})
+        row_from(23, layout['final_row'], {'A': 'FINALER RECHNUNGSBETRAG', 'K': final_amount})
     # Formula-only calculation rows, outside the print area and hidden. This
     # keeps exactly eleven visible columns and avoids fragile array formulas.
     # G: undiscounted net; H: rounded line net; I: running net; J: running VAT.
@@ -337,7 +358,12 @@ def _fill_sheet(xml, model, name):
             merges.remove(merge)
     for number in range(start, start + 7):
         ET.SubElement(merges, TAG('mergeCell'), {'ref': f'A{number}:J{number}'})
-    ET.SubElement(merges, TAG('mergeCell'), {'ref': f'A{start+8}:K{start+8}'})
+    ET.SubElement(merges, TAG('mergeCell'), {'ref': f'A{layout["note_row"]}:K{layout["note_row"]}'})
+    if name == 'Rechnung':
+        ET.SubElement(merges, TAG('mergeCell'), {'ref': f'A{layout["section_header_row"]}:K{layout["section_header_row"]}'})
+        for number in range(layout['finale_start'], layout['finale_start'] + 4):
+            ET.SubElement(merges, TAG('mergeCell'), {'ref': f'A{number}:J{number}'})
+        ET.SubElement(merges, TAG('mergeCell'), {'ref': f'A{layout["final_row"]}:J{layout["final_row"]}'})
     merges.set('count', str(len(merges)))
     dimension = sheet.find(TAG('dimension'))
     if dimension is not None:
@@ -345,9 +371,12 @@ def _fill_sheet(xml, model, name):
     view = sheet.find(f'{TAG("sheetViews")}/{TAG("sheetView")}')
     for child in list(view):
         view.remove(child)
-    ET.SubElement(view, TAG('pane'), {'ySplit': str(HEADER_ROW), 'topLeftCell': f'A{FIRST_ROW}',
-                                     'activePane': 'bottomLeft', 'state': 'frozen'})
-    ET.SubElement(view, TAG('selection'), {'pane': 'bottomLeft', 'activeCell': f'A{FIRST_ROW}', 'sqref': f'A{FIRST_ROW}'})
+    if name != 'Rechnung':
+        # The main sheet stays fully scrollable (no frozen header); the refund
+        # detail sheet keeps the header frozen while scrolling its rows.
+        ET.SubElement(view, TAG('pane'), {'ySplit': str(HEADER_ROW), 'topLeftCell': f'A{FIRST_ROW}',
+                                         'activePane': 'bottomLeft', 'state': 'frozen'})
+        ET.SubElement(view, TAG('selection'), {'pane': 'bottomLeft', 'activeCell': f'A{FIRST_ROW}', 'sqref': f'A{FIRST_ROW}'})
     auto_filter = ET.Element(TAG('autoFilter'), {'ref': f'A{HEADER_ROW}:K{last}'})
     sheet.insert(list(sheet).index(merges), auto_filter)
     return ET.tostring(sheet, encoding='utf-8', xml_declaration=True)
@@ -372,7 +401,7 @@ def export_partner_excel(rows, payouts=None, orders=None, statement_type='partne
                     names = ET.Element(TAG('definedNames'))
                     workbook.insert(list(workbook).index(workbook.find(TAG('sheets'))) + 1, names)
                 for index, name in enumerate(('Rechnung', 'Gutschriften')):
-                    visible_last = HEADER_ROW + max(1, len(model[name])) + 10
+                    visible_last = _closing_statement_rows(name, len(model[name]))['visible_last']
                     ET.SubElement(names, TAG('definedName'), {'name': '_xlnm.Print_Area', 'localSheetId': str(index)}).text = f"'{DISPLAY_NAMES[name]}'!$A$1:$K${visible_last}"
                 content = ET.tostring(workbook, encoding='utf-8', xml_declaration=True)
             target.writestr(entry, content)

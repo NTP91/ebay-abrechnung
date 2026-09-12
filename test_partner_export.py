@@ -14,7 +14,7 @@ from unittest.mock import patch
 from openpyxl import load_workbook  # Independent read-only verification.
 
 import core
-from partner_export import export_partner_excel, prepare_partner_export, report_date, calculate_sheet, DISPLAY_NAMES
+from partner_export import export_partner_excel, prepare_partner_export, report_date, calculate_sheet, DISPLAY_NAMES, _closing_statement_rows
 from test_recovery import payout
 
 
@@ -36,8 +36,11 @@ def check_workbook(case, blob, rows, rate, recipient):
         sheet = book[DISPLAY_NAMES[name]]
         last = 14 + max(1, len(expected))
         summary = last + 2
+        layout = _closing_statement_rows(name, len(expected))
+        helper_first = layout['visible_last'] + 3
         case.assertEqual(sheet.max_column, 11)
-        case.assertEqual(sheet.freeze_panes, 'A15')
+        # Main sheet scrolls freely now; the refund detail sheet keeps its frozen header.
+        case.assertEqual(sheet.freeze_panes, None if name=='Rechnung' else 'A15')
         case.assertEqual(sheet['E4'].value, recipient)
         case.assertEqual(sheet['G4'].value, float(rate))
         case.assertEqual(sheet['I4'].value, .19)
@@ -56,11 +59,14 @@ def check_workbook(case, blob, rows, rate, recipient):
             rate_label=f'{rate*100:.1f}'.replace('.',',')+' %'
             case.assertTrue(sheet[f'D{number}'].value.startswith(base_extra))
             case.assertIn('Payout: '+str(original['Auszahlung Nr.']),sheet[f'D{number}'].value)
-            case.assertIn(rate_label+' Partnerabzug (auf Netto)',sheet[f'D{number}'].value)
             if kind=='Erstattung':
+                case.assertIn(rate_label+' Partnerabzug (auf Netto)',sheet[f'D{number}'].value)
                 case.assertIn('Finance-/Refund-ID: '+str(original['Transaktionsnummer']),sheet[f'D{number}'].value)
                 case.assertIn('Refund-Payout: '+str(original['Auszahlung Nr.']),sheet[f'D{number}'].value)
                 case.assertIn('Auswirkung auf offenen Partneranspruch',sheet[f'D{number}'].value)
+            else:
+                case.assertNotIn('Partnerabzug',sheet[f'D{number}'].value)
+                case.assertNotIn('Partnerbetrag',sheet[f'D{number}'].value)
             case.assertIsInstance(sheet[f'A{number}'].value, datetime)
             case.assertTrue(sheet[f'C{number}'].alignment.wrap_text)
             case.assertEqual(sheet[f'G{number}'].alignment.horizontal, 'right')
@@ -77,7 +83,7 @@ def check_workbook(case, blob, rows, rate, recipient):
             previous_tax = tax
             ebay += reference_cents(str(sheet[f'K{number}'].value))
             formula = formula_book[DISPLAY_NAMES[name]][f'J{number}'].value
-            helper=summary+11+number-15
+            helper=helper_first+number-15
             case.assertEqual(formula_book[DISPLAY_NAMES[name]][f'G{helper}'].value,f'=E{number}*G{number}')
             case.assertEqual(formula_book[DISPLAY_NAMES[name]][f'H{helper}'].value,f'=ROUND(G{helper}*(1-H{number}),2)')
             case.assertTrue(sheet.row_dimensions[helper].hidden)
