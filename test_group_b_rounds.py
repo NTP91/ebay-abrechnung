@@ -7,11 +7,14 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
+import sqlite3
+
 import api_holds
 import core
 import group_b_rounds as rounds
 import position_workflow
 import studio_view
+import supabase_store
 from test_api_holds import movement, snapshot
 from test_recovery import payout
 
@@ -265,6 +268,57 @@ class GroupBRoundTests(unittest.TestCase):
 
         self.assertEqual(round_total,download_total)
         self.assertGreater(round_total,Decimal('0.00'))
+
+
+class SupabaseLedgerSchemaTests(unittest.TestCase):
+    """core.ledger()'s Supabase branch loads whatever schema is already inside
+    the stored settlement.sqlite3 blob. A blob migrated before group_b_rounds
+    existed has no such tables, so bootstrap()/overview() must not be handed
+    a connection missing them - exactly the reported 'no such table:
+    group_b_rounds' failure in the running Streamlit-Cloud/Supabase app.
+    """
+
+    def test_ledger_creates_missing_group_b_tables_on_a_legacy_supabase_blob(self):
+        legacy = sqlite3.connect(':memory:')
+        legacy.execute('CREATE TABLE payouts (id TEXT PRIMARY KEY, status TEXT NOT NULL, '
+                       'fingerprint TEXT, invoice_id TEXT, attempt TEXT, snapshot TEXT)')
+        legacy.commit()
+        store = {'settlement': (supabase_store.sqlite_to_bytes(legacy), 1)}
+        legacy.close()
+
+        def fake_get(key, required=True):
+            self.assertEqual(key, 'state/settlement.sqlite3')
+            return store['settlement']
+
+        def fake_put(key, content, expected_version=None):
+            self.assertEqual(expected_version, store['settlement'][1])
+            store['settlement'] = (content, expected_version + 1)
+            return expected_version + 1
+
+        with patch.object(supabase_store, 'enabled', return_value=True), \
+             patch.object(supabase_store, 'get', side_effect=fake_get), \
+             patch.object(supabase_store, 'put', side_effect=fake_put):
+            # Before the fix this raises sqlite3.OperationalError: no such
+            # table: group_b_rounds, exactly like the reported production error.
+            with core.ledger() as db:
+                db.execute('BEGIN IMMEDIATE')
+                db.execute('INSERT INTO group_b_rounds VALUES(?,?,?,?,?,?,?,?,?,?)',
+                           (rounds.ROUND_ONE, 2026, 1, 'immutable_evelyn_invoice', None, None,
+                            '1.00', 'hash', '{}', '2026-01-01T00:00:00Z'))
+                db.commit()
+        version_after_write = store['settlement'][1]
+        self.assertEqual(version_after_write, 2)
+
+        # The schema fix is written back to Supabase itself (source of truth),
+        # not kept only in a throwaway local copy: a fresh ledger() call sees
+        # the persisted round without any special-casing.
+        with patch.object(supabase_store, 'enabled', return_value=True), \
+             patch.object(supabase_store, 'get', side_effect=fake_get), \
+             patch.object(supabase_store, 'put', side_effect=fake_put):
+            with core.ledger() as db:
+                saved = [row[0] for row in db.execute('SELECT id FROM group_b_rounds')]
+        self.assertEqual(saved, [rounds.ROUND_ONE])
+
 
 if __name__ == '__main__':
     unittest.main()

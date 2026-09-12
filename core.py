@@ -595,6 +595,8 @@ def ledger():
         raw, version = supabase_store.get('state/settlement.sqlite3')
         connection = supabase_store.sqlite_from_bytes(raw)
         connection.row_factory = sqlite3.Row
+        import group_b_rounds
+        group_b_rounds.initialize(connection)
         before = supabase_store.sqlite_to_bytes(connection)
         try:
             yield connection
