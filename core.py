@@ -66,20 +66,20 @@ def neutralized_mask(rows):
     return result
 
 
-def refund_offset(rows):
-    """Automatic per-order-line refund netting, independent of manual neutralized_orders confirmation.
+def _refund_matches(rows):
+    """Yield (sale_index, [refund_indices], total) per unambiguous order line.
 
-    Each Erstattung row is matched to at most one Bestellung row (same
-    Bestellnummer/Artikelnummer/SKU/Partner), so a refund can never reduce
-    more than one open claim. Ambiguous groups (more than one sale row) are
-    left unmatched rather than guessed.
+    An order line is grouped by Bestellnummer/Artikelnummer/SKU/Partner -
+    the same identity used across every partner (MH, NB, Evelyn's Gruppe B,
+    Gruppe A, ...), no partner-specific rule. A group is only resolved when
+    it has exactly one Bestellung row; a group with more than one sale row
+    is left out entirely rather than guessed, so a refund can never be
+    matched - and therefore never applied - twice.
     """
-    zero = Decimal('0.00')
-    result = pd.Series(zero, index=rows.index, dtype=object)
     keys = ['Bestellnummer', 'Artikelnummer', 'SKU', 'Partner']
     required = set(keys + ['Art', 'Erlös_Brutto'])
     if rows.empty or not required.issubset(rows.columns):
-        return result
+        return
     eligible = rows['Art'].isin(['Bestellung', 'Erstattung'])
     eligible &= rows[keys].apply(lambda column: column.map(clean).astype(bool)).all(axis=1)
     for _, block in rows.loc[eligible].groupby(keys, dropna=False):
@@ -87,9 +87,35 @@ def refund_offset(rows):
         refunds = block[block['Art'] == 'Erstattung']
         if len(sale) != 1 or refunds.empty:
             continue
-        total = sum((Decimal(str(value)).quantize(Decimal('.01')) for value in refunds['Erlös_Brutto']), zero)
-        result.loc[sale.index] = total
+        total = sum((Decimal(str(value)).quantize(Decimal('.01')) for value in refunds['Erlös_Brutto']), Decimal('0.00'))
+        yield sale.index[0], list(refunds.index), total
+
+
+def refund_offset(rows):
+    """Automatic per-order-line refund netting, independent of manual neutralized_orders confirmation.
+
+    Partner-agnostic: applies identically to every partner (MH, NB, ...).
+    """
+    result = pd.Series(Decimal('0.00'), index=rows.index, dtype=object)
+    for sale_index, _, total in _refund_matches(rows):
+        result.loc[sale_index] = total
     return result
+
+
+def linked_refunds(rows, sale_index):
+    """Erstattung rows linked 1:1 to the given sale row index/indices.
+
+    Looks up matches in the full `rows` frame (so a refund is found even if
+    it isn't itself part of the `sale_index` selection), reusing the exact
+    same grouping as refund_offset. A refund is returned at most once, for
+    at most one sale row, so it can never be counted twice.
+    """
+    wanted = set(sale_index)
+    indices = []
+    for index, refund_indices, _ in _refund_matches(rows):
+        if index in wanted:
+            indices.extend(refund_indices)
+    return rows.loc[indices]
 
 
 def open_gross(rows):

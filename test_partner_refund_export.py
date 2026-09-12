@@ -1,0 +1,215 @@
+"""Regression for the MH partner-Excel refund bug: the individual partner export
+(export_partner_excel / studio_view.partner_rows) must use the exact same
+refund/offset logic as the central settlement (core.refund_offset /
+core.apply_open_refunds / core.linked_refunds), not a separate, older filter
+that drops Erstattung rows before they ever reach the export.
+
+The order numbers/amounts below mirror the real MH control set reported for
+payout 7725289401 plus the two later RE0090-linked refunds - used here only
+as a regression fixture, never hard-coded into the production logic itself.
+The same scenario is repeated for a second partner (NB) to prove the fix is
+generic, not an MH-specific special case.
+"""
+import io
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from openpyxl import load_workbook
+
+import core
+import position_workflow as workflow
+import studio_view
+from partner_export import export_partner_excel, prepare_partner_export
+from test_recovery import payout
+from test_invoice_support import review_positions
+
+# (Bestellnummer, refund amount) - all fully refunded before any partner payment.
+MH_PAYOUT_7725289401_REFUNDS = [
+    ('02-15111-34101', '-155,98'),
+    ('14-15091-70890', '-448,99'),
+    ('21-15067-10713', '-77,99'),
+    ('24-15066-72008', '-34,99'),
+    ('27-15053-47641', '-12,99'),
+]
+# Later refunds against MH orders already inside an (unrelated, untouched) Evelyn
+# Lexware voucher; MH itself was never paid for them.
+MH_RE0090_LINKED_REFUNDS = [
+    ('09-15110-28069', '-29,99'),
+    ('18-15094-64423', '-29,99'),
+]
+
+
+class PartnerRefundExportTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.paths = patch.multiple(core, PAYOUTS_DB_PATH=str(self.root / 'Master_Payouts.csv'),
+                                    ORDERS_DB_PATH=str(self.root / 'Master_Orders.csv'))
+        self.paths.start()
+        self.addCleanup(self.paths.stop)
+        self.http = patch('requests.sessions.Session.request', side_effect=AssertionError('Live HTTP forbidden'))
+        self.http.start()
+        self.addCleanup(self.http.stop)
+
+    def _finish(self, frames):
+        for frame in frames:
+            frame['Transaktionsbetrag (inkl. Kosten)'] = frame['Betrag abzügl. Kosten']
+            frame['Auszahlungsdatum'] = '03.09.2026'
+            frame['Auszahlungsstatus'] = 'Betrag überwiesen'
+        core.import_reports(frames, core.ORDERS_DB_PATH, 'orders')
+        core.import_reports(frames, core.PAYOUTS_DB_PATH, 'payout')
+        core.sync_status(core.load_master_data())
+
+    def _sale_refund(self, payout_id, order, sale_amount, refund_amount, sku):
+        sale = payout(payout_id, 'sale-' + order, order, sku=sku, amount=sale_amount)
+        refund = payout(payout_id, 'refund-' + order, order, sku=sku, amount=refund_amount, kind='Rückerstattung')
+        for frame in (sale, refund):
+            frame['Artikelnummer'] = 'item-' + order
+        return [sale, refund]
+
+    def _regular_sale(self, payout_id, order, amount, sku):
+        sale = payout(payout_id, 'sale-' + order, order, sku=sku, amount=amount)
+        sale['Artikelnummer'] = 'item-' + order
+        return sale
+
+    def build_scenario(self, sku, full_refunds, regular_count=4):
+        """A partner with `regular_count` untouched open positions, the given
+        full-refund order/amount pairs (all unpaid), two Evelyn-Lexware-bound
+        orders refunded later (MH only), and one already-reviewed order
+        refunded after review (must become a separate refund_case, never
+        merged with new positions)."""
+        reviewed_order = 'reviewed-1'
+        # Phase 1: the reviewed order exists alone, gets reviewed/approved -
+        # its own historical invoice, fixed before anything else is imported.
+        self._finish([self._regular_sale('p-reviewed', reviewed_order, '50,00', sku)])
+        first_key = workflow.positions().loc[lambda r: r.Bestellnummer == reviewed_order, 'position_key'].iloc[0]
+        review_positions([first_key])
+
+        # Phase 2: everything else, including the reviewed order's refund.
+        frames = []
+        for order, refund_amount in full_refunds:
+            sale_amount = refund_amount.lstrip('-')
+            frames += self._sale_refund('p-open', order, sale_amount, refund_amount, sku)
+        regular_orders = [f'regular-{i}' for i in range(regular_count)]
+        for i, order in enumerate(regular_orders):
+            frames.append(self._regular_sale('p-open', order, f'{20 + i}.00'.replace('.', ','), sku))
+        bound_orders = []
+        if sku.startswith('MH'):
+            for order, refund_amount in MH_RE0090_LINKED_REFUNDS:
+                sale_amount = refund_amount.lstrip('-')
+                frames += self._sale_refund('p-bound', order, sale_amount, refund_amount, sku)
+                bound_orders.append(order)
+        frames += self._sale_refund('p-open', reviewed_order, '50,00', '-50,00', sku)[1:]  # refund only
+        self._finish(frames)
+        if bound_orders:
+            with core.ledger() as db:
+                db.execute("UPDATE payouts SET attempt='created',invoice_id='RE0090-test' WHERE id='p-bound'")
+                db.commit()
+        return regular_orders, bound_orders, reviewed_order
+
+    def run_partner_scenario(self, sku, partner_name):
+        full_refunds = MH_PAYOUT_7725289401_REFUNDS if partner_name == 'MH' else [
+            (f'{partner_name.lower()}-full-{i}', f'-{10+i},00') for i in range(3)
+        ]
+        regular_orders, bound_orders, reviewed_order = self.build_scenario(sku, full_refunds, regular_count=4)
+        business = workflow.positions()
+        if bound_orders:
+            self.assertTrue(business.loc[business.Bestellnummer.isin(bound_orders) & (business.Art == 'Bestellung'), 'Lexware_uebertragen'].all())
+        partner_ready = studio_view.partner_rows(business)
+        mh = partner_ready[partner_ready.Partner == partner_name]
+
+        refunded_orders = {order for order, _ in full_refunds} | set(bound_orders)
+        open_sales = mh[mh.Art == 'Bestellung']
+        # Regular positions (plus the untouched, already-reviewed order) are all
+        # that remains as Bestellung rows; none of the refunded orders are among them.
+        self.assertEqual(sorted(open_sales.Bestellnummer), sorted(regular_orders + [reviewed_order]))
+        self.assertFalse(refunded_orders & set(open_sales.Bestellnummer))
+
+        # The reviewed-and-then-refunded order passes through unmodified (history never changes)...
+        settled = mh[(mh.Bestellnummer == reviewed_order) & (mh.Art == 'Bestellung')]
+        self.assertEqual(len(settled), 1)
+        self.assertEqual(round(float(settled.iloc[0].Erlös_Brutto), 2), 50.00)
+        # ...and its refund is a separate case, never inside the export selection.
+        self.assertNotIn(reviewed_order, mh.loc[mh.Art == 'Erstattung', 'Bestellnummer'].tolist())
+        cases = studio_view.partner_refund_cases(business[business.Partner == partner_name])
+        self.assertEqual(cases.Bestellnummer.tolist(), [reviewed_order])
+
+        # Every applicable refund is visible exactly once, tied to its own order/finance id.
+        export_refunds = mh[mh.Art == 'Erstattung']
+        self.assertEqual(sorted(export_refunds.Bestellnummer), sorted(refunded_orders))
+        self.assertEqual(export_refunds.Bestellnummer.duplicated().sum(), 0)
+        self.assertEqual(export_refunds.Transaktionsnummer.duplicated().sum(), 0)
+
+        # Mirror app.py exactly: only not-yet-reviewed rows go into the *new* export/download
+        # ("Neu für nächste Rechnung"); the already-reviewed order stays out - its historical
+        # invoice is untouched and it is paid via the separate "Zahlung offen" bucket instead.
+        next_invoice = mh[~mh.reviewed_at.astype(bool)]
+        self.assertNotIn(reviewed_order, next_invoice.Bestellnummer.tolist())
+
+        model = prepare_partner_export(next_invoice)
+        rechnung_orders = {item['order'] for item in model['Rechnung']}
+        gutschrift_orders = {item['order'] for item in model['Gutschriften']}
+        self.assertEqual(rechnung_orders, set(regular_orders))
+        self.assertEqual(gutschrift_orders, refunded_orders)
+
+        blob = export_partner_excel(next_invoice)
+        path = Path(self.temp.name) / f'Partner_Patrick_{partner_name}.xlsx'
+        path.write_bytes(blob)
+        book = load_workbook(io.BytesIO(path.read_bytes()), data_only=True)
+        self.assertEqual(book.sheetnames, ['Rechnung', 'Gutschriften'])
+        rechnung, gutschriften = book['Rechnung'], book['Gutschriften']
+        rechnung_text = '\n'.join(str(cell.value) for row in rechnung for cell in row if cell.value is not None)
+        gutschrift_text = '\n'.join(str(cell.value) for row in gutschriften for cell in row if cell.value is not None)
+        self.assertNotIn('Keine Erstattungen vorhanden', gutschrift_text)
+        self.assertNotIn(reviewed_order, rechnung_text)  # historical invoice stays out of the new export
+        for order in refunded_orders:
+            self.assertIn(order, gutschrift_text)
+        for order in regular_orders:
+            self.assertIn(order, rechnung_text)
+            self.assertNotIn(order, gutschrift_text)
+
+        rechnung_rows = list(rechnung.iter_rows(min_row=15, max_row=14 + len(regular_orders)))
+        self.assertEqual({row[1].value for row in rechnung_rows}, set(regular_orders))
+        gutschrift_rows = list(gutschriften.iter_rows(min_row=15, max_row=14 + len(refunded_orders)))
+        self.assertEqual({row[1].value for row in gutschrift_rows}, refunded_orders)
+
+        rechnung_summary_row = 14 + max(1, len(regular_orders)) + 2 + 4
+        gutschrift_summary_row = 14 + max(1, len(refunded_orders)) + 2 + 4
+        excel_final = round(rechnung[f'K{rechnung_summary_row}'].value + gutschriften[f'K{gutschrift_summary_row}'].value, 2)
+
+        totals = model['totals']
+        system_final = round(float(totals['Rechnung']['gross'] + totals['Gutschriften']['gross']), 2)
+        summary = studio_view.partner_summary(next_invoice).iloc[0]
+        self.assertEqual(round(summary['Verbleibender Anspruch'], 2), system_final)
+        self.assertEqual(excel_final, system_final)
+        return regular_orders, refunded_orders, system_final
+
+    def test_mh_refund_control_set_matches_reconciliation_and_excel_matches_system(self):
+        regular, refunded, final = self.run_partner_scenario('MH / 1', 'MH')
+        self.assertEqual(len(regular), 4)
+        self.assertEqual(refunded, {o for o, _ in MH_PAYOUT_7725289401_REFUNDS} | {o for o, _ in MH_RE0090_LINKED_REFUNDS})
+
+    def test_same_generic_logic_applies_to_a_second_partner_nb(self):
+        regular, refunded, final = self.run_partner_scenario('NB / 1', 'NB')
+        self.assertEqual(len(regular), 4)
+        self.assertEqual(len(refunded), 3)
+
+    def test_refund_cannot_apply_twice_for_a_partner_export(self):
+        first = payout('p-open', 'sale-a', 'order-dup', sku='MH / 1', amount='30,00')
+        second = payout('p-open', 'sale-b', 'order-dup', sku='MH / 1', amount='30,00')
+        refund = payout('p-open', 'refund-dup', 'order-dup', sku='MH / 1', amount='-30,00', kind='Rückerstattung')
+        for frame in (first, second, refund):
+            frame['Artikelnummer'] = 'item-dup'
+        self._finish([first, second, refund])
+        business = workflow.positions()
+        mh = studio_view.partner_rows(business)
+        mh = mh[mh.Partner == 'MH']
+        self.assertEqual(len(mh[(mh.Bestellnummer == 'order-dup') & (mh.Art == 'Bestellung')]), 2)
+        self.assertTrue((mh.loc[(mh.Bestellnummer == 'order-dup') & (mh.Art == 'Bestellung'), 'Erlös_Brutto'] == 30.0).all())
+
+
+if __name__ == '__main__':
+    unittest.main()

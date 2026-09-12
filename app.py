@@ -195,12 +195,21 @@ def partner_panel(rows, rate, prefix, history_rows=None):
                         except ValueError as exc:
                             st.warning('Neue Abrechnung benötigt Prüfung: '+str(exc))
                         else:
-                            st.metric('Neu für nächste Rechnung',f'{len(next_invoice)} Positionen')
-                            st.metric('Neue offene Rechnungssumme',euros(pending['Rechnungsbetrag']))
-                            st.caption('Noch nicht geprüft/freigegeben · nicht in einer bestehenden Partnerrechnung gebunden.')
+                            next_sales=next_invoice[next_invoice.Art=='Bestellung']
+                            next_refunds=next_invoice[next_invoice.Art=='Erstattung']
+                            st.metric('Neu für nächste Rechnung',f'{len(next_sales)} Positionen')
+                            if not next_refunds.empty:
+                                st.metric('Refunds / Abzüge',f"{euros(pending['Refunds'])} · {len(next_refunds)} Erstattung(en)")
+                            st.metric('Verbleibender Partneranspruch',euros(pending['Verbleibender Anspruch']))
+                            st.caption('Noch nicht geprüft/freigegeben · nicht in einer bestehenden Partnerrechnung gebunden. Refunds sind einzeln im Gutschriften-Blatt der Abrechnung nachvollziehbar.')
                             if group_a_waits_for_all and awaiting_payment.empty:
                                 st.caption('Zahlungsabschluss erst möglich, wenn alle aktuell offenen Positionen dieses Partners geprüft sind.')
                             download('Einzelabrechnung herunterladen',next_invoice,prefix+'_'+partner)
+            refund_cases=studio_view.partner_refund_cases(partner_history)
+            if not refund_cases.empty:
+                with st.expander(f"Rückzahlungs-/Gutschriftfälle · {len(refund_cases)} bereits geprüfte/bezahlte Positionen mit späterer Erstattung"):
+                    st.caption('Bereits geprüfte oder bezahlte Positionen bleiben unverändert; hier nur zur separaten Klärung mit dem Partner.')
+                    st.dataframe(refund_cases[['Auszahlung Nr.','Bestellnummer','Partner','SKU','Erlös_Brutto']],hide_index=True,use_container_width=True)
             st.caption(f'Neu abrechnungsfähig: Rabatt {rate} wird auf den Nettobetrag berechnet. Bezahlte Belege bleiben hier in der Rechnungshistorie und zusätzlich unter Historie → Positionsstatus sichtbar.')
             invoice_history_panel(partner,partner_history,invoice_records,prefix+'_'+partner)
             invoice_panel(next_invoice,prefix+'_'+partner)

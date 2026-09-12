@@ -66,7 +66,43 @@ def lexware_create_ready(selected, totals, api_key, confirmations):
 
 
 def partner_rows(business):
-    return business[business.partner_ready].copy() if not business.empty else business.copy()
+    """Refund-aware, partner-agnostic selection: applies identically to every partner (MH, NB, ...).
+
+    Reuses the same open-amount offset as the Evelyn run (core.apply_open_refunds):
+    a not-yet-reviewed position fully refunded before payment carries no open
+    claim and drops out; a partial refund reduces it. The matching Erstattung
+    rows are added back so every partner export can show its refunds, never
+    just a filtered-out total. Positions already reviewed/paid/closed are
+    never changed retroactively - see partner_refund_cases() for refunds
+    linked to those; they surface as a separate case instead.
+    """
+    if business.empty:
+        return business.copy()
+    ready = business[business.partner_ready].copy()
+    if ready.empty:
+        return ready
+    committed = ready.reviewed_at.astype(bool) if 'reviewed_at' in ready else pd.Series(False, index=ready.index)
+    fresh, settled = ready[~committed], ready[committed]
+    open_rows = core.apply_open_refunds(fresh) if not fresh.empty else fresh
+    refunds = core.linked_refunds(business, fresh.index) if not fresh.empty else business.iloc[0:0]
+    return pd.concat([open_rows, settled, refunds]).sort_index()
+
+
+def partner_refund_cases(business):
+    """Refunds linked to an already reviewed/paid/closed position, for every partner.
+
+    These must not be silently netted against new positions; history (the
+    already-committed sale row, and any invoice already matched against it)
+    stays untouched. Returned separately so they can be surfaced as their
+    own repayment/credit case.
+    """
+    if business.empty or not {'Art', 'reviewed_at', 'paid_at', 'closed_at'}.issubset(business.columns):
+        return business.iloc[0:0].copy()
+    committed = business[(business.Art == 'Bestellung')
+                          & (business.reviewed_at.astype(bool) | business.paid_at.astype(bool) | business.closed_at.astype(bool))]
+    if committed.empty:
+        return business.iloc[0:0].copy()
+    return core.linked_refunds(business, committed.index)
 
 
 def partner_summary(rows):
@@ -74,7 +110,9 @@ def partner_summary(rows):
     if rows.empty:
         return pd.DataFrame(records)
     for partner, block in rows.groupby('Partner'):
+        sales = block[block.Art == 'Bestellung'] if 'Art' in block else block
         totals = prepare_partner_export(block)['totals']['Rechnung']
+        refund_totals = prepare_partner_export(block)['totals']['Gutschriften']
         if 'reviewed_at' in block and block.reviewed_at.astype(bool).any():
             import partner_invoices
             reviewed = block[block.reviewed_at.astype(bool)]
@@ -82,8 +120,10 @@ def partner_summary(rows):
             totals['gross'] = partner_invoices.confirmed_payment_total(reviewed)
             if not pending.empty:
                 totals['gross'] += prepare_partner_export(pending)['totals']['Rechnung']['gross']
-        records.append({'Partner': partner, 'Positionen': len(block), 'eBay-Brutto': float(totals['ebay']),
-                        'Rabatt netto': float(totals['discount']), 'Rechnungsbetrag': float(totals['gross'])})
+        records.append({'Partner': partner, 'Positionen': len(sales), 'eBay-Brutto': float(totals['ebay']),
+                        'Rabatt netto': float(totals['discount']), 'Rechnungsbetrag': float(totals['gross']),
+                        'Refunds': float(refund_totals['gross']),
+                        'Verbleibender Anspruch': float(totals['gross'] + refund_totals['gross'])})
     return pd.DataFrame(records)
 
 
