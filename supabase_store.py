@@ -75,6 +75,15 @@ def _request(sql, readonly=False):
     return value if isinstance(value, list) else value.get('result', [])
 
 
+def read_only_sql(sql):
+    """Expose the app's existing read-only Postgres channel for diagnostics.
+
+    Same credentials and endpoint as get()/put() (SUPABASE_ACCESS_TOKEN,
+    SUPABASE_PROJECT_REF) — no separate connection or token, read-only.
+    """
+    return _request(sql, readonly=True)
+
+
 def preflight():
     """Verify Supabase is reachable and the configured credentials actually authenticate.
 

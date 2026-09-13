@@ -8,6 +8,8 @@ import streamlit as st
 import trust_risk as risk
 import audit_case_store
 import trust_risk_reporting as reporting
+import mh_reconciliation
+import supabase_store
 from ebay_readonly import Client, EbayError, secrets_config
 
 
@@ -90,9 +92,73 @@ def render_case_check():
         st.dataframe(visible,hide_index=True,width='stretch',height=520)
 
 
+def _mh_tagged_rows(rows, art_label):
+    return [{'Typ': art_label, **row} for row in rows]
+
+
+def _mh_detail_table(title, rows):
+    if rows:
+        st.write('**' + title + f' ({len(rows)})**')
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+
+def render_mh_reconciliation_result(result):
+    regular, refunds = result['regular'], result['refunds']
+    missing = _mh_tagged_rows(regular['missing'], 'Regulär') + _mh_tagged_rows(refunds['missing'], 'Refund')
+    extra = _mh_tagged_rows(regular['extra'], 'Regulär') + _mh_tagged_rows(refunds['extra'], 'Refund')
+    duplicates = _mh_tagged_rows(regular['duplicates'], 'Regulär') + _mh_tagged_rows(refunds['duplicates'], 'Refund')
+    mismatches = _mh_tagged_rows(regular['amount_mismatches'], 'Regulär') + _mh_tagged_rows(refunds['amount_mismatches'], 'Refund')
+    if result['ok']:
+        st.success(
+            f"{regular['matched']}/{mh_reconciliation.EXPECTED_REGULAR} regulär gematcht, "
+            f"{refunds['matched']}/{mh_reconciliation.EXPECTED_REFUNDS} Refunds gematcht, "
+            "0 fehlend, 0 zusätzlich, 0 Dubletten, 0 Betragsabweichungen."
+        )
+    else:
+        st.error('Abweichung(en) gefunden — Details unten. Keine Freigabe.')
+    cols = st.columns(6)
+    cols[0].metric('regulär gematcht', f"{regular['matched']}/{regular['total_reviewed']}")
+    cols[1].metric('Refunds gematcht', f"{refunds['matched']}/{refunds['total_reviewed']}")
+    cols[2].metric('fehlend', len(missing))
+    cols[3].metric('zusätzlich', len(extra))
+    cols[4].metric('Dubletten', len(duplicates))
+    cols[5].metric('Betragsabweichungen', len(mismatches))
+    st.caption('Lauf: ' + result['run_at'] + ' · Erwartung: 59 reguläre Positionen, 7 Refunds, Payouts '
+               + ', '.join(mh_reconciliation.PAYOUT_IDS))
+    _mh_detail_table('Fehlend (in Rohdaten, nicht in Abrechnung)', missing)
+    _mh_detail_table('Zusätzlich (in Abrechnung, nicht in Rohdaten)', extra)
+    _mh_detail_table('Dubletten', duplicates)
+    _mh_detail_table('Betragsabweichungen', mismatches)
+
+
+def render_mh_reconciliation():
+    with st.container(border=True):
+        st.subheader('MH-Rohdatenabgleich – Diagnose')
+        st.caption(
+            'Read-only 1:1-Abgleich für Partner MH, Payouts 01.09.–08.09.2026: aktuell geprüfter '
+            'Abrechnungsbestand (Supabase source/orders.csv + source/payouts.csv) gegen die rohen '
+            'eBay-API-Transaktionen (Supabase Postgres public.orders / public.payout_transactions). '
+            'Rein lesend — kein Import, keine Statusänderung, keine Datenbankänderung.'
+        )
+        if st.button('Abgleich jetzt ausführen (nur MH, 01.09.–08.09.2026)', key='mh-reconciliation-run'):
+            try:
+                with st.spinner('Rohdaten und Abrechnungsbestand werden read-only verglichen …'):
+                    st.session_state['mh_reconciliation_result'] = mh_reconciliation.check()
+            except supabase_store.StoreError as exc:
+                st.session_state['mh_reconciliation_result'] = None
+                st.error('Abgleich nicht möglich: ' + str(exc))
+            except Exception as exc:
+                st.session_state['mh_reconciliation_result'] = None
+                st.error('Abgleich fehlgeschlagen (' + type(exc).__name__ + '). Bitte erneut versuchen.')
+        result = st.session_state.get('mh_reconciliation_result')
+        if result:
+            render_mh_reconciliation_result(result)
+
+
 def render(data_dir, catalogue, orders, raw):
     st.subheader('Trust / Risk')
     st.caption('Durchstartaccount · eBay lesen, Risiken prüfen, nächste Schritte vorbereiten')
+    render_mh_reconciliation()
     configured = True
     try:
         secrets_config()
