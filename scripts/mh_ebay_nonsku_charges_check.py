@@ -1,23 +1,23 @@
 """Read-only classification of negative eBay positions without a
 Bestellnummer/SKU for the 5 tracked MH payouts (see
-mh_reconciliation.PAYOUT_IDS).
+this script's own PAYOUT_IDS).
 
-Context: mh_reconciliation.check()'s Seite-2 eBay comparison
+Context: partner_reconciliation.check()'s Seite-2 eBay comparison
 (_to_comparable) deliberately drops every 'Andere Gebühr' (NON_SALE_CHARGE)
 row before comparing, and further scopes the remaining rows to
-Bestellnummern already known as MH (ebay_scoped in check()). A
+Bestellnummern already known as this partner (ebay_scoped in check()). A
 NON_SALE_CHARGE transaction never carries an orderId (see ebay_sync.adapt():
 'order' is only ever taken from transaction.get('orderId', ''), which eBay
 never sets on a non-sale charge), while SALE/REFUND always require one
 (adapt() raises otherwise) — so Bestellnummer=='' is the correct,
 structural way to isolate these rows. SKU cannot be used for this on the
-live-eBay side: mh_reconciliation._fetch_ebay_raw() calls
+live-eBay side: partner_reconciliation._fetch_ebay_raw() calls
 ebay_sync.adapt(rows, payouts, empty, empty) with an *empty* orders frame
 (see its own docstring — it only needs adapt() as a canonicalizer, not for
 SKU resolution), so SKU is structurally '' for every row on that path, not
 just for charges; filtering on SKU there would also catch genuine REFUND
 rows and misrepresent them as "ohne SKU" positions. Such Bestellnummer-less
-rows structurally cannot appear in mh_reconciliation.check()'s missing/
+rows structurally cannot appear in partner_reconciliation.check()'s missing/
 extra lists — they are excluded before the comparison even runs, not
 silently mismatched. This script surfaces exactly those rows for the 5
 tracked payouts and classifies each with the *unmodified* production fee
@@ -36,7 +36,7 @@ is flagged explicitly instead of being silently treated as a fee.
 Two independent angles are checked, since it is not certain from which side
 the 4 positions were observed:
 
-  Angle A — live eBay pull: mh_reconciliation._fetch_ebay_raw() (already
+  Angle A — live eBay pull: partner_reconciliation._fetch_ebay_raw() (already
   committed, already tested), i.e. the same client.get('payout')/
   client.pages('transactions')/ebay_sync.validate_payout()/ebay_sync.adapt()
   calls the real API-sync path uses, called here read-only for exactly the
@@ -46,7 +46,7 @@ the 4 positions were observed:
   core.PAYOUTS_DB_PATH) for the same 5 payout IDs, in case these positions
   were already synced into source/payouts.csv before this check runs.
 
-Purely read-only: only core.read_master()/mh_reconciliation._fetch_ebay_raw()/
+Purely read-only: only core.read_master()/partner_reconciliation._fetch_ebay_raw()/
 ebay_readonly.Client are used. No supabase_store.put/put_json, no
 core.import_reports, no core.sync_status, no ebay_sync.run, no
 position_workflow.confirm anywhere in this file.
@@ -63,9 +63,16 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import core
-import mh_reconciliation
+import partner_reconciliation
 import supabase_store
 from ebay_readonly import Client
+
+# The 5 payouts from the original MH claim investigation this script was
+# built for. partner_reconciliation.check() itself no longer hardcodes a
+# payout list (it derives payout IDs from whatever is currently
+# exportable) - this script keeps its own fixed scope since it targets that
+# specific historical investigation, not a general per-partner check.
+PAYOUT_IDS = ('7710027297', '7712804241', '7714928937', '7718008497', '7725289401')
 
 
 def _is_fee(typ, order_id):
@@ -107,7 +114,7 @@ def main():
     print('=' * 78)
     print('ANGLE A: Live eBay-Abfrage für die 5 überwachten Payouts (read-only)')
     print('=' * 78)
-    verified, error, ebay_frame = mh_reconciliation._fetch_ebay_raw(Client())
+    verified, error, ebay_frame = partner_reconciliation._fetch_ebay_raw(Client(), PAYOUT_IDS)
     ebay_count = None
     ebay_unexpected = False
     if not verified:
@@ -119,7 +126,7 @@ def main():
         ebay_count = 0
         print('Keine SALE/REFUND/NON_SALE_CHARGE-Bewegungen im live eBay-Datensatz für diese Payouts.')
     else:
-        scoped = ebay_frame[ebay_frame['Auszahlung Nr.'].isin(mh_reconciliation.PAYOUT_IDS)]
+        scoped = ebay_frame[ebay_frame['Auszahlung Nr.'].isin(PAYOUT_IDS)]
         negative = scoped[scoped['Betrag abzügl. Kosten'].map(core.parse_money).astype(float) < 0]
         # Bestellnummer=='', not SKU=='', is the correct filter here — see module docstring.
         ebay_candidates = negative[negative['Bestellnummer'] == '']
@@ -134,7 +141,7 @@ def main():
     print('ANGLE B: Bereits importierte Payout-Zeilen (source/payouts.csv) für dieselben Payouts')
     print('=' * 78)
     payouts = core.read_master(core.PAYOUTS_DB_PATH)
-    scoped_csv = payouts[payouts['Auszahlung Nr.'].isin(mh_reconciliation.PAYOUT_IDS)]
+    scoped_csv = payouts[payouts['Auszahlung Nr.'].isin(PAYOUT_IDS)]
     negative_csv = scoped_csv[scoped_csv['Betrag abzügl. Kosten'].map(core.parse_money).astype(float) < 0]
     csv_candidates = negative_csv[negative_csv['Bestellnummer'] == '']
     print(f'Negative Positionen ohne Bestellnummer (von {len(scoped_csv)} Zeilen gesamt in diesen Payouts): '
@@ -155,7 +162,7 @@ def main():
     if ebay_count or len(csv_candidates):
         if not ebay_unexpected and not csv_unexpected:
             print('Alle oben gefundenen Positionen erfüllen fee=True: partnerlose Gebühren/Charges, korrekt '
-                  'außerhalb der MH-Abrechnung. ok=False in mh_reconciliation.check() ist damit für diese '
+                  'außerhalb der MH-Abrechnung. ok=False in partner_reconciliation.check() ist damit für diese '
                   'Positionen ein reiner Prüfhinweis, kein Fehler der MH-Abrechnung.')
         else:
             print('MINDESTENS EINE Position erfüllt fee=True NICHT (siehe "WEICHT VON DER ERWARTUNG AB" oben) — '

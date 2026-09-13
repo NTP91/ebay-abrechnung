@@ -8,7 +8,7 @@ import streamlit as st
 import trust_risk as risk
 import audit_case_store
 import trust_risk_reporting as reporting
-import mh_reconciliation
+import partner_reconciliation
 import supabase_store
 from ebay_readonly import Client, EbayError, secrets_config
 
@@ -92,46 +92,46 @@ def render_case_check():
         st.dataframe(visible,hide_index=True,width='stretch',height=520)
 
 
-def _mh_tagged_rows(rows, art_label):
+def _reconciliation_tagged_rows(rows, art_label):
     return [{'Typ': art_label, **row} for row in rows]
 
 
-def _mh_detail_table(title, rows):
+def _reconciliation_detail_table(title, rows):
     if rows:
         st.write('**' + title + f' ({len(rows)})**')
         st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
 
-def render_mh_reconciliation_result(result):
+def render_partner_reconciliation_result(result):
+    partner = result['partner']
+    if result['status'] == 'no_open_positions':
+        st.info(f'Kein offener exportierbarer Bestand für Partner {partner!r} — nichts zu prüfen. '
+                'Das ist keine positive eBay-Bestätigung, sondern bedeutet lediglich, dass „Einzelabrechnung '
+                'herunterladen“ für diesen Partner aktuell nichts exportieren würde.')
+        return
     precondition = result['precondition']
-    st.write('**Schritt 1 · Bestand vor dem Vergleich (exakt die Menge, die „Einzelabrechnung herunterladen“ für MH jetzt exportieren würde)**')
+    st.write(f'**Schritt 1 · Bestand vor dem Vergleich (exakt die Menge, die „Einzelabrechnung herunterladen“ '
+             f'für {partner} jetzt exportieren würde)**')
     pre_cols = st.columns(2)
-    pre_cols[0].metric('reguläre Positionen', f"{precondition['regular_count']}/{mh_reconciliation.EXPECTED_REGULAR}")
-    pre_cols[1].metric('Refunds', f"{precondition['refund_count']}/{mh_reconciliation.EXPECTED_REFUNDS}")
-    if not (precondition['regular_ok'] and precondition['refund_ok']):
-        st.warning(
-            'Der exportierbare Bestand weicht bereits vor dem eBay-Vergleich von der Erwartung ab '
-            '(z. B. weil einzelne Positionen bereits geprüft/bezahlt/abgeschlossen sind oder ein API-Einbehalt '
-            'vorliegt und dadurch nicht mehr im nächsten Download enthalten sind). Der folgende Vergleich '
-            'bezieht sich auf den tatsächlich exportierbaren Bestand, nicht auf die ursprüngliche Erwartung — '
-            'der Gesamtstatus kann trotzdem nicht grün werden.'
-        )
+    pre_cols[0].metric('reguläre Positionen', precondition['regular_count'])
+    pre_cols[1].metric('Refunds', precondition['refund_count'])
     st.write('**Schritt 2 · Unabhängige Bestätigung direkt von eBay**')
     if not result['verified']:
         st.error('Unabhängige eBay-Prüfung nicht möglich — nicht verifiziert. ' + (result.get('error') or ''))
         st.caption('Kein Fallback auf Supabase/Postgres oder andere Quellen. Ergebnis kann deshalb nicht grün sein.')
         return
-    st.success('eBay-Abfrage für alle 5 Payouts vollständig erfolgreich (Payout- und Transaktionsdaten gelesen und intern bestätigt).')
+    st.success(f'eBay-Abfrage für alle {len(result["payout_ids"])} betroffenen Payouts vollständig erfolgreich '
+               '(Payout- und Transaktionsdaten gelesen und intern bestätigt).')
     st.write('**Schritt 3 · Abgleich des exportierbaren Bestands gegen die eBay-Rohdaten**')
     regular, refunds = result['regular'], result['refunds']
-    missing = _mh_tagged_rows(regular['missing'], 'Regulär') + _mh_tagged_rows(refunds['missing'], 'Refund')
-    extra = _mh_tagged_rows(regular['extra'], 'Regulär') + _mh_tagged_rows(refunds['extra'], 'Refund')
-    duplicates = _mh_tagged_rows(regular['duplicates'], 'Regulär') + _mh_tagged_rows(refunds['duplicates'], 'Refund')
-    mismatches = _mh_tagged_rows(regular['amount_mismatches'], 'Regulär') + _mh_tagged_rows(refunds['amount_mismatches'], 'Refund')
+    missing = _reconciliation_tagged_rows(regular['missing'], 'Regulär') + _reconciliation_tagged_rows(refunds['missing'], 'Refund')
+    extra = _reconciliation_tagged_rows(regular['extra'], 'Regulär') + _reconciliation_tagged_rows(refunds['extra'], 'Refund')
+    duplicates = _reconciliation_tagged_rows(regular['duplicates'], 'Regulär') + _reconciliation_tagged_rows(refunds['duplicates'], 'Refund')
+    mismatches = _reconciliation_tagged_rows(regular['amount_mismatches'], 'Regulär') + _reconciliation_tagged_rows(refunds['amount_mismatches'], 'Refund')
     if result['ok']:
         st.success(
-            f"{regular['matched']}/{mh_reconciliation.EXPECTED_REGULAR} regulär gematcht, "
-            f"{refunds['matched']}/{mh_reconciliation.EXPECTED_REFUNDS} Refunds gematcht, "
+            f"{regular['matched']}/{regular['total_reviewed']} regulär gematcht, "
+            f"{refunds['matched']}/{refunds['total_reviewed']} Refunds gematcht, "
             "0 fehlend, 0 zusätzlich, 0 Dubletten, 0 Betragsabweichungen — unabhängig von eBay bestätigt."
         )
     else:
@@ -148,46 +148,55 @@ def render_mh_reconciliation_result(result):
         f"Refunds {refunds['total_amount_reviewed']:.2f} € / {refunds['total_amount_raw']:.2f} € · "
         f"eBay-Positionen insgesamt in diesen Payouts (alle Partner): {result.get('ebay_total_positions', '—')}"
     )
-    st.caption('Lauf: ' + result['run_at'] + ' · Erwartung: 59 reguläre Positionen, 7 Refunds, Payouts '
-               + ', '.join(mh_reconciliation.PAYOUT_IDS))
-    _mh_detail_table('Fehlend (bei eBay vorhanden, nicht in der Abrechnung)', missing)
-    _mh_detail_table('Zusätzlich (in der Abrechnung, nicht bei eBay bestätigt)', extra)
-    _mh_detail_table('Dubletten', duplicates)
-    _mh_detail_table('Betragsabweichungen', mismatches)
+    st.caption(f"Lauf: {result['run_at']} · Partner: {partner} · Payouts: " + ', '.join(result['payout_ids']))
+    _reconciliation_detail_table('Fehlend (bei eBay vorhanden, nicht in der Abrechnung)', missing)
+    _reconciliation_detail_table('Zusätzlich (in der Abrechnung, nicht bei eBay bestätigt)', extra)
+    _reconciliation_detail_table('Dubletten', duplicates)
+    _reconciliation_detail_table('Betragsabweichungen', mismatches)
 
 
-def render_mh_reconciliation():
+def render_partner_reconciliation():
     with st.container(border=True):
-        st.subheader('MH-Rohdatenabgleich – Diagnose')
+        st.subheader('Rohdatenabgleich – Diagnose')
         st.caption(
-            'Read-only 1:1-Abgleich für Partner MH, Payouts 01.09.–08.09.2026: exakt die Positionsmenge, '
-            'die „Einzelabrechnung herunterladen“ jetzt exportieren würde (gleiche Auswahl-/Status-/Sperr-/'
-            'Offen-Filter wie im echten Download), gegen eine unabhängige, live gelesene Bestätigung direkt '
-            'von eBay (Payout + Transaktionen je Payout-ID, keine Supabase-/Postgres-Rohdaten mehr). '
-            'Rein lesend — kein Import, keine Statusänderung, keine Datenbankänderung. Kann „grün“ nur '
-            'melden, wenn die eBay-Abfrage vollständig erfolgreich war; sonst „nicht verifiziert“.'
+            'Read-only 1:1-Abgleich für einen beliebigen Partner: exakt die Positionsmenge, die '
+            '„Einzelabrechnung herunterladen“ für diesen Partner jetzt exportieren würde (gleiche Auswahl-/'
+            'Status-/Sperr-/Offen-Filter wie im echten Download, für Gruppe A und Gruppe B identisch), gegen '
+            'eine unabhängige, live gelesene Bestätigung direkt von eBay (Payout + Transaktionen je '
+            'Payout-ID, keine Supabase-/Postgres-Rohdaten). Die geprüften Payouts ergeben sich aus dem '
+            'aktuellen Bestand des Partners, nicht aus einer festen Liste. Rein lesend — kein Import, keine '
+            'Statusänderung, keine Datenbankänderung. Kann „grün“ nur melden, wenn die eBay-Abfrage '
+            'vollständig erfolgreich war; sonst „nicht verifiziert“.'
         )
-        if st.button('Abgleich jetzt ausführen (nur MH, 01.09.–08.09.2026)', key='mh-reconciliation-run'):
+        partner = st.text_input(
+            'Partnercode (z. B. MH, NB, PP, BA, MK, 001…)', value='MH', key='partner-reconciliation-partner',
+        ).strip().upper()
+        run = st.button('Abgleich jetzt ausführen', key='partner-reconciliation-run', disabled=not partner)
+        if run:
             try:
                 if 'ebay_readonly_client' not in st.session_state:
                     st.session_state.ebay_readonly_client = Client()
-                with st.spinner('Exportierbarer Bestand wird ermittelt und unabhängig gegen eBay geprüft …'):
-                    st.session_state['mh_reconciliation_result'] = mh_reconciliation.check(st.session_state.ebay_readonly_client)
+                with st.spinner(f'Exportierbarer Bestand für {partner} wird ermittelt und unabhängig gegen eBay geprüft …'):
+                    st.session_state['partner_reconciliation_result'] = partner_reconciliation.check(
+                        partner, st.session_state.ebay_readonly_client)
             except supabase_store.StoreError as exc:
-                st.session_state['mh_reconciliation_result'] = None
+                st.session_state['partner_reconciliation_result'] = None
+                st.error('Abgleich nicht möglich: ' + str(exc))
+            except ValueError as exc:
+                st.session_state['partner_reconciliation_result'] = None
                 st.error('Abgleich nicht möglich: ' + str(exc))
             except Exception as exc:
-                st.session_state['mh_reconciliation_result'] = None
+                st.session_state['partner_reconciliation_result'] = None
                 st.error('Abgleich fehlgeschlagen (' + type(exc).__name__ + '). Bitte erneut versuchen.')
-        result = st.session_state.get('mh_reconciliation_result')
+        result = st.session_state.get('partner_reconciliation_result')
         if result:
-            render_mh_reconciliation_result(result)
+            render_partner_reconciliation_result(result)
 
 
 def render(data_dir, catalogue, orders, raw):
     st.subheader('Trust / Risk')
     st.caption('Durchstartaccount · eBay lesen, Risiken prüfen, nächste Schritte vorbereiten')
-    render_mh_reconciliation()
+    render_partner_reconciliation()
     configured = True
     try:
         secrets_config()
