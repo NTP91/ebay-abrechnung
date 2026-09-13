@@ -103,6 +103,19 @@ def _mh_detail_table(title, rows):
 
 
 def render_mh_reconciliation_result(result):
+    precondition = result['precondition']
+    st.write('**Schritt 1 · Bestand vor dem Rohdatenvergleich (exakt die Menge, die „Einzelabrechnung herunterladen“ für MH jetzt exportieren würde)**')
+    pre_cols = st.columns(2)
+    pre_cols[0].metric('reguläre Positionen', f"{precondition['regular_count']}/{mh_reconciliation.EXPECTED_REGULAR}")
+    pre_cols[1].metric('Refunds', f"{precondition['refund_count']}/{mh_reconciliation.EXPECTED_REFUNDS}")
+    if not (precondition['regular_ok'] and precondition['refund_ok']):
+        st.warning(
+            'Der exportierbare Bestand weicht bereits vor dem Rohdatenvergleich von der Erwartung ab '
+            '(z. B. weil einzelne Positionen bereits geprüft/bezahlt/abgeschlossen sind oder ein API-Einbehalt '
+            'vorliegt und dadurch nicht mehr im nächsten Download enthalten sind). Der folgende Rohdatenvergleich '
+            'bezieht sich auf den tatsächlich exportierbaren Bestand, nicht auf die ursprüngliche Erwartung.'
+        )
+    st.write('**Schritt 2 · Abgleich dieses exportierbaren Bestands gegen die Supabase-Rohdaten**')
     regular, refunds = result['regular'], result['refunds']
     missing = _mh_tagged_rows(regular['missing'], 'Regulär') + _mh_tagged_rows(refunds['missing'], 'Refund')
     extra = _mh_tagged_rows(regular['extra'], 'Regulär') + _mh_tagged_rows(refunds['extra'], 'Refund')
@@ -135,10 +148,11 @@ def render_mh_reconciliation():
     with st.container(border=True):
         st.subheader('MH-Rohdatenabgleich – Diagnose')
         st.caption(
-            'Read-only 1:1-Abgleich für Partner MH, Payouts 01.09.–08.09.2026: aktuell geprüfter '
-            'Abrechnungsbestand (Supabase source/orders.csv + source/payouts.csv) gegen die rohen '
-            'eBay-API-Transaktionen (Supabase Postgres public.orders / public.payout_transactions). '
-            'Rein lesend — kein Import, keine Statusänderung, keine Datenbankänderung.'
+            'Read-only 1:1-Abgleich für Partner MH, Payouts 01.09.–08.09.2026: exakt die Positionsmenge, '
+            'die „Einzelabrechnung herunterladen“ jetzt exportieren würde (gleiche Auswahl-/Status-/Sperr-/'
+            'Offen-Filter wie im echten Download), gegen die rohen eBay-API-Transaktionen (Supabase Postgres '
+            'public.orders / public.payout_transactions). Rein lesend — nur SELECT-Abfragen, kein Import, '
+            'keine Statusänderung, keine Datenbankänderung.'
         )
         if st.button('Abgleich jetzt ausführen (nur MH, 01.09.–08.09.2026)', key='mh-reconciliation-run'):
             try:

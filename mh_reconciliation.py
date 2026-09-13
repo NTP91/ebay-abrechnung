@@ -1,19 +1,45 @@
 """Read-only 1:1 reconciliation: reviewed MH settlement vs raw eBay-API data.
 
-Used only by the Trust/Risk diagnostic section (see trust_risk_ui.py). Never
-writes: only core.read_master() (Supabase blob storage, source/orders.csv +
-source/payouts.csv) and supabase_store.read_only_sql() (the app's existing
-Management API read-only SQL channel — same SUPABASE_ACCESS_TOKEN/
-SUPABASE_PROJECT_REF the app already uses everywhere, no separate
-credential) are used. Deliberately never calls core.ledger(),
-payout_reconciliation.gates() or api_holds.annotate(): those only ever add
-extra text/flags to positions that already exist and never change which
-rows exist or their amounts, so skipping them changes nothing about this
-comparison — and it means this diagnostic never touches
-state/settlement.sqlite3. Both sides of the comparison come from genuine,
-already-imported Supabase-native data: source/orders.csv + source/payouts.csv
-(Supabase blob storage) for the reviewed side, public.orders +
-public.payout_transactions (Supabase Postgres) for the raw side.
+Used only by the Trust/Risk diagnostic section (see trust_risk_ui.py).
+
+The "reviewed" side calls the exact, unmodified production functions that
+produce the "Einzelabrechnung herunterladen" export for a Gruppe-B partner
+(core.load_master_data -> position_workflow.positions ->
+studio_view.partner_rows), then applies the identical two selection steps
+app.py itself applies before that download: partner_panel()'s
+next_invoice = block[~block.reviewed_at.astype(bool)], and download()'s
+exclusion of closed_at/API_Hold positions. This is deliberate: an earlier
+version of this diagnostic reimplemented only core.load_master_data()'s
+classification and skipped position_workflow/partner_rows entirely, which
+does NOT reproduce what the download button actually exports whenever any
+position has already been reviewed, paid, closed, or held — exactly the
+gap this module now closes by calling the real functions instead of
+re-deriving their logic (Group-B refund-linking in particular is exactly
+the kind of settlement fachlogik this project's standing rule says not to
+touch/reimplement).
+
+This means the reviewed side does read state/settlement.sqlite3, via
+core.ledger() inside position_workflow.positions()/studio_view.partner_rows()
+— unavoidably, since position review/payment/closed status and invoice-
+position links are only tracked there. That blob is itself fetched from
+Supabase (supabase_store.get, same as every other read in this app), and
+every call in this module only ever executes SELECT statements inside
+core.ledger()'s context, so the existing, already-tested no-op-on-
+unchanged-content guarantee (core.ledger() only calls supabase_store.put()
+if the in-memory copy's bytes actually changed) means this stays read-only
+in practice, not just in intent. core.sync_status() is the one exception
+that genuinely can write even for an already-known payout — it is
+deliberately never called here; see _empty_sync_status().
+
+The raw side is unrelated to any of this: it is rebuilt straight from
+Supabase Postgres (public.orders + public.payout_transactions) via the
+app's existing supabase_store.read_only_sql() channel (a thin wrapper
+around the same _request(readonly=True) get()/preflight() already use —
+no separate credential), and classified with a faithful, read-only port of
+core.load_master_data()'s Partner/Art logic (_classify_raw below) — it has
+no review-workflow state of its own to consult, by design: it represents
+"what eBay's own transactions say should exist", independent of what has
+or hasn't been reviewed in the app yet.
 """
 from __future__ import annotations
 
@@ -23,7 +49,10 @@ from datetime import datetime
 
 import pandas as pd
 
+import api_holds
 import core
+import position_workflow
+import studio_view
 import supabase_store
 from payout_structure import validate as validate_children
 
@@ -116,13 +145,12 @@ def _fetch_raw_frames():
     return _raw_orders_frame(orders_rows), _raw_payouts_frame(transactions)
 
 
-def _classify(payouts, orders):
-    """Exact port of core.load_master_data()'s row inclusion/exclusion and
-    Partner-field computation (drops only the issue-string/group/title
-    bookkeeping this comparison does not need, and the two sqlite-backed
-    overlays — see module docstring). Every continue/append condition below
-    matches core.load_master_data() line for line, so a row is Partner=='MH'
-    here if and only if it would be in the production ledger."""
+def _classify_raw(payouts, orders):
+    """Faithful, read-only port of core.load_master_data()'s row
+    inclusion/exclusion and Partner-field computation (drops only the
+    issue-string/group/title bookkeeping this comparison does not need).
+    Used for the raw Postgres side only — see module docstring for why the
+    reviewed side instead calls the real production functions directly."""
     payouts = payouts[payouts['Auszahlung Nr.'] != '']
     child_indices = validate_children(payouts)
     processed = []
@@ -151,6 +179,45 @@ def _classify(payouts, orders):
             'Art': 'Gebühr' if fee else 'Erstattung' if amount < 0 else 'Bestellung',
         })
     return pd.DataFrame(processed)
+
+
+def _empty_sync_status():
+    """Stand-in for core.sync_status(master) that never writes.
+
+    core.sync_status() unconditionally opens a write transaction and can
+    genuinely INSERT a new payout row or UPDATE its status even for an
+    already-known payout (whenever its computed status differs from the
+    stored one) — never guaranteed to be a no-op, so it must not be called
+    from a diagnostic that promises zero writes. Its output (Auszahlung/
+    Status/Entwurf/Sperre) only affects position_workflow.positions()'s
+    'transferred'/'correction'/Bearbeitungsstatus-label computation, never
+    which rows belong to Gruppe B's sales_b/refunds_b or next_invoice/
+    download()'s closed_at+API_Hold exclusion (those read Prüfhinweis,
+    Quellenpruefung, api_holds.mask, closed_at, paid_at, reviewed_at
+    directly off the position — not Entwurf/Sperre) — so an empty
+    placeholder yields identical row membership and amounts for the MH/
+    Gruppe-B export this diagnostic reproduces."""
+    return pd.DataFrame({'Auszahlung': pd.Series([], dtype=str), 'Status': pd.Series([], dtype=str),
+                          'Entwurf': pd.Series([], dtype=object), 'Sperre': pd.Series([], dtype=object)})
+
+
+def _exported_reviewed_positions():
+    """The exact set 'Einzelabrechnung herunterladen' would export for MH
+    right now: same production functions app.py itself calls, same two
+    selection steps partner_panel()/download() apply. Read-only: only
+    SELECTs run inside core.ledger() (see _empty_sync_status for why
+    core.sync_status() itself is deliberately not called)."""
+    master = core.load_master_data()
+    business = position_workflow.positions(master, _empty_sync_status())
+    if business.empty:
+        return business
+    partner_ready = studio_view.partner_rows(business)
+    mh_block = partner_ready[(partner_ready['Gruppe'] == 'Gruppe B') & (partner_ready['Partner'] == PARTNER)]
+    next_invoice = mh_block[~mh_block['reviewed_at'].astype(bool)]
+    if next_invoice.empty:
+        return next_invoice
+    forbidden = set(business.loc[business['closed_at'].astype(bool) | api_holds.mask(business), 'position_key'])
+    return next_invoice[~next_invoice['position_key'].isin(forbidden)]
 
 
 def _position_key(row):
@@ -196,23 +263,38 @@ def _compare(reviewed, raw_truth):
 def check():
     """Run the MH 01.09.-08.09.2026 reconciliation. Read-only; raises
     supabase_store.StoreError (message already redacted of secrets) if
-    Supabase is unreachable."""
-    supabase_store.preflight()
-    reviewed_payouts = core.read_master(core.PAYOUTS_DB_PATH)
-    reviewed_orders = core.read_master(core.ORDERS_DB_PATH)
-    reviewed_all = _classify(reviewed_payouts, reviewed_orders)
-    raw_orders, raw_payouts = _fetch_raw_frames()
-    raw_all = _classify(raw_payouts, raw_orders)
+    Supabase is unreachable.
 
-    reviewed_mh = reviewed_all[(reviewed_all['Partner'] == PARTNER) & (reviewed_all['Auszahlung Nr.'].isin(PAYOUT_IDS))]
+    Two stages, reported separately: (1) the precondition — does the exact
+    set 'Einzelabrechnung herunterladen' would export for MH right now
+    (see _exported_reviewed_positions) already total 59 regular + 7
+    refunds, before any raw-data comparison; (2) the 1:1 comparison of
+    that exported set against the raw eBay-API transactions in Postgres.
+    """
+    supabase_store.preflight()
+    exported = _exported_reviewed_positions()
+    exported_scope = exported[exported['Auszahlung Nr.'].isin(PAYOUT_IDS)] if not exported.empty else exported
+    exported_regular = exported_scope[exported_scope['Art'] == 'Bestellung'] if not exported_scope.empty else exported_scope
+    exported_refunds = exported_scope[exported_scope['Art'] == 'Erstattung'] if not exported_scope.empty else exported_scope
+    precondition = {
+        'regular_count': len(exported_regular), 'refund_count': len(exported_refunds),
+        'regular_ok': len(exported_regular) == EXPECTED_REGULAR, 'refund_ok': len(exported_refunds) == EXPECTED_REFUNDS,
+    }
+
+    raw_orders, raw_payouts = _fetch_raw_frames()
+    raw_all = _classify_raw(raw_payouts, raw_orders)
     raw_mh = raw_all[(raw_all['Partner'] == PARTNER) & (raw_all['Auszahlung Nr.'].isin(PAYOUT_IDS))]
 
-    regular = _compare(reviewed_mh[reviewed_mh['Art'] == 'Bestellung'], raw_mh[raw_mh['Art'] == 'Bestellung'])
-    refunds = _compare(reviewed_mh[reviewed_mh['Art'] == 'Erstattung'], raw_mh[raw_mh['Art'] == 'Erstattung'])
+    regular = _compare(exported_regular, raw_mh[raw_mh['Art'] == 'Bestellung'])
+    refunds = _compare(exported_refunds, raw_mh[raw_mh['Art'] == 'Erstattung'])
     ok = (
-        regular['total_reviewed'] == EXPECTED_REGULAR and regular['matched'] == EXPECTED_REGULAR
+        precondition['regular_ok'] and precondition['refund_ok']
+        and regular['matched'] == EXPECTED_REGULAR
         and not regular['missing'] and not regular['extra'] and not regular['amount_mismatches'] and not regular['duplicates']
-        and refunds['total_reviewed'] == EXPECTED_REFUNDS and refunds['matched'] == EXPECTED_REFUNDS
+        and refunds['matched'] == EXPECTED_REFUNDS
         and not refunds['missing'] and not refunds['extra'] and not refunds['amount_mismatches'] and not refunds['duplicates']
     )
-    return {'ok': ok, 'regular': regular, 'refunds': refunds, 'run_at': datetime.now().isoformat(timespec='seconds')}
+    return {
+        'ok': ok, 'precondition': precondition, 'regular': regular, 'refunds': refunds,
+        'run_at': datetime.now().isoformat(timespec='seconds'),
+    }
