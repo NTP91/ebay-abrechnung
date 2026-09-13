@@ -50,11 +50,11 @@ p{line-height:1.55}[data-testid="stCaptionContainer"]{color:var(--muted);font-si
 [data-testid="stButton"] [data-testid="stBaseButton-primary"],[data-testid="stDownloadButton"] [data-testid="stBaseButton-primary"]{background:var(--navy);border-color:var(--navy);color:white!important}
 [data-testid="stButton"] [data-testid="stBaseButton-primary"]:hover,[data-testid="stDownloadButton"] [data-testid="stBaseButton-primary"]:hover{background:#153b79;color:white!important}
 [data-testid="stButton"] [data-testid="stBaseButton-primary"]:disabled,[data-testid="stDownloadButton"] [data-testid="stBaseButton-primary"]:disabled{background:#e9edf3;border-color:#d8dee7;color:#7c8798!important;transform:none;box-shadow:none}
-[data-baseweb="tab-list"]{gap:28px;border-bottom:1px solid #dde4ed;margin-bottom:24px}
-[data-baseweb="tab"],[data-baseweb="tab"] p,[data-baseweb="tab"] div{color:#69758b!important;font-weight:600}
-[data-baseweb="tab"]{padding:13px 4px}
-[data-baseweb="tab"][aria-selected="true"],[data-baseweb="tab"][aria-selected="true"] p,[data-baseweb="tab"][aria-selected="true"] div{color:var(--navy)!important}
-[data-baseweb="tab-highlight"]{background:var(--navy);height:3px}
+[data-testid="stTabs"] [role="tablist"]{gap:28px;border-bottom:1px solid #dde4ed;margin-bottom:24px}
+[data-testid="stTab"],[data-testid="stTab"] p,[data-testid="stTab"] div{color:#69758b!important;font-weight:600}
+[data-testid="stTab"]{padding:13px 4px;border-bottom:3px solid transparent}
+[data-testid="stTab"][aria-selected="true"],[data-testid="stTab"][aria-selected="true"] p,[data-testid="stTab"][aria-selected="true"] div{color:var(--navy)!important}
+[data-testid="stTab"][aria-selected="true"]{border-bottom-color:var(--navy)}
 [data-testid="stFileUploaderDropzone"]{background:#f8fafd;border:1px dashed #cbd5e2;border-radius:11px}
 [data-testid="stExpander"]{background:#fff;border:1px solid var(--line);border-radius:11px;box-shadow:0 3px 14px #18345b06}
 [data-testid="stAlert"]{border-radius:12px;border:1px solid #e5bd46;background:var(--warn);color:#263957}
