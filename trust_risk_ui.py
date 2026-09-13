@@ -104,18 +104,25 @@ def _mh_detail_table(title, rows):
 
 def render_mh_reconciliation_result(result):
     precondition = result['precondition']
-    st.write('**Schritt 1 · Bestand vor dem Rohdatenvergleich (exakt die Menge, die „Einzelabrechnung herunterladen“ für MH jetzt exportieren würde)**')
+    st.write('**Schritt 1 · Bestand vor dem Vergleich (exakt die Menge, die „Einzelabrechnung herunterladen“ für MH jetzt exportieren würde)**')
     pre_cols = st.columns(2)
     pre_cols[0].metric('reguläre Positionen', f"{precondition['regular_count']}/{mh_reconciliation.EXPECTED_REGULAR}")
     pre_cols[1].metric('Refunds', f"{precondition['refund_count']}/{mh_reconciliation.EXPECTED_REFUNDS}")
     if not (precondition['regular_ok'] and precondition['refund_ok']):
         st.warning(
-            'Der exportierbare Bestand weicht bereits vor dem Rohdatenvergleich von der Erwartung ab '
+            'Der exportierbare Bestand weicht bereits vor dem eBay-Vergleich von der Erwartung ab '
             '(z. B. weil einzelne Positionen bereits geprüft/bezahlt/abgeschlossen sind oder ein API-Einbehalt '
-            'vorliegt und dadurch nicht mehr im nächsten Download enthalten sind). Der folgende Rohdatenvergleich '
-            'bezieht sich auf den tatsächlich exportierbaren Bestand, nicht auf die ursprüngliche Erwartung.'
+            'vorliegt und dadurch nicht mehr im nächsten Download enthalten sind). Der folgende Vergleich '
+            'bezieht sich auf den tatsächlich exportierbaren Bestand, nicht auf die ursprüngliche Erwartung — '
+            'der Gesamtstatus kann trotzdem nicht grün werden.'
         )
-    st.write('**Schritt 2 · Abgleich dieses exportierbaren Bestands gegen die Supabase-Rohdaten**')
+    st.write('**Schritt 2 · Unabhängige Bestätigung direkt von eBay**')
+    if not result['verified']:
+        st.error('Unabhängige eBay-Prüfung nicht möglich — nicht verifiziert. ' + (result.get('error') or ''))
+        st.caption('Kein Fallback auf Supabase/Postgres oder andere Quellen. Ergebnis kann deshalb nicht grün sein.')
+        return
+    st.success('eBay-Abfrage für alle 5 Payouts vollständig erfolgreich (Payout- und Transaktionsdaten gelesen und intern bestätigt).')
+    st.write('**Schritt 3 · Abgleich des exportierbaren Bestands gegen die eBay-Rohdaten**')
     regular, refunds = result['regular'], result['refunds']
     missing = _mh_tagged_rows(regular['missing'], 'Regulär') + _mh_tagged_rows(refunds['missing'], 'Refund')
     extra = _mh_tagged_rows(regular['extra'], 'Regulär') + _mh_tagged_rows(refunds['extra'], 'Refund')
@@ -125,7 +132,7 @@ def render_mh_reconciliation_result(result):
         st.success(
             f"{regular['matched']}/{mh_reconciliation.EXPECTED_REGULAR} regulär gematcht, "
             f"{refunds['matched']}/{mh_reconciliation.EXPECTED_REFUNDS} Refunds gematcht, "
-            "0 fehlend, 0 zusätzlich, 0 Dubletten, 0 Betragsabweichungen."
+            "0 fehlend, 0 zusätzlich, 0 Dubletten, 0 Betragsabweichungen — unabhängig von eBay bestätigt."
         )
     else:
         st.error('Abweichung(en) gefunden — Details unten. Keine Freigabe.')
@@ -136,10 +143,15 @@ def render_mh_reconciliation_result(result):
     cols[3].metric('zusätzlich', len(extra))
     cols[4].metric('Dubletten', len(duplicates))
     cols[5].metric('Betragsabweichungen', len(mismatches))
+    st.caption(
+        f"Summen (Abrechnung/eBay): regulär {regular['total_amount_reviewed']:.2f} € / {regular['total_amount_raw']:.2f} € · "
+        f"Refunds {refunds['total_amount_reviewed']:.2f} € / {refunds['total_amount_raw']:.2f} € · "
+        f"eBay-Positionen insgesamt in diesen Payouts (alle Partner): {result.get('ebay_total_positions', '—')}"
+    )
     st.caption('Lauf: ' + result['run_at'] + ' · Erwartung: 59 reguläre Positionen, 7 Refunds, Payouts '
                + ', '.join(mh_reconciliation.PAYOUT_IDS))
-    _mh_detail_table('Fehlend (in Rohdaten, nicht in Abrechnung)', missing)
-    _mh_detail_table('Zusätzlich (in Abrechnung, nicht in Rohdaten)', extra)
+    _mh_detail_table('Fehlend (bei eBay vorhanden, nicht in der Abrechnung)', missing)
+    _mh_detail_table('Zusätzlich (in der Abrechnung, nicht bei eBay bestätigt)', extra)
     _mh_detail_table('Dubletten', duplicates)
     _mh_detail_table('Betragsabweichungen', mismatches)
 
@@ -150,14 +162,17 @@ def render_mh_reconciliation():
         st.caption(
             'Read-only 1:1-Abgleich für Partner MH, Payouts 01.09.–08.09.2026: exakt die Positionsmenge, '
             'die „Einzelabrechnung herunterladen“ jetzt exportieren würde (gleiche Auswahl-/Status-/Sperr-/'
-            'Offen-Filter wie im echten Download), gegen die rohen eBay-API-Transaktionen (Supabase Postgres '
-            'public.orders / public.payout_transactions). Rein lesend — nur SELECT-Abfragen, kein Import, '
-            'keine Statusänderung, keine Datenbankänderung.'
+            'Offen-Filter wie im echten Download), gegen eine unabhängige, live gelesene Bestätigung direkt '
+            'von eBay (Payout + Transaktionen je Payout-ID, keine Supabase-/Postgres-Rohdaten mehr). '
+            'Rein lesend — kein Import, keine Statusänderung, keine Datenbankänderung. Kann „grün“ nur '
+            'melden, wenn die eBay-Abfrage vollständig erfolgreich war; sonst „nicht verifiziert“.'
         )
         if st.button('Abgleich jetzt ausführen (nur MH, 01.09.–08.09.2026)', key='mh-reconciliation-run'):
             try:
-                with st.spinner('Rohdaten und Abrechnungsbestand werden read-only verglichen …'):
-                    st.session_state['mh_reconciliation_result'] = mh_reconciliation.check()
+                if 'ebay_readonly_client' not in st.session_state:
+                    st.session_state.ebay_readonly_client = Client()
+                with st.spinner('Exportierbarer Bestand wird ermittelt und unabhängig gegen eBay geprüft …'):
+                    st.session_state['mh_reconciliation_result'] = mh_reconciliation.check(st.session_state.ebay_readonly_client)
             except supabase_store.StoreError as exc:
                 st.session_state['mh_reconciliation_result'] = None
                 st.error('Abgleich nicht möglich: ' + str(exc))

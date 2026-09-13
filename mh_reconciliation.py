@@ -1,49 +1,60 @@
-"""Read-only 1:1 reconciliation: reviewed MH settlement vs raw eBay-API data.
+"""Read-only 1:1 reconciliation: reviewed MH settlement vs independent eBay data.
 
 Used only by the Trust/Risk diagnostic section (see trust_risk_ui.py).
 
-The "reviewed" side calls the exact, unmodified production functions that
-produce the "Einzelabrechnung herunterladen" export for a Gruppe-B partner
-(core.load_master_data -> position_workflow.positions ->
+SEITE 1 — the exportable set. Calls the exact, unmodified production
+functions that produce the "Einzelabrechnung herunterladen" export for a
+Gruppe-B partner (core.load_master_data -> position_workflow.positions ->
 studio_view.partner_rows), then applies the identical two selection steps
 app.py itself applies before that download: partner_panel()'s
 next_invoice = block[~block.reviewed_at.astype(bool)], and download()'s
-exclusion of closed_at/API_Hold positions. This is deliberate: an earlier
-version of this diagnostic reimplemented only core.load_master_data()'s
-classification and skipped position_workflow/partner_rows entirely, which
-does NOT reproduce what the download button actually exports whenever any
-position has already been reviewed, paid, closed, or held — exactly the
-gap this module now closes by calling the real functions instead of
-re-deriving their logic (Group-B refund-linking in particular is exactly
-the kind of settlement fachlogik this project's standing rule says not to
-touch/reimplement).
+exclusion of closed_at/API_Hold positions. This avoids reimplementing
+Group-B refund-linking, which is exactly the settlement fachlogik this
+project's standing rule says not to touch. It does read
+state/settlement.sqlite3 (via core.ledger() inside position_workflow/
+studio_view) — unavoidably, since review/payment/closed status is only
+tracked there — but only ever executes SELECT statements in that context,
+and core.sync_status() (the one function in this chain that can genuinely
+write even for an already-known payout) is deliberately never called; see
+_empty_sync_status().
 
-This means the reviewed side does read state/settlement.sqlite3, via
-core.ledger() inside position_workflow.positions()/studio_view.partner_rows()
-— unavoidably, since position review/payment/closed status and invoice-
-position links are only tracked there. That blob is itself fetched from
-Supabase (supabase_store.get, same as every other read in this app), and
-every call in this module only ever executes SELECT statements inside
-core.ledger()'s context, so the existing, already-tested no-op-on-
-unchanged-content guarantee (core.ledger() only calls supabase_store.put()
-if the in-memory copy's bytes actually changed) means this stays read-only
-in practice, not just in intent. core.sync_status() is the one exception
-that genuinely can write even for an already-known payout — it is
-deliberately never called here; see _empty_sync_status().
+SEITE 2 — independent confirmation, straight from eBay. A prior version of
+this module compared Seite 1 against public.orders/public.payout_transactions
+in Supabase Postgres. Analysis showed no code path in this application
+writes to those tables — no import path, manual or API-sync, ever touches
+them (they were an abandoned schema-only migration; see
+supabase/MIGRATION_PLAN.md) — so a comparison against them proved nothing
+about whether the exportable set matches eBay's own current data. This
+version instead reads directly and only from eBay itself, via the existing
+read-only ebay_readonly.Client (GET-only; its sole POST is OAuth refresh),
+using the exact same calls ebay_sync.run() already makes for a known
+payout (client.get('payout', pid), client.pages('transactions', ...,
+{'filter': f'payoutId:{{{pid}}}'})), and reuses ebay_sync.validate_payout()
+and ebay_sync.adapt() completely unmodified — the same functions the
+production API-sync import path uses to turn eBay's raw JSON into
+canonical rows (SALE/REFUND/NON_SALE_CHARGE typing, sign checks, gross
+computation). adapt() also cross-matches against an existing CSV/orders
+frame to skip transactions already known there (its job in production is
+"what's new for the importer"); handing it two empty, correctly-shaped
+frames here makes that matching step find zero candidates, so every
+qualifying transaction is returned instead of being skipped — a pure
+canonicalizing use of the same function, not a behaviour change to its
+actual SALE/REFUND/NON_SALE_CHARGE/amount rules.
 
-The raw side is unrelated to any of this: it is rebuilt straight from
-Supabase Postgres (public.orders + public.payout_transactions) via the
-app's existing supabase_store.read_only_sql() channel (a thin wrapper
-around the same _request(readonly=True) get()/preflight() already use —
-no separate credential), and classified with a faithful, read-only port of
-core.load_master_data()'s Partner/Art logic (_classify_raw below) — it has
-no review-workflow state of its own to consult, by design: it represents
-"what eBay's own transactions say should exist", independent of what has
-or hasn't been reviewed in the app yet.
+No SKU is independently re-derived from eBay: eBay's Finances transaction
+data carries no SKU field, and re-deriving Partner/SKU assignment would be
+exactly the "eigene Mapping-/Partnerregeln" this task says not to build.
+Instead, the eBay-side confirmation is scoped to the Bestellnummern that
+Seite 1 already recognises as MH (via the real production classification)
+— it verifies "does eBay confirm every position Seite 1 is about to
+export, exactly once, at the right amount", not "does eBay independently
+agree these particular orders belong to MH". A wholly unknown order eBay
+carries under one of the checked payouts, for a SKU/partner Seite 1 has
+never seen, cannot be attributed to MH without SKU resolution and is
+therefore out of this check's reach by design — see check()'s docstring.
 """
 from __future__ import annotations
 
-import json
 from collections import Counter
 from datetime import datetime
 
@@ -51,134 +62,17 @@ import pandas as pd
 
 import api_holds
 import core
+import ebay_sync
 import position_workflow
 import studio_view
 import supabase_store
-from payout_structure import validate as validate_children
+from ebay_readonly import Client, EbayError
 
 PAYOUT_IDS = ('7710027297', '7712804241', '7714928937', '7718008497', '7725289401')
 PARTNER = 'MH'
 EXPECTED_REGULAR = 59
 EXPECTED_REFUNDS = 7
-ALLOWED_FINANCE_TYPES = {'SALE', 'REFUND', 'NON_SALE_CHARGE'}
-
-
-def _amount(value):
-    return '' if value is None else format(value, 'f') if hasattr(value, 'as_tuple') else str(value)
-
-
-def _report_date(value):
-    text = str(value or '').strip()
-    if not text:
-        return ''
-    try:
-        return datetime.fromisoformat(text.replace('Z', '+00:00')).strftime('%d.%m.%Y')
-    except ValueError:
-        return text
-
-
-def _raw_orders_frame(rows):
-    """Mirrors scripts/rebuild_local_from_supabase.py:order_frame(); duplicated
-    here (not imported) so the deployed app never depends on the scripts/
-    directory being importable at runtime."""
-    records = []
-    for row in rows:
-        records.append({
-            'Bestellnummer': row.get('bestellnummer') or '',
-            'Transaktionsnummer': row.get('transaktionsnummer') or '',
-            'Artikelnummer': row.get('artikelnummer') or '',
-            'SKU': row.get('sku') or '',
-            'Angebotstitel': row.get('angebotstitel') or '',
-        })
-    return pd.DataFrame(records)
-
-
-def _raw_payouts_frame(rows):
-    """Mirrors scripts/rebuild_local_from_supabase.py:payout_frame(); see note above."""
-    by_id = {int(row['id']): row for row in rows}
-    records = []
-    for row in rows:
-        parent = by_id.get(row.get('parent_transaction_id')) if row.get('is_child_reference') else row
-        raw = (parent or {}).get('raw_row') or {}
-        native = raw.get('transactionType')
-        if native not in ALLOWED_FINANCE_TYPES:
-            continue
-        child = bool(row.get('is_child_reference'))
-        records.append({
-            'Auszahlung Nr.': str(row.get('auszahlung_nr') or ''),
-            'Bestellnummer': row.get('bestellnummer') or '',
-            'Transaktionsnummer': row.get('transaktionsnummer') or '',
-            'Artikelnummer': row.get('artikelnummer') or '',
-            'Typ': row.get('typ') or '',
-            'Datum': _report_date(row.get('datum')),
-            'Betrag abzügl. Kosten': '' if child else _amount(row.get('betrag_abzueglich_kosten')),
-            'Transaktionsbetrag (inkl. Kosten)': '' if child else _amount(row.get('transaktionsbetrag_inkl_kosten')),
-            'Zwischensumme Artikel': '' if child else _amount(row.get('zwischensumme_artikel')),
-            'Verpackung und Versand': '' if child else _amount(row.get('verpackung_und_versand')),
-            'API_Artikelreferenzen': json.dumps(raw.get('orderLineItems') or [], ensure_ascii=False),
-        })
-    return pd.DataFrame(records)
-
-
-def _fetch_raw_frames():
-    """Read-only: public.orders + public.payout_transactions via the app's
-    existing Supabase connection, restricted to the 5 payout IDs."""
-    payout_id_list = ','.join(f"'{pid}'" for pid in PAYOUT_IDS)
-    transactions = supabase_store.read_only_sql(
-        'select id,auszahlung_nr,bestellnummer,transaktionsnummer,artikelnummer,typ,datum,'
-        'betrag_abzueglich_kosten,zwischensumme_artikel,verpackung_und_versand,'
-        'transaktionsbetrag_inkl_kosten,is_child_reference,parent_transaction_id,raw_row '
-        f'from public.payout_transactions where auszahlung_nr in ({payout_id_list}) order by id'
-    )
-    transaktionsnummern = sorted({str(row['transaktionsnummer']) for row in transactions if row.get('transaktionsnummer')})
-    bestellnummern = sorted({str(row['bestellnummer']) for row in transactions if row.get('bestellnummer')})
-    filters = []
-    if transaktionsnummern:
-        filters.append('transaktionsnummer in (' + ','.join(f"'{t}'" for t in transaktionsnummern) + ')')
-    if bestellnummern:
-        filters.append('bestellnummer in (' + ','.join(f"'{b}'" for b in bestellnummern) + ')')
-    where_clause = ' or '.join(filters) if filters else 'false'
-    orders_rows = supabase_store.read_only_sql(
-        'select bestellnummer,transaktionsnummer,artikelnummer,sku,angebotstitel '
-        f'from public.orders where {where_clause} order by id'
-    )
-    return _raw_orders_frame(orders_rows), _raw_payouts_frame(transactions)
-
-
-def _classify_raw(payouts, orders):
-    """Faithful, read-only port of core.load_master_data()'s row
-    inclusion/exclusion and Partner-field computation (drops only the
-    issue-string/group/title bookkeeping this comparison does not need).
-    Used for the raw Postgres side only — see module docstring for why the
-    reviewed side instead calls the real production functions directly."""
-    payouts = payouts[payouts['Auszahlung Nr.'] != '']
-    child_indices = validate_children(payouts)
-    processed = []
-    for index, row in payouts.iterrows():
-        if index in child_indices:
-            continue
-        if row['Typ'].strip().casefold() == 'auszahlung':
-            continue
-        if row['Typ'].strip().casefold() == 'einbehalten':
-            continue
-        amount = float(core.parse_money(row['Betrag abzügl. Kosten']))
-        order_id = row['Bestellnummer']
-        fee = not order_id and any(word in row['Typ'].lower() for word in ('gebühr', 'fee', 'belastung'))
-        sku = ''
-        if not fee:
-            match, _issue = core.match_order(row, orders)
-            if match is not None:
-                sku = match['SKU']
-                if not sku:
-                    continue  # historical order predates partner SKUs; never assignable
-        partner = '' if fee else core.normalized_partner(sku)
-        processed.append({
-            'Auszahlung Nr.': row['Auszahlung Nr.'], 'Transaktionsnummer': row['Transaktionsnummer'],
-            'Bestellnummer': order_id, 'Partner': partner, 'SKU': sku,
-            'Erlös_Brutto': amount,
-            'Art': 'Gebühr' if fee else 'Erstattung' if amount < 0 else 'Bestellung',
-        })
-    return pd.DataFrame(processed)
+_TYP_TO_ART = {'Bestellung': 'Bestellung', 'Rückerstattung': 'Erstattung'}  # 'Andere Gebühr' (NON_SALE_CHARGE) excluded — never MH
 
 
 def _empty_sync_status():
@@ -220,6 +114,54 @@ def _exported_reviewed_positions():
     return next_invoice[~next_invoice['position_key'].isin(forbidden)]
 
 
+def _empty_master_frame():
+    """Neutral 'nothing known yet' input for ebay_sync.adapt() — see
+    _fetch_ebay_raw for why this turns adapt() into a pure canonicalizer."""
+    return core.canonicalize(core.pd.DataFrame())
+
+
+def _fetch_ebay_raw(client):
+    """Independent read-only confirmation straight from eBay's own API —
+    no Supabase, no Postgres, no local blob, on either side of this call.
+    Returns (verified, error, frame). verified is False on ANY failure
+    (network, auth, rate limit, incomplete pagination, or an integrity
+    check failing) — this function never returns a partially-usable frame
+    alongside verified=False, and the caller must never report green
+    without verified=True."""
+    payouts = {}
+    transactions = {}
+    try:
+        for payout_id in PAYOUT_IDS:
+            detail = client.get('payout', payout_id)
+            movements = client.pages('transactions', 'transactions', {'filter': f'payoutId:{{{payout_id}}}'})
+            ebay_sync.validate_payout(detail, movements)
+            payouts[payout_id] = detail
+            for row in movements['items']:
+                transactions[ebay_sync.identity(row)] = row
+        empty = _empty_master_frame()
+        frame, _known, _ledger_only = ebay_sync.adapt(list(transactions.values()), payouts, empty, empty)
+    except (EbayError, ValueError, KeyError, TypeError) as exc:
+        message = client.redact(str(exc)) if isinstance(exc, (EbayError, ValueError)) else 'eBay-Antwort unvollständig oder unerwartet strukturiert.'
+        return False, message, None
+    return True, None, frame
+
+
+def _to_comparable(frame):
+    """ebay_sync.adapt()'s canonical output -> the shape _compare() expects.
+    Drops NON_SALE_CHARGE ('Andere Gebühr') rows entirely: partnerlose
+    Gebühren are never attributable to a partner and must not be counted
+    as MH positions on either side."""
+    columns = ['Auszahlung Nr.', 'Transaktionsnummer', 'Bestellnummer', 'Erlös_Brutto', 'Art']
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=columns)
+    kept = frame[frame['Typ'].isin(_TYP_TO_ART)].copy()
+    if kept.empty:
+        return pd.DataFrame(columns=columns)
+    kept['Erlös_Brutto'] = kept['Betrag abzügl. Kosten'].map(core.parse_money).astype(float)
+    kept['Art'] = kept['Typ'].map(_TYP_TO_ART)
+    return kept[columns]
+
+
 def _position_key(row):
     transaktionsnummer = str(row.get('Transaktionsnummer') or '').strip()
     if transaktionsnummer:
@@ -233,8 +175,9 @@ def _duplicate_keys(frame):
 
 
 def _row_summary(row):
-    return {'Bestellnummer': row.get('Bestellnummer'), 'Auszahlung Nr.': row.get('Auszahlung Nr.'),
-            'Betrag': row.get('Erlös_Brutto'), 'Transaktionsnummer': row.get('Transaktionsnummer')}
+    return {'Bestellnummer': row.get('Bestellnummer'), 'SKU': row.get('SKU', ''),
+            'Auszahlung Nr.': row.get('Auszahlung Nr.'), 'Betrag': row.get('Erlös_Brutto'),
+            'Transaktionsnummer': row.get('Transaktionsnummer')}
 
 
 def _compare(reviewed, raw_truth):
@@ -250,26 +193,37 @@ def _compare(reviewed, raw_truth):
     duplicate_keys = _duplicate_keys(reviewed) | _duplicate_keys(raw_truth)
     return {
         'total_reviewed': len(reviewed), 'total_raw': len(raw_truth), 'matched': len(matched_keys),
+        'total_amount_reviewed': float(reviewed['Erlös_Brutto'].sum()) if len(reviewed) else 0.0,
+        'total_amount_raw': float(raw_truth['Erlös_Brutto'].sum()) if len(raw_truth) else 0.0,
         'missing': [_row_summary(raw_by_key[key]) for key in missing_keys],
         'extra': [_row_summary(reviewed_by_key[key]) for key in extra_keys],
         'amount_mismatches': [
-            {**_row_summary(reviewed_by_key[key]), 'Betrag_Rohdaten': raw_by_key[key]['Erlös_Brutto']}
+            {**_row_summary(reviewed_by_key[key]), 'Betrag_eBay': raw_by_key[key]['Erlös_Brutto']}
             for key in sorted(amount_mismatch_keys)
         ],
         'duplicates': [{'Key': str(key)} for key in sorted(duplicate_keys)],
     }
 
 
-def check():
-    """Run the MH 01.09.-08.09.2026 reconciliation. Read-only; raises
-    supabase_store.StoreError (message already redacted of secrets) if
-    Supabase is unreachable.
+def check(client=None):
+    """Run the MH 01.09.-08.09.2026 reconciliation. Read-only throughout;
+    raises supabase_store.StoreError (message already redacted of secrets)
+    if Supabase is unreachable for Seite 1.
 
-    Two stages, reported separately: (1) the precondition — does the exact
-    set 'Einzelabrechnung herunterladen' would export for MH right now
-    (see _exported_reviewed_positions) already total 59 regular + 7
-    refunds, before any raw-data comparison; (2) the 1:1 comparison of
-    that exported set against the raw eBay-API transactions in Postgres.
+    Three stages, reported separately:
+    (1) precondition — does the exact set 'Einzelabrechnung herunterladen'
+        would export for MH right now already total 59 regular + 7 refunds,
+        before any eBay comparison;
+    (2) independent eBay confirmation — payout+transactions read live from
+        eBay for exactly these payout IDs (verified=False on any failure,
+        never a partial/fallback result);
+    (3) the 1:1 comparison of the exportable set against eBay's own data,
+        scoped to Bestellnummern Seite 1 already recognises as MH (no SKU
+        re-derivation from eBay — see module docstring).
+
+    'ok' is True only when precondition holds, eBay confirmation fully
+    succeeded, and the comparison shows zero missing/extra/mismatch/
+    duplicate on both regular and refund positions.
     """
     supabase_store.preflight()
     exported = _exported_reviewed_positions()
@@ -280,13 +234,21 @@ def check():
         'regular_count': len(exported_regular), 'refund_count': len(exported_refunds),
         'regular_ok': len(exported_regular) == EXPECTED_REGULAR, 'refund_ok': len(exported_refunds) == EXPECTED_REFUNDS,
     }
+    run_at = datetime.now().isoformat(timespec='seconds')
 
-    raw_orders, raw_payouts = _fetch_raw_frames()
-    raw_all = _classify_raw(raw_payouts, raw_orders)
-    raw_mh = raw_all[(raw_all['Partner'] == PARTNER) & (raw_all['Auszahlung Nr.'].isin(PAYOUT_IDS))]
+    verified, error, ebay_frame = _fetch_ebay_raw(client or Client())
+    if not verified:
+        return {
+            'ok': False, 'verified': False, 'error': error, 'precondition': precondition,
+            'regular': None, 'refunds': None, 'run_at': run_at,
+        }
 
-    regular = _compare(exported_regular, raw_mh[raw_mh['Art'] == 'Bestellung'])
-    refunds = _compare(exported_refunds, raw_mh[raw_mh['Art'] == 'Erstattung'])
+    comparable = _to_comparable(ebay_frame)
+    known_orders = set(exported_scope['Bestellnummer']) if not exported_scope.empty else set()
+    ebay_scoped = comparable[comparable['Bestellnummer'].isin(known_orders) & comparable['Auszahlung Nr.'].isin(PAYOUT_IDS)]
+
+    regular = _compare(exported_regular, ebay_scoped[ebay_scoped['Art'] == 'Bestellung'])
+    refunds = _compare(exported_refunds, ebay_scoped[ebay_scoped['Art'] == 'Erstattung'])
     ok = (
         precondition['regular_ok'] and precondition['refund_ok']
         and regular['matched'] == EXPECTED_REGULAR
@@ -295,6 +257,7 @@ def check():
         and not refunds['missing'] and not refunds['extra'] and not refunds['amount_mismatches'] and not refunds['duplicates']
     )
     return {
-        'ok': ok, 'precondition': precondition, 'regular': regular, 'refunds': refunds,
-        'run_at': datetime.now().isoformat(timespec='seconds'),
+        'ok': ok, 'verified': True, 'error': None, 'precondition': precondition,
+        'regular': regular, 'refunds': refunds, 'ebay_total_positions': len(comparable),
+        'run_at': run_at,
     }
