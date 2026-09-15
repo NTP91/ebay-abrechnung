@@ -97,12 +97,9 @@ p{line-height:1.55}[data-testid="stCaptionContainer"]{color:var(--muted);font-si
 [data-testid="stMetricValue"]{color:var(--navy);font-size:1.85rem;font-weight:750;justify-content:center}
 [data-testid="stVerticalBlockBorderWrapper"]{background:var(--surface);border-color:var(--line)!important;border-radius:14px!important;box-shadow:0 8px 30px #18345b0a}
 [data-testid="stDataFrame"]{border:1px solid var(--line);border-radius:11px;overflow:hidden}
-[data-testid="stButton"] button,[data-testid="stDownloadButton"] button,[data-testid="stLinkButton"] a{min-height:48px;border-radius:9px!important;font-weight:650!important;border-color:var(--navy);color:var(--navy)!important;transition:all .16s ease;box-shadow:none}
-[data-testid="stButton"] button:hover,[data-testid="stDownloadButton"] button:hover,[data-testid="stLinkButton"] a:hover{border-color:#164f9f;color:#164f9f!important;transform:translateY(-1px);box-shadow:0 5px 14px #173f7517}
-[data-testid="stButton"] button:disabled,[data-testid="stDownloadButton"] button:disabled{color:#7c8798!important;border-color:#d8dee7!important;transform:none;box-shadow:none}
-[data-testid="stButton"] [data-testid="stBaseButton-primary"],[data-testid="stDownloadButton"] [data-testid="stBaseButton-primary"]{background:var(--navy);border-color:var(--navy);color:white!important}
-[data-testid="stButton"] [data-testid="stBaseButton-primary"]:hover,[data-testid="stDownloadButton"] [data-testid="stBaseButton-primary"]:hover{background:#153b79;color:white!important}
-[data-testid="stButton"] [data-testid="stBaseButton-primary"]:disabled,[data-testid="stDownloadButton"] [data-testid="stBaseButton-primary"]:disabled{background:#e9edf3;border-color:#d8dee7;color:#7c8798!important;transform:none;box-shadow:none}
+[data-testid="stButton"] button,[data-testid="stDownloadButton"] button,[data-testid="stLinkButton"] a,[data-testid="stButton"] [data-testid="stBaseButton-primary"],[data-testid="stDownloadButton"] [data-testid="stBaseButton-primary"]{min-height:48px;border-radius:9px!important;font-weight:650!important;background:black!important;border-color:black!important;color:white!important;transition:none;box-shadow:none}
+[data-testid="stButton"] button:hover,[data-testid="stDownloadButton"] button:hover,[data-testid="stLinkButton"] a:hover,[data-testid="stButton"] button:focus,[data-testid="stDownloadButton"] button:focus,[data-testid="stLinkButton"] a:focus,[data-testid="stButton"] [data-testid="stBaseButton-primary"]:hover,[data-testid="stDownloadButton"] [data-testid="stBaseButton-primary"]:hover,[data-testid="stButton"] [data-testid="stBaseButton-primary"]:focus,[data-testid="stDownloadButton"] [data-testid="stBaseButton-primary"]:focus{background:black!important;border-color:black!important;color:white!important;transform:none;box-shadow:none}
+[data-testid="stButton"] button:disabled,[data-testid="stDownloadButton"] button:disabled,[data-testid="stButton"] [data-testid="stBaseButton-primary"]:disabled,[data-testid="stDownloadButton"] [data-testid="stBaseButton-primary"]:disabled{background:black!important;border-color:black!important;color:#8a8f96!important;transform:none;box-shadow:none}
 [data-testid="stTabs"] [role="tablist"]{gap:28px;border-bottom:1px solid #dde4ed;margin-bottom:24px}
 [data-testid="stTab"],[data-testid="stTab"] p,[data-testid="stTab"] div{color:#69758b!important;font-weight:600}
 [data-testid="stTab"]{padding:13px 4px;border-bottom:3px solid transparent}
@@ -114,10 +111,6 @@ p{line-height:1.55}[data-testid="stCaptionContainer"]{color:var(--muted);font-si
 [data-testid="stCheckbox"]{padding:.1rem 0;border-bottom:1px solid #e5e9ef}
 [data-testid="stCheckbox"] label{min-height:38px;color:var(--ink);font-weight:520}
 hr{border-color:#e5eaf0!important}
-@media (prefers-color-scheme: dark){
-[data-testid="stButton"] button,[data-testid="stDownloadButton"] button,[data-testid="stLinkButton"] a,[data-testid="stButton"] [data-testid="stBaseButton-primary"],[data-testid="stDownloadButton"] [data-testid="stBaseButton-primary"]{color:white!important}
-[data-testid="stButton"] button:hover,[data-testid="stDownloadButton"] button:hover,[data-testid="stLinkButton"] a:hover,[data-testid="stButton"] [data-testid="stBaseButton-primary"]:hover,[data-testid="stDownloadButton"] [data-testid="stBaseButton-primary"]:hover{color:white!important}
-}
 </style>''', unsafe_allow_html=True)
 
 
