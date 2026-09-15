@@ -13,6 +13,7 @@ import position_workflow
 import draft_correction
 import partner_invoices
 import group_b_rounds
+import lexoffice_import
 import payout_reconciliation
 import trust_risk_ui
 import supabase_store
@@ -943,8 +944,9 @@ with trust_risk_tab:
 
 with lexoffice_import_tab:
     st.subheader('Lexoffice Bestell-Import')
-    st.caption('Erstellt Lexware-Entwürfe (api.lexware.io) direkt aus den bereits in der App verarbeiteten Auszahlungspositionen. Kein manueller Bestellbericht-Upload mehr nötig.')
+    st.caption('Zwei getrennte Entwurfswege über api.lexware.io. Es werden ausschließlich nicht finalisierte Lexware-Entwürfe erzeugt.')
 
+    st.markdown('**1 · Verarbeitete Auszahlungspositionen**')
     lex_ready = evelyn['new_ready']
     if lex_ready.empty:
         st.info('Aktuell keine verarbeiteten Positionen ohne bestehenden Lexware-Entwurf.')
@@ -967,6 +969,48 @@ with lexoffice_import_tab:
                 st.rerun()
             except ValueError as exc:
                 st.error(str(exc))
+
+    st.divider()
+    st.markdown('**2 · Aktive Angebote als interner Bestandswert**')
+    st.caption('CSV oder XLSX hochladen. Jeder Angebotspreis wird centgenau durch 3 geteilt und als Netto-Positionswert in einen separaten Entwurf übernommen.')
+    active_upload = st.file_uploader('Aktive Angebote hochladen', type=['csv', 'xlsx'],
+                                     key='lexoffice-active-offers-upload')
+    active_offers = None
+    active_digest = ''
+    if active_upload is not None:
+        try:
+            active_digest = hashlib.sha256(active_upload.getvalue()).hexdigest()
+            active_offers = lexoffice_import.read_active_offers(active_upload)
+            total_offer = sum(active_offers['Angebotspreis'] * active_offers['Menge'])
+            total_inventory = sum(active_offers['Bestandswert'] * active_offers['Menge'])
+            col1, col2, col3 = st.columns(3)
+            col1.metric('Positionen', str(len(active_offers)))
+            col2.metric('Angebotspreise', euros(total_offer))
+            col3.metric('Bestandswert · Preis / 3', euros(total_inventory))
+            preview = active_offers.copy()
+            preview['Angebotspreis'] = preview['Angebotspreis'].map(float)
+            preview['Bestandswert'] = preview['Bestandswert'].map(float)
+            st.dataframe(preview, hide_index=True, use_container_width=True,
+                         column_config={'Angebotspreis': st.column_config.NumberColumn(format='%.2f €'),
+                                        'Bestandswert': st.column_config.NumberColumn(format='%.2f €')})
+        except lexoffice_import.OrderReportError as exc:
+            st.error(str(exc))
+    already_created = bool(active_digest and st.session_state.get('lexoffice-active-offers-created') == active_digest)
+    if already_created:
+        st.success('Für diese unveränderte Datei wurde in dieser Sitzung bereits ein Entwurf erstellt.')
+    if not api_key:
+        st.info('API-Key unter „Lexware-Verbindung“ in der Seitenleiste hinterlegen.')
+    create_active = st.button('Aktive Angebote als Entwurf erstellen', type='primary',
+                              disabled=active_offers is None or not api_key or already_created,
+                              key='lexoffice-active-offers-create')
+    if create_active:
+        result = lexoffice_import.create_active_offers_draft(api_key, active_offers)
+        if result.ok:
+            st.session_state['lexoffice-active-offers-created'] = active_digest
+            st.success('Lexware-Entwurf erstellt · ID: ' + (result.invoice_id or 'nicht zurückgegeben'))
+        else:
+            detail = f' (HTTP {result.status_code})' if result.status_code else ''
+            st.error('Entwurf konnte nicht erstellt werden'+detail+': '+result.message)
 
 if st.session_state.get('discard_request'):
     discard_dialog(st.session_state['discard_request'])
