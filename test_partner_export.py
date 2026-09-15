@@ -29,7 +29,7 @@ def reference_cents(value):
 def check_workbook(case, blob, rows, rate, recipient):
     book = load_workbook(io.BytesIO(blob), data_only=True)
     formula_book = load_workbook(io.BytesIO(blob), data_only=False)
-    case.assertEqual(book.sheetnames, [DISPLAY_NAMES['Rechnung'], DISPLAY_NAMES['Gutschriften']])
+    case.assertEqual(book.sheetnames, [DISPLAY_NAMES['Rechnung'], DISPLAY_NAMES['Gutschriften'], DISPLAY_NAMES['HistorischeGutschriften']])
     payout_ids = set(rows['Auszahlung Nr.'])
     for name, kind in [('Rechnung', 'Bestellung'), ('Gutschriften', 'Erstattung')]:
         expected = rows[rows.Art == kind]
@@ -232,9 +232,9 @@ class PartnerExportTests(unittest.TestCase):
         master = self.seed(refund=True)
         with patch.object(partner_export, '_fill_sheet', wraps=partner_export._fill_sheet) as spy:
             blob = export_partner_excel(master)
-        # Both tabs must be built from the exact same template bytes (Rechnung's) -
+        # All three tabs must be built from the exact same template bytes (Rechnung's) -
         # this is what makes divergence structurally impossible, not just coincidental.
-        self.assertEqual(spy.call_count, 2)
+        self.assertEqual(spy.call_count, 3)
         xml_rechnung = spy.call_args_list[0][0][0]
         xml_gutschriften = spy.call_args_list[1][0][0]
         self.assertEqual(xml_rechnung, xml_gutschriften)
@@ -257,8 +257,8 @@ class PartnerExportTests(unittest.TestCase):
         sale_extra = rechnung['D15'].value
         refund_extra = gutschriften['D15'].value
         self.assertRegex(sale_extra, r'^eBay-Bestellnummer: .+\nSKU: .+\nPayout: .+$')
-        self.assertEqual(refund_extra.count('\n'), 3)  # eBay-Bestellnummer/SKU/Refund-Datum/Refund-Payout
-        for label in ('eBay-Bestellnummer:','SKU:','Refund-Datum:','Refund-Payout:'):
+        self.assertEqual(refund_extra.count('\n'), 4)  # eBay-Bestellnummer/SKU/Refund-Datum/Refund-Payout/Bereits an Partner bezahlt
+        for label in ('eBay-Bestellnummer:','SKU:','Refund-Datum:','Refund-Payout:','Bereits an Partner bezahlt:'):
             self.assertIn(label,refund_extra)
         for label in ('Bestelldatum:','Ursprünglicher Payout:',
                       'Ursprüngliche Abrechnung:','Refund-ID:','Refund brutto:',

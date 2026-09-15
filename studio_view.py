@@ -132,12 +132,18 @@ def partner_rows(business):
             or 'offene Partnerabrechnung'
             for row in origins
         ]
+        already_paid = [bool(row.reviewed_at or row.paid_at or row.closed_at) for row in origins]
         refunds_b['Refund_Status'] = [
-            'Später Refund · historische Partnerrechnung unverändert'
-            if bool(row.reviewed_at or row.paid_at or row.closed_at)
+            'Später Refund · historische Partnerrechnung unverändert' if paid
             else 'Offener Refund · einmalig im nächsten Partner-Settlement'
-            for row in origins
+            for paid in already_paid
         ]
+        # Exposed for prepare_partner_export: whether the *original sale's*
+        # own reviewed/paid/closed status is already true, i.e. the partner
+        # was already paid for it in an earlier run - not derived from mere
+        # absence of that sale row in the export slice, so it stays correct
+        # even when prepare_partner_export is called with an arbitrary subset.
+        refunds_b['Bereits_An_Partner_Bezahlt'] = already_paid
 
     return pd.concat([open_a, settled_a, refunds_a, sales_b, refunds_b]).sort_index()
 

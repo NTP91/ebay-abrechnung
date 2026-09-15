@@ -173,8 +173,13 @@ class PartnerRefundExportTests(unittest.TestCase):
         model = prepare_partner_export(next_invoice)
         rechnung_orders = {item['order'] for item in model['Rechnung']}
         gutschrift_orders = {item['order'] for item in model['Gutschriften']}
+        historical_orders = {item['order'] for item in model['HistorischeGutschriften']}
         self.assertEqual(rechnung_orders, set(regular_orders) | refunded_orders)
-        self.assertEqual(gutschrift_orders, refunded_orders | {reviewed_order})
+        # reviewed_order's sale was already paid to the partner in an earlier
+        # run (Fall B): its later refund is an open repayment case of its own
+        # (Tab 3), never merged back into this settlement's Gutschriften (Tab 2).
+        self.assertEqual(gutschrift_orders, refunded_orders)
+        self.assertEqual(historical_orders, {reviewed_order})
         for order in refunded_orders:
             sale=next(item for item in model['Rechnung'] if item['order']==order)
             refund=next(item for item in model['Gutschriften'] if item['order']==order)
@@ -184,34 +189,47 @@ class PartnerRefundExportTests(unittest.TestCase):
         path = Path(self.temp.name) / f'Partner_Patrick_{partner_name}.xlsx'
         path.write_bytes(blob)
         book = load_workbook(io.BytesIO(path.read_bytes()), data_only=True)
-        self.assertEqual(book.sheetnames, [DISPLAY_NAMES['Rechnung'], DISPLAY_NAMES['Gutschriften']])
+        self.assertEqual(book.sheetnames, [DISPLAY_NAMES['Rechnung'], DISPLAY_NAMES['Gutschriften'], DISPLAY_NAMES['HistorischeGutschriften']])
         rechnung, gutschriften = book[DISPLAY_NAMES['Rechnung']], book[DISPLAY_NAMES['Gutschriften']]
+        historische = book[DISPLAY_NAMES['HistorischeGutschriften']]
         rechnung_text = '\n'.join(str(cell.value) for row in rechnung for cell in row if cell.value is not None)
         gutschrift_text = '\n'.join(str(cell.value) for row in gutschriften for cell in row if cell.value is not None)
+        historical_text = '\n'.join(str(cell.value) for row in historische for cell in row if cell.value is not None)
         self.assertNotIn('Keine Erstattungen vorhanden', gutschrift_text)
+        self.assertNotIn('Keine offenen Rückforderungen vorhanden', historical_text)
         self.assertNotIn(reviewed_order, rechnung_text)  # historical invoice stays out of the new export
-        for order in refunded_orders | {reviewed_order}:
+        self.assertNotIn(reviewed_order, gutschrift_text)  # already paid out - not this settlement's concern
+        self.assertIn(reviewed_order, historical_text)  # surfaced instead as its own open repayment case
+        for order in refunded_orders:
             self.assertIn(order, gutschrift_text)
         for order in regular_orders:
             self.assertIn(order, rechnung_text)
             self.assertNotIn(order, gutschrift_text)
 
         expected_sales=set(regular_orders) | refunded_orders
-        expected_refunds=refunded_orders | {reviewed_order}
+        expected_refunds=refunded_orders
         rechnung_rows = list(rechnung.iter_rows(min_row=15, max_row=14 + len(expected_sales)))
         self.assertEqual({row[1].value for row in rechnung_rows}, expected_sales)
         gutschrift_rows = list(gutschriften.iter_rows(min_row=15, max_row=14 + len(expected_refunds)))
         self.assertEqual({row[1].value for row in gutschrift_rows}, expected_refunds)
+        historical_rows = list(historische.iter_rows(min_row=15, max_row=14 + 1))
+        self.assertEqual({row[1].value for row in historical_rows}, {reviewed_order})
         refund_text='\n'.join(str(row[3].value) for row in gutschrift_rows)
+        historical_row_text='\n'.join(str(row[3].value) for row in historical_rows)
         # Zusatztext: Bestellnummer deliberately repeated (own column too);
         # no duplicate Bestelldatum, no internal workflow/status bookkeeping,
-        # no Refund-ID/Refund brutto (the amount already has its own column).
-        for label in ('eBay-Bestellnummer:','SKU:','Refund-Datum:','Refund-Payout:'):
+        # no Refund-ID/Refund brutto (the amount already has its own column);
+        # the paid-out flag line is new and expected on both refund sheets.
+        for label in ('eBay-Bestellnummer:','SKU:','Refund-Datum:','Refund-Payout:','Bereits an Partner bezahlt:'):
             self.assertIn(label,refund_text)
+            self.assertIn(label,historical_row_text)
         for label in ('Bestelldatum:','Ursprünglicher Payout:',
                       'Ursprüngliche Abrechnung:','Refund-ID:','Refund brutto:',
                       'Partnerwirkung:','Status:'):
             self.assertNotIn(label,refund_text)
+            self.assertNotIn(label,historical_row_text)
+        self.assertIn('Bereits an Partner bezahlt: Nein', refund_text)
+        self.assertIn('Bereits an Partner bezahlt: Ja', historical_row_text)
 
         rechnung_summary_row = 14 + max(1, len(expected_sales)) + 2 + 4
         gutschrift_summary_row = 14 + max(1, len(expected_refunds)) + 2 + 4
