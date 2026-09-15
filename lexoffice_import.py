@@ -21,8 +21,19 @@ LEXOFFICE_CONTACTS_URL = 'https://api.lexware.io/v1/contacts'
 DEFAULT_CUSTOMER_NUMBER = 16335
 VAT_FACTOR = Decimal('1.19')
 MAX_PLAUSIBLE_OFFER_PRICE = Decimal('1000000.00')
-RECENT_POSITIONS_API = 2
+RECENT_POSITIONS_API = 3
 ACTIVE_OFFER_BATCH_SIZE = 300
+
+ORDER_DATE_ALIASES = (
+    'Verkauft am', 'Sold on', 'Sale date', 'Bestelldatum', 'Order date',
+    'Datum', 'Datum der Transaktionserstellung', 'Transaction creation date',
+)
+
+
+def _parse_order_date(value):
+    text = '' if value is None else str(value).strip()
+    iso_style = bool(re.match(r'^\d{4}-\d{2}-\d{2}', text))
+    return pd.to_datetime(text, dayfirst=not iso_style, errors='coerce', utc=True)
 
 TITLE_ALIASES = ['Artikelbezeichnung', 'Artikelname', 'Title', 'Artikel', 'Bezeichnung']
 QTY_ALIASES = ['Menge', 'Anzahl', 'Quantity', 'Stückzahl', 'Stueckzahl']
@@ -47,10 +58,7 @@ def recent_processed_positions(orders: pd.DataFrame, days: int = 30, now=None) -
         return orders.copy()
     if int(days) < 1:
         raise OrderReportError('Der Zeitraum muss mindestens einen Tag umfassen.')
-    required = {
-        'Datum', 'Bestellnummer', 'Transaktionsnummer', 'Artikelnummer',
-        'SKU', 'Angebotstitel',
-    }
+    required = {'Bestellnummer', 'Transaktionsnummer', 'Artikelnummer', 'SKU', 'Angebotstitel'}
     if not required.issubset(orders.columns):
         raise OrderReportError('Verarbeiteter Bestand enthält nicht alle benötigten Positionsfelder.')
     clean = lambda values: values.fillna('').astype(str).str.strip()
@@ -62,8 +70,7 @@ def recent_processed_positions(orders: pd.DataFrame, days: int = 30, now=None) -
     identities = transaction_ids.where(
         transaction_ids != '', order_ids + '\x1f' + item_ids
     )
-    complete = ((order_ids != '') & ((transaction_ids != '') | (item_ids != ''))
-                & (skus != '') & (titles != ''))
+    complete = (order_ids != '') & ((transaction_ids != '') | (item_ids != ''))
     if identities.loc[complete].duplicated().any():
         raise OrderReportError('Bestellpositionen sind nicht eindeutig; Export bleibt gesperrt.')
     reference = pd.Timestamp.now(tz='Europe/Berlin') if now is None else pd.Timestamp(now)
@@ -73,14 +80,34 @@ def recent_processed_positions(orders: pd.DataFrame, days: int = 30, now=None) -
         reference = reference.tz_convert('Europe/Berlin')
     end = reference.normalize()
     start = end - pd.Timedelta(days=int(days) - 1)
-    dates = pd.to_datetime(orders['Datum'], dayfirst=True, errors='coerce', utc=True).dt.tz_convert('Europe/Berlin')
+    date_values = pd.Series('', index=orders.index, dtype=object)
+    date_sources = pd.Series('', index=orders.index, dtype=object)
+    for alias in ORDER_DATE_ALIASES:
+        column = _find_column(orders.columns, [alias])
+        if column is None:
+            continue
+        candidate = clean(orders[column])
+        use = (date_values == '') & (candidate != '')
+        date_values.loc[use] = candidate.loc[use]
+        date_sources.loc[use] = str(column)
+    if not date_values.astype(bool).any():
+        raise OrderReportError(
+            'Kein befülltes Bestell-/Verkaufsdatum gefunden. '
+            f'Gefundene Spalten: {list(orders.columns)}'
+        )
+    dates = date_values.map(_parse_order_date).dt.tz_convert('Europe/Berlin')
     valid = complete & dates.between(start, end + pd.Timedelta(days=1), inclusive='left')
     result = orders.loc[valid].copy()
+    result['Datum'] = date_values.loc[valid]
     result['Line_Item_ID'] = identities.loc[valid]
     result['_Importdatum'] = dates.loc[valid]
-    return result.sort_values(
+    result = result.sort_values(
         ['_Importdatum', 'Bestellnummer', 'Line_Item_ID'], ascending=[False, True, True]
     ).drop(columns=['_Importdatum'])
+    result.attrs['date_sources'] = date_sources.loc[valid].value_counts().to_dict()
+    result.attrs['missing_sku_rows'] = int((skus.loc[valid] == '').sum())
+    result.attrs['missing_title_rows'] = int((titles.loc[valid] == '').sum())
+    return result
 
 
 def _find_column(columns, aliases):

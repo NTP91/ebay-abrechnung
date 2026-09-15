@@ -38,7 +38,7 @@ if not callable(getattr(studio_view,'evelyn_overview',None)):
 if not callable(getattr(position_workflow,'_later_hold_on_bound_invoice',None)):
     position_workflow=importlib.reload(position_workflow)
 if (not callable(getattr(lexoffice_import,'recent_processed_positions',None))
-        or getattr(lexoffice_import,'RECENT_POSITIONS_API',0) < 2
+        or getattr(lexoffice_import,'RECENT_POSITIONS_API',0) < 3
         or getattr(lexoffice_import,'ACTIVE_OFFER_BATCH_SIZE',0) != 300):
     # Streamlit re-executes app.py, but may retain an older dependency module
     # from before a deployment. Reload once when the required API is absent/stale.
@@ -968,6 +968,9 @@ with lexoffice_import_tab:
         st.write(f'**{len(lex_positions)} einzelne Artikelpositionen** der letzten 30 Tage · '
                  f'**{len(lex_ready)} davon neu für den bestehenden Evelyn-Entwurfsweg** · '
                  'keine Payout- oder Partneraggregation')
+        if lex_positions.attrs.get('missing_sku_rows') or lex_positions.attrs.get('missing_title_rows'):
+            st.caption(f'Optionale Stammdaten fehlen: {lex_positions.attrs.get("missing_sku_rows", 0)} SKU(s), '
+                       f'{lex_positions.attrs.get("missing_title_rows", 0)} Artikeltitel. Die eindeutigen Line Items bleiben sichtbar.')
         st.dataframe(display, hide_index=True, use_container_width=True)
 
         if lex_ready.empty:

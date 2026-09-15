@@ -43,7 +43,7 @@ class FakeHttp:
 class ActiveOfferImportTests(unittest.TestCase):
     def test_app_reloads_a_stale_lexoffice_import_before_using_recent_positions(self):
         source = Path('app.py').read_text(encoding='utf-8')
-        guard = "getattr(lexoffice_import,'RECENT_POSITIONS_API',0) < 2"
+        guard = "getattr(lexoffice_import,'RECENT_POSITIONS_API',0) < 3"
         batch_guard = "getattr(lexoffice_import,'ACTIVE_OFFER_BATCH_SIZE',0) != 300"
         call = 'lex_positions = lexoffice_import.recent_processed_positions(orders_master, days=30)'
         self.assertIn(guard, source)
@@ -52,19 +52,21 @@ class ActiveOfferImportTests(unittest.TestCase):
 
     def test_recent_processed_positions_has_no_row_limit_and_keeps_history_visible(self):
         rows = []
-        for index in range(575):
-            rows.append({'Datum': '14.09.2026', 'Bestellnummer': f'order-{index:03d}',
+        for index in range(574):
+            rows.append({'Datum': '', 'Verkauft am': '14.09.2026', 'Bestellnummer': f'order-{index:03d}',
                          'Transaktionsnummer': f'tx-{index:03d}', 'Artikelnummer': f'item-{index:03d}',
                          'SKU': f'SKU-{index:03d}', 'Angebotstitel': f'Artikel {index:03d}'})
         rows.extend([
-            {'Datum': '15.08.2026', 'Bestellnummer': 'too-old', 'Transaktionsnummer': 'old-tx',
+            {'Datum': '', 'Verkauft am': '15.08.2026', 'Bestellnummer': 'too-old', 'Transaktionsnummer': 'old-tx',
              'Artikelnummer': 'old-item', 'SKU': 'OLD', 'Angebotstitel': 'Alt'},
-            {'Datum': '14.09.2026', 'Bestellnummer': 'missing-sku', 'Transaktionsnummer': 'bad-tx',
+            {'Datum': '', 'Verkauft am': '14.09.2026', 'Bestellnummer': 'missing-sku', 'Transaktionsnummer': 'bad-tx',
              'Artikelnummer': 'bad-item', 'SKU': '', 'Angebotstitel': 'Unvollständig'},
         ])
         result = subject.recent_processed_positions(pd.DataFrame(rows), now='2026-09-15 12:00:00+02:00')
         self.assertEqual(len(result), 575)
         self.assertEqual(result.Line_Item_ID.nunique(), 575)
+        self.assertEqual(result.attrs['date_sources'], {'Verkauft am': 575})
+        self.assertEqual(result.attrs['missing_sku_rows'], 1)
         self.assertNotIn('too-old', set(result.Bestellnummer))
 
     def test_recent_processed_positions_keeps_line_items_of_the_same_order_separate(self):
@@ -77,7 +79,7 @@ class ActiveOfferImportTests(unittest.TestCase):
         result = subject.recent_processed_positions(pd.DataFrame(rows), now='2026-09-15')
         self.assertEqual(result.Line_Item_ID.tolist(), ['tx-0', 'tx-1', 'tx-2'])
 
-    def test_recent_processed_positions_excludes_unresolved_rows(self):
+    def test_recent_processed_positions_only_requires_a_stable_line_identity(self):
         data = pd.DataFrame([
             {'Datum': '01.09.2026', 'Bestellnummer': 'valid', 'Transaktionsnummer': 'tx-valid',
              'Artikelnummer': 'item-valid', 'SKU': 'SKU-1', 'Angebotstitel': 'Valid'},
@@ -87,7 +89,16 @@ class ActiveOfferImportTests(unittest.TestCase):
              'Artikelnummer': '', 'SKU': 'SKU-3', 'Angebotstitel': 'Ohne Identität'},
         ])
         result = subject.recent_processed_positions(data, now='2026-09-15')
-        self.assertEqual(result.Bestellnummer.tolist(), ['valid'])
+        self.assertEqual(result.Bestellnummer.tolist(), ['no-title', 'valid'])
+        self.assertEqual(result.attrs['missing_title_rows'], 1)
+
+    def test_recent_processed_positions_accepts_timestamp_dates(self):
+        data = pd.DataFrame([{
+            'Datum': pd.Timestamp('2026-09-14 18:30:00+02:00'), 'Bestellnummer': 'timestamp-order',
+            'Transaktionsnummer': 'timestamp-line', 'Artikelnummer': '', 'SKU': '', 'Angebotstitel': '',
+        }])
+        result = subject.recent_processed_positions(data, now='2026-09-15')
+        self.assertEqual(result.Bestellnummer.tolist(), ['timestamp-order'])
 
     def test_csv_prices_are_divided_by_three_with_cent_rounding(self):
         upload = Upload('Title;Current price;Start price;Verfügbare Menge;SKU\nArtikel A;10,00;9,00;2;SKU-A\nArtikel B;10,01;9,00;1;SKU-B\n'.encode(), 'angebote.csv')
