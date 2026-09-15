@@ -16,7 +16,6 @@ import group_b_rounds
 import payout_reconciliation
 import trust_risk_ui
 import supabase_store
-import lexoffice_import
 from datetime import date
 from partner_export import export_partner_excel, prepare_partner_export
 
@@ -944,45 +943,30 @@ with trust_risk_tab:
 
 with lexoffice_import_tab:
     st.subheader('Lexoffice Bestell-Import')
-    st.caption('Isoliert von Supabase und der Live-Auszahlungslogik. Liest tatsächliche Bestelldaten aus einem eBay-Bestellbericht und legt daraus einen Rechnungsentwurf in Lexoffice an.')
-    st.caption('Der API-Key wird nur für diese Sitzung verwendet und nicht gespeichert (wie beim bestehenden Lexware-Entwurf-Workflow).')
+    st.caption('Erstellt Lexware-Entwürfe (api.lexware.io) direkt aus den bereits in der App verarbeiteten Auszahlungspositionen. Kein manueller Bestellbericht-Upload mehr nötig.')
 
-    lex_api_key = st.text_input('Lexoffice API-Key', type='password', key='lexoffice_import_api_key')
-    entity_name = st.text_input('Rechnungs-Entität (Bezeichnung, frei wählbar)', key='lexoffice_import_entity_name')
-    lex_contact_id = st.text_input('Kontakt-ID der Entität', key='lexoffice_import_contact_id')
+    lex_ready = evelyn['new_ready']
+    if lex_ready.empty:
+        st.info('Aktuell keine verarbeiteten Positionen ohne bestehenden Lexware-Entwurf.')
+    else:
+        payout_ids = sorted(lex_ready['Auszahlung Nr.'].unique())
+        lex_sum = lex_ready['Erlös_Brutto'].sum()
+        st.write(f'**{len(lex_ready)} Positionen** ohne bestehenden Lexware-Entwurf · {len(payout_ids)} Payout(s) · {euros(lex_sum)} brutto')
+        st.dataframe(lex_ready[['Auszahlung Nr.', 'Bestellnummer', 'Partner', 'SKU', 'Erlös_Brutto']], hide_index=True, use_container_width=True)
 
-    uploaded = st.file_uploader('eBay-Bestellbericht (CSV oder Excel)', type=['csv', 'xlsx', 'xls'])
-
-    if uploaded is not None:
-        try:
-            order_df = lexoffice_import.read_order_report(uploaded)
-        except lexoffice_import.OrderReportError as exc:
-            st.error(str(exc))
-            order_df = None
-
-        if order_df is not None:
-            if order_df.empty:
-                st.warning('Keine verwertbaren Positionen im Bestellbericht gefunden.')
-            else:
-                st.dataframe(order_df, use_container_width=True)
-                st.caption(f'{len(order_df)} Positionen erkannt · Summe {order_df["Preis"].sum():.2f} €')
-
-                can_submit = bool(lex_api_key and lex_contact_id)
-                if not can_submit:
-                    st.info('API-Key und Kontakt-ID eingeben, um den Entwurf anzulegen.')
-                if st.button('Rechnungsentwurf in Lexoffice anlegen', type='primary', disabled=not can_submit):
-                    line_items = lexoffice_import.build_line_items(order_df)
-                    try:
-                        result = lexoffice_import.create_draft_invoice(
-                            lex_api_key, lex_contact_id, line_items,
-                            title=f'Bestell-Import {entity_name}' if entity_name else 'Bestell-Import',
-                        )
-                        if result.ok:
-                            st.success(f'Rechnungsentwurf angelegt (ID {result.invoice_id}).')
-                        else:
-                            st.error(f'Lexoffice-Fehler ({result.status_code}): {result.message}')
-                    except Exception as exc:
-                        st.error(f'Unerwarteter Fehler: {exc}')
+        if not api_key:
+            st.info('API-Key unter „Lexware-Verbindung“ in der Seitenleiste hinterlegen, um Entwürfe zu erstellen.')
+        if st.button('Rechnungsentwürfe erstellen (api.lexware.io)', type='primary', disabled=not api_key, key='lexoffice-import-create'):
+            try:
+                expected = {pid: core.payout_fingerprint(master[master['Auszahlung Nr.'] == pid]) for pid in payout_ids}
+                for pid in payout_ids:
+                    core.confirm_received(pid)
+                core.create_invoice_draft(api_key, payout_ids, True, expected_fingerprints=expected)
+                _load_dashboard_data.clear()
+                st.success(f'Lexware-Entwurf für {len(payout_ids)} Payout(s) erstellt.')
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
 
 if st.session_state.get('discard_request'):
     discard_dialog(st.session_state['discard_request'])
