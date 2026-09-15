@@ -13,7 +13,7 @@ from dataclasses import dataclass
 import pandas as pd
 import requests
 
-LEXOFFICE_INVOICES_URL = 'https://api.lexoffice.io/v1/invoices?finalize=false'
+LEXOFFICE_INVOICES_URL = 'https://api.lexware.io/v1/invoices?finalize=false'
 
 TITLE_ALIASES = ['Artikelbezeichnung', 'Artikelname', 'Title', 'Artikel', 'Bezeichnung']
 QTY_ALIASES = ['Menge', 'Anzahl', 'Quantity', 'Stückzahl', 'Stueckzahl']
