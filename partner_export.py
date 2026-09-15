@@ -26,11 +26,17 @@ HEADER_ROW = 14
 FIRST_ROW = 15
 TAX = Decimal('.19')
 CENT = Decimal('.01')
-# Internal sheet keys ('Rechnung'/'Gutschriften') drive the data model and are
-# never renamed - only the visible sheet tab/title text changes, so a merchant
-# does not read "Gutschriften" (which implies a formal credit note already
-# issued) for refunds on a position they may not have been paid for yet.
-DISPLAY_NAMES = {'Rechnung': 'Rechnung', 'Gutschriften': 'Erstattungen-Abzüge'}
+# Internal sheet keys ('Rechnung'/'Gutschriften'/'HistorischeGutschriften') drive
+# the data model and are never renamed - only the visible sheet tab/title text
+# changes, so a merchant does not read "Gutschriften" (which implies a formal
+# credit note already issued) for refunds on a position they may not have been
+# paid for yet. HistorischeGutschriften holds refunds whose original sale was
+# already paid out to the partner in an earlier run (Fall B): the internal
+# netting used by Gutschriften no longer applies once the money is already
+# with the partner, so these stay their own open-repayment tab, always present
+# (even empty) so the export shape never depends on whether such a case exists.
+DISPLAY_NAMES = {'Rechnung': 'Rechnung', 'Gutschriften': 'Erstattungen-Abzüge',
+                  'HistorischeGutschriften': 'Offene Rückforderungen'}
 # GESAMTABRECHNUNG (Rechnung sheet only): sales basis, partner discount, final
 # sales amount - never netted against Gutschriften, which stays its own,
 # separately settled sheet with its own closing line. Shared by
@@ -165,7 +171,7 @@ def prepare_partner_export(rows, payouts=None, orders=None, statement_type='part
         partner = 'Alle Gruppe-B-Partner: ' + ', '.join(sorted(rows['Partner'].unique()))
     result = {'partner': partner, 'group': group, 'rate': rate, 'payouts': {},
               'recipient': recipient, 'address': address, 'statement_type': statement_type,
-              'Rechnung': [], 'Gutschriften': []}
+              'Rechnung': [], 'Gutschriften': [], 'HistorischeGutschriften': []}
     refund_links = core.refund_links(rows)
     refund_sales = set(refund_links.values())
     for row_index, row in rows.iterrows():
@@ -210,28 +216,46 @@ def prepare_partner_export(rows, payouts=None, orders=None, statement_type='part
         item['_refund_pair'] = row_index in refund_sales
         if is_refund:
             item['refund_date'] = report_date(row.get('Datum'))
-        result['Gutschriften' if is_refund else 'Rechnung'].append(item)
+            # Fall B: studio_view.partner_rows already determined (from the
+            # original sale's own reviewed/paid/closed status, not from
+            # whether that sale happens to be included in this call's rows)
+            # that the partner was already paid for it in an earlier run.
+            # Default False - callers that never computed this (Gruppe A,
+            # group_b_evelyn, ad-hoc slices) keep the original single-bucket
+            # behavior unchanged. Fall A nets internally as before.
+            item['_paid_out'] = bool(row.get('Bereits_An_Partner_Bezahlt', False))
+            bucket = 'HistorischeGutschriften' if item['_paid_out'] else 'Gutschriften'
+        else:
+            item['_paid_out'] = False
+            bucket = 'Rechnung'
+        result[bucket].append(item)
     if statement_type == 'partner' and group == 'Gruppe B':
         result['totals'] = {
             'Rechnung': calculate_partner_variant_b(result['Rechnung'], rate),
             'Gutschriften': calculate_partner_variant_b(result['Gutschriften'], rate, refunds=True),
+            'HistorischeGutschriften': calculate_partner_variant_b(result['HistorischeGutschriften'], rate, refunds=True),
         }
     else:
-        result['totals'] = {name: calculate_sheet(result[name], rate) for name in ('Rechnung', 'Gutschriften')}
+        result['totals'] = {name: calculate_sheet(result[name], rate)
+                             for name in ('Rechnung', 'Gutschriften', 'HistorischeGutschriften')}
     # Sales keep the compact reference text; refunds add the audit metadata that
     # makes each separate negative event traceable to its original settlement.
     for item in result['Rechnung']:
         item['extra'] += '\nPayout: ' + item['payout_id']
-    for item in result['Gutschriften']:
+    for item in result['Gutschriften'] + result['HistorischeGutschriften']:
         # Bestellnummer is deliberately repeated (see above); Bestelldatum and
         # internal workflow/status/amount bookkeeping stay out of the visible
-        # partner export - for every group.
+        # partner export - for every group. The paid-out flag is the one new
+        # line: it is what lets the partner see, per position, whether the
+        # amount was still with them (Nein) or already paid out to them in an
+        # earlier run (Ja, so no internal netting happens for it here).
         refund_date_text = item['refund_date'].strftime('%d.%m.%Y') if item.get('refund_date') else 'nicht angegeben'
         item['extra'] = '\n'.join([
             'eBay-Bestellnummer: ' + item['order'],
             'SKU: ' + item['extra'].split('\nSKU: ', 1)[-1],
             'Refund-Datum: ' + refund_date_text,
             'Refund-Payout: ' + item['payout_id'],
+            'Bereits an Partner bezahlt: ' + ('Ja' if item['_paid_out'] else 'Nein'),
         ])
     return result
 
@@ -310,10 +334,13 @@ def _fill_sheet(xml, model, name):
     layout = _closing_statement_rows(name, len(items))
     start = layout['start']
     helper_first = layout['visible_last'] + 3
-    rechnung_totals, gutschriften_totals = model['totals']['Rechnung'], model['totals']['Gutschriften']
+    rechnung_totals = model['totals']['Rechnung']
+    sheet_totals = model['totals'][name]
     created_on = datetime.now().strftime('%d.%m.%Y')
-    is_refund_sheet = name == 'Gutschriften'
-    title = ('ERSTATTUNGEN / ABZÜGE – ' if is_refund_sheet else 'PARTNERABRECHNUNG – ') + str(model['partner'])
+    is_historical_sheet = name == 'HistorischeGutschriften'
+    is_refund_sheet = name != 'Rechnung'
+    title = (('GUTSCHRIFTEN / OFFENE RÜCKFORDERUNGEN – ' if is_historical_sheet else 'ERSTATTUNGEN / ABZÜGE – ')
+             if is_refund_sheet else 'PARTNERABRECHNUNG – ') + str(model['partner'])
     metadata = {
         1: {'A': title},
         2: {'A': f'Abrechnungszeitraum: {period} · Erstellt am {created_on}'},
@@ -325,10 +352,12 @@ def _fill_sheet(xml, model, name):
         8: {},
         10: {'A': None, 'G': None},
         11: {'A': None, 'G': None},
-        12: ({'A': f'Erstattungen: {len(model["Gutschriften"])}',
-              'G': 'Refund brutto: ' + format_euro(gutschriften_totals['ebay'])} if is_refund_sheet
+        12: ({'A': f'Historische Rückforderungen: {len(items)}',
+              'G': 'Refund brutto: ' + format_euro(sheet_totals['ebay'])} if is_historical_sheet
+             else {'A': f'Erstattungen: {len(model["Gutschriften"])}',
+                   'G': 'Refund brutto: ' + format_euro(sheet_totals['ebay'])} if is_refund_sheet
              else {'A': f'Reguläre Positionen: {len(model["Rechnung"])}', 'G': f'Erstattungen / Abzüge: {len(model["Gutschriften"])}'}),
-        13: ({'A': 'Auswirkung auf Partneranspruch: ' + format_euro(gutschriften_totals['gross'])} if is_refund_sheet
+        13: ({'A': 'Auswirkung auf Partneranspruch: ' + format_euro(sheet_totals['gross'])} if is_refund_sheet
              else {'A': None}),
     }
     for number in sorted(n for n in prototype if n <= HEADER_ROW):
@@ -360,7 +389,9 @@ def _fill_sheet(xml, model, name):
         row.set('customHeight', '1')
     if not items:
         values = {col: None for col in 'ABCDEFGHIJK'}
-        values['C'] = 'Keine Erstattungen vorhanden.' if name == 'Gutschriften' else 'Keine Rechnungspositionen vorhanden.'
+        values['C'] = ('Keine offenen Rückforderungen vorhanden.' if is_historical_sheet
+                        else 'Keine Erstattungen vorhanden.' if is_refund_sheet
+                        else 'Keine Rechnungspositionen vorhanden.')
         row_from(FIRST_ROW, FIRST_ROW, values)
     totals = model['totals'][name]
     helper_last = helper_first + max(1, len(items)) - 1
@@ -373,8 +404,11 @@ def _fill_sheet(xml, model, name):
     note = ('Rechenweg: VK netto × Menge, danach Positionsrabatt; jede Nettoposition auf Cent runden. '
             '19 % Umsatzsteuer auf die Nettosumme. Die Steuer wird centgenau auf die Positionsbruttos verteilt. '
             'eBay-Beträge dienen nur zur Kontrolle.')
-    if name == 'Gutschriften':
+    if is_refund_sheet:
         note += ' Erstattungen sind als negative Korrekturen dargestellt.'
+    if is_historical_sheet:
+        note += (' Diese Positionen wurden dem Partner bereits in einem früheren Zahlungslauf '
+                  'ausgezahlt und werden hier separat als offene Rückforderung/Gutschrift geführt.')
     row_from(27, layout['note_row'], {'A': note})
     if name == 'Rechnung':
         # Closing statement for the merchant: only already-computed
@@ -445,32 +479,61 @@ def _fill_sheet(xml, model, name):
     return ET.tostring(sheet, encoding='utf-8', xml_declaration=True)
 
 
+# Third worksheet part added at export time (the template itself, authored
+# with an external tool per the module docstring, only ever shipped sheet1/2).
+# Fixed synthetic ids for the new relationship/content-type/sheet entries -
+# only required to be unique within this workbook, never read back anywhere.
+THIRD_SHEET_TARGET = 'xl/worksheets/sheet3.xml'
+THIRD_SHEET_RID = 'Rhist0f3a9c7d5e21'
+SHEET_NAMES = ('Rechnung', 'Gutschriften', 'HistorischeGutschriften')
+REL_NS = 'http://schemas.openxmlformats.org/package/2006/relationships'
+CT_NS = 'http://schemas.openxmlformats.org/package/2006/content-types'
+WORKSHEET_CONTENT_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml'
+R_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+
+
 def export_partner_excel(rows, payouts=None, orders=None, statement_type='partner'):
     model = prepare_partner_export(rows, payouts, orders, statement_type)
     output = io.BytesIO()
     with zipfile.ZipFile(TEMPLATE) as source, zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as target:
-        # Rechnung is the one and only layout source. Both worksheet XML entries
-        # are built from this same template, so column widths, styles, merges
-        # and the visible table shape cannot drift apart between the two tabs -
-        # sheet2's own template bytes are never used as a structural source.
+        # Rechnung is the one and only layout source. All three worksheet XML
+        # entries are built from this same template, so column widths, styles,
+        # merges and the visible table shape cannot drift apart between tabs -
+        # sheet2/sheet3's own template bytes are never used as a structural source.
         master_template = source.read('xl/worksheets/sheet1.xml')
+        third_sheet_content = _fill_sheet(master_template, model, 'HistorischeGutschriften')
         for entry in source.infolist():
             content = source.read(entry.filename)
             if entry.filename in ('xl/worksheets/sheet1.xml', 'xl/worksheets/sheet2.xml'):
                 name = 'Rechnung' if entry.filename.endswith('sheet1.xml') else 'Gutschriften'
                 content = _fill_sheet(master_template, model, name)
+            elif entry.filename == 'xl/_rels/workbook.xml.rels':
+                rels = ET.fromstring(content)
+                ET.SubElement(rels, f'{{{REL_NS}}}Relationship', {
+                    'Type': f'{R_NS}/worksheet', 'Target': '/' + THIRD_SHEET_TARGET, 'Id': THIRD_SHEET_RID})
+                content = ET.tostring(rels, encoding='utf-8', xml_declaration=True)
+            elif entry.filename == '[Content_Types].xml':
+                types = ET.fromstring(content)
+                ET.SubElement(types, f'{{{CT_NS}}}Override', {
+                    'PartName': '/' + THIRD_SHEET_TARGET, 'ContentType': WORKSHEET_CONTENT_TYPE})
+                content = ET.tostring(types, encoding='utf-8', xml_declaration=True)
             elif entry.filename == 'xl/workbook.xml':
                 workbook = ET.fromstring(content)
-                for sheet in workbook.find(TAG('sheets')):
+                sheets_el = workbook.find(TAG('sheets'))
+                for sheet in sheets_el:
                     if sheet.get('name') in DISPLAY_NAMES:
                         sheet.set('name', DISPLAY_NAMES[sheet.get('name')])
+                ET.SubElement(sheets_el, TAG('sheet'), {
+                    'name': DISPLAY_NAMES['HistorischeGutschriften'], 'sheetId': '3',
+                    f'{{{R_NS}}}id': THIRD_SHEET_RID})
                 names = workbook.find(TAG('definedNames'))
                 if names is None:
                     names = ET.Element(TAG('definedNames'))
-                    workbook.insert(list(workbook).index(workbook.find(TAG('sheets'))) + 1, names)
-                for index, name in enumerate(('Rechnung', 'Gutschriften')):
+                    workbook.insert(list(workbook).index(sheets_el) + 1, names)
+                for index, name in enumerate(SHEET_NAMES):
                     visible_last = _closing_statement_rows(name, len(model[name]))['visible_last']
                     ET.SubElement(names, TAG('definedName'), {'name': '_xlnm.Print_Area', 'localSheetId': str(index)}).text = f"'{DISPLAY_NAMES[name]}'!$A$1:$K${visible_last}"
                 content = ET.tostring(workbook, encoding='utf-8', xml_declaration=True)
             target.writestr(entry, content)
+        target.writestr(THIRD_SHEET_TARGET, third_sheet_content)
     return output.getvalue()
