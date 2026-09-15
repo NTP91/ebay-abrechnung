@@ -21,6 +21,7 @@ LEXOFFICE_CONTACTS_URL = 'https://api.lexware.io/v1/contacts'
 DEFAULT_CUSTOMER_NUMBER = 16335
 VAT_FACTOR = Decimal('1.19')
 MAX_PLAUSIBLE_OFFER_PRICE = Decimal('1000000.00')
+RECENT_POSITIONS_API = 2
 
 TITLE_ALIASES = ['Artikelbezeichnung', 'Artikelname', 'Title', 'Artikel', 'Bezeichnung']
 QTY_ALIASES = ['Menge', 'Anzahl', 'Quantity', 'Stückzahl', 'Stueckzahl']
@@ -35,33 +36,50 @@ class OrderReportError(ValueError):
     pass
 
 
-def recent_processed_positions(business: pd.DataFrame, days: int = 30, now=None) -> pd.DataFrame:
-    """Return every valid processed Group-B sale in a rolling date window.
+def recent_processed_positions(orders: pd.DataFrame, days: int = 30, now=None) -> pd.DataFrame:
+    """Return validated rows directly from the imported order-line master.
 
-    This is intentionally independent of invoice readiness: historical,
-    locked and already drafted rows remain visible, while the caller keeps
-    the existing creation gate for the actionable subset.
+    No payout, settlement, partner or invoice view is used here. Every unique
+    transaction/item identity stays one row and no result limit is applied.
     """
-    if business.empty:
-        return business.copy()
-    required = {'Datum', 'Gruppe', 'Art', 'Erlös_Brutto', 'Prüfhinweis', 'Quellenpruefung'}
-    if not required.issubset(business.columns):
+    if orders.empty:
+        return orders.copy()
+    if int(days) < 1:
+        raise OrderReportError('Der Zeitraum muss mindestens einen Tag umfassen.')
+    required = {
+        'Datum', 'Bestellnummer', 'Transaktionsnummer', 'Artikelnummer',
+        'SKU', 'Angebotstitel',
+    }
+    if not required.issubset(orders.columns):
         raise OrderReportError('Verarbeiteter Bestand enthält nicht alle benötigten Positionsfelder.')
+    clean = lambda values: values.fillna('').astype(str).str.strip()
+    order_ids = clean(orders['Bestellnummer'])
+    transaction_ids = clean(orders['Transaktionsnummer'])
+    item_ids = clean(orders['Artikelnummer'])
+    skus = clean(orders['SKU'])
+    titles = clean(orders['Angebotstitel'])
+    identities = transaction_ids.where(
+        transaction_ids != '', order_ids + '\x1f' + item_ids
+    )
+    complete = ((order_ids != '') & ((transaction_ids != '') | (item_ids != ''))
+                & (skus != '') & (titles != ''))
+    if identities.loc[complete].duplicated().any():
+        raise OrderReportError('Bestellpositionen sind nicht eindeutig; Export bleibt gesperrt.')
     reference = pd.Timestamp.now(tz='Europe/Berlin') if now is None else pd.Timestamp(now)
     if reference.tzinfo is None:
         reference = reference.tz_localize('Europe/Berlin')
     else:
         reference = reference.tz_convert('Europe/Berlin')
     end = reference.normalize()
-    start = end - pd.Timedelta(days=int(days))
-    dates = pd.to_datetime(business['Datum'], dayfirst=True, errors='coerce', utc=True).dt.tz_convert('Europe/Berlin')
-    valid = ((business.Gruppe == 'Gruppe B') & (business.Art == 'Bestellung')
-             & (business['Erlös_Brutto'] > 0) & ~business['Prüfhinweis'].astype(bool)
-             & ~business.Quellenpruefung.astype(bool)
-             & dates.between(start, end + pd.Timedelta(days=1), inclusive='left'))
-    result = business.loc[valid].copy()
+    start = end - pd.Timedelta(days=int(days) - 1)
+    dates = pd.to_datetime(orders['Datum'], dayfirst=True, errors='coerce', utc=True).dt.tz_convert('Europe/Berlin')
+    valid = complete & dates.between(start, end + pd.Timedelta(days=1), inclusive='left')
+    result = orders.loc[valid].copy()
+    result['Line_Item_ID'] = identities.loc[valid]
     result['_Importdatum'] = dates.loc[valid]
-    return result.sort_values(['_Importdatum', 'Bestellnummer'], ascending=[False, True]).drop(columns=['_Importdatum'])
+    return result.sort_values(
+        ['_Importdatum', 'Bestellnummer', 'Line_Item_ID'], ascending=[False, True, True]
+    ).drop(columns=['_Importdatum'])
 
 
 def _find_column(columns, aliases):

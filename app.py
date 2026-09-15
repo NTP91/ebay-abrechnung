@@ -37,9 +37,10 @@ if not callable(getattr(studio_view,'evelyn_overview',None)):
     studio_view=importlib.reload(studio_view)
 if not callable(getattr(position_workflow,'_later_hold_on_bound_invoice',None)):
     position_workflow=importlib.reload(position_workflow)
-if not callable(getattr(lexoffice_import,'recent_processed_positions',None)):
+if (not callable(getattr(lexoffice_import,'recent_processed_positions',None))
+        or getattr(lexoffice_import,'RECENT_POSITIONS_API',0) < 2):
     # Streamlit re-executes app.py, but may retain an older dependency module
-    # from before a deployment. Reload once when the newly required API is absent.
+    # from before a deployment. Reload once when the required API is absent/stale.
     lexoffice_import=importlib.reload(lexoffice_import)
 
 
@@ -950,29 +951,26 @@ with lexoffice_import_tab:
     st.subheader('Lexoffice Bestell-Import')
     st.caption('Zwei getrennte Entwurfswege über api.lexware.io. Es werden ausschließlich nicht finalisierte Lexware-Entwürfe erzeugt.')
 
-    st.markdown('**1 · Verarbeitete Auszahlungspositionen**')
+    st.markdown('**1 · Einzelne Bestellpositionen**')
     try:
-        lex_positions = lexoffice_import.recent_processed_positions(business, days=30)
+        lex_positions = lexoffice_import.recent_processed_positions(orders_master, days=30)
     except lexoffice_import.OrderReportError as exc:
-        lex_positions = business.iloc[0:0].copy()
+        lex_positions = orders_master.iloc[0:0].copy()
         st.error(str(exc))
-    ready_keys = set(evelyn['new_ready'].position_key) if not evelyn['new_ready'].empty else set()
-    lex_ready = lex_positions[lex_positions.position_key.isin(ready_keys)] if not lex_positions.empty else lex_positions
+    lex_ready = evelyn['new_ready'].copy()
     if lex_positions.empty:
-        st.info('Keine verarbeiteten Gruppe-B-Bestellungen innerhalb der letzten 30 Tage.')
+        st.info('Keine validierten Bestellpositionen innerhalb der letzten 30 Tage.')
     else:
         payout_ids = sorted(lex_ready['Auszahlung Nr.'].unique()) if not lex_ready.empty else []
-        display = lex_positions[['Datum', 'Auszahlung Nr.', 'Bestellnummer', 'Partner', 'SKU',
-                                 'Erlös_Brutto', 'Bearbeitungsstatus']].copy()
-        display['Lexware-Status'] = ['neu / Entwurf möglich' if key in ready_keys else 'bereits verarbeitet / gesperrt'
-                                     for key in lex_positions.position_key]
-        st.write(f'**{len(lex_positions)} Positionen** der letzten 30 Tage · '
-                 f'**{len(lex_ready)} neu für einen Entwurf** · {lex_positions["Auszahlung Nr."].nunique()} Payout(s) · '
-                 f'{euros(lex_positions["Erlös_Brutto"].sum())} brutto')
+        display = lex_positions[['Datum', 'Bestellnummer', 'Transaktionsnummer', 'Artikelnummer',
+                                 'SKU', 'Angebotstitel']].copy()
+        st.write(f'**{len(lex_positions)} einzelne Artikelpositionen** der letzten 30 Tage · '
+                 f'**{len(lex_ready)} davon neu für den bestehenden Evelyn-Entwurfsweg** · '
+                 'keine Payout- oder Partneraggregation')
         st.dataframe(display, hide_index=True, use_container_width=True)
 
         if lex_ready.empty:
-            st.info('Alle angezeigten Positionen sind bereits verarbeitet oder für einen neuen Entwurf gesperrt.')
+            st.info('Aktuell sind keine neuen Gruppe-B-Positionen für den bestehenden Evelyn-Entwurfsweg freigegeben.')
         elif not api_key:
             st.info('API-Key unter „Lexware-Verbindung“ in der Seitenleiste hinterlegen, um Entwürfe zu erstellen.')
         if st.button('Rechnungsentwürfe erstellen (api.lexware.io)', type='primary',

@@ -43,37 +43,46 @@ class FakeHttp:
 class ActiveOfferImportTests(unittest.TestCase):
     def test_app_reloads_a_stale_lexoffice_import_before_using_recent_positions(self):
         source = Path('app.py').read_text(encoding='utf-8')
-        guard = "if not callable(getattr(lexoffice_import,'recent_processed_positions',None)):"
-        call = 'lex_positions = lexoffice_import.recent_processed_positions(business, days=30)'
+        guard = "or getattr(lexoffice_import,'RECENT_POSITIONS_API',0) < 2):"
+        call = 'lex_positions = lexoffice_import.recent_processed_positions(orders_master, days=30)'
         self.assertIn(guard, source)
         self.assertLess(source.index(guard), source.index(call))
 
     def test_recent_processed_positions_has_no_row_limit_and_keeps_history_visible(self):
         rows = []
         for index in range(575):
-            rows.append({'Datum': '14.09.2026', 'Gruppe': 'Gruppe B', 'Art': 'Bestellung',
-                         'Erlös_Brutto': 10, 'Prüfhinweis': '', 'Quellenpruefung': '',
-                         'Bestellnummer': f'order-{index:03d}'})
+            rows.append({'Datum': '14.09.2026', 'Bestellnummer': f'order-{index:03d}',
+                         'Transaktionsnummer': f'tx-{index:03d}', 'Artikelnummer': f'item-{index:03d}',
+                         'SKU': f'SKU-{index:03d}', 'Angebotstitel': f'Artikel {index:03d}'})
         rows.extend([
-            {'Datum': '15.08.2026', 'Gruppe': 'Gruppe B', 'Art': 'Bestellung', 'Erlös_Brutto': 10,
-             'Prüfhinweis': '', 'Quellenpruefung': '', 'Bestellnummer': 'too-old'},
-            {'Datum': '14.09.2026', 'Gruppe': 'Gruppe B', 'Art': 'Erstattung', 'Erlös_Brutto': -10,
-             'Prüfhinweis': '', 'Quellenpruefung': '', 'Bestellnummer': 'refund'},
-            {'Datum': '14.09.2026', 'Gruppe': 'Gruppe A', 'Art': 'Bestellung', 'Erlös_Brutto': 10,
-             'Prüfhinweis': '', 'Quellenpruefung': '', 'Bestellnummer': 'group-a'},
+            {'Datum': '15.08.2026', 'Bestellnummer': 'too-old', 'Transaktionsnummer': 'old-tx',
+             'Artikelnummer': 'old-item', 'SKU': 'OLD', 'Angebotstitel': 'Alt'},
+            {'Datum': '14.09.2026', 'Bestellnummer': 'missing-sku', 'Transaktionsnummer': 'bad-tx',
+             'Artikelnummer': 'bad-item', 'SKU': '', 'Angebotstitel': 'Unvollständig'},
         ])
         result = subject.recent_processed_positions(pd.DataFrame(rows), now='2026-09-15 12:00:00+02:00')
         self.assertEqual(len(result), 575)
+        self.assertEqual(result.Line_Item_ID.nunique(), 575)
         self.assertNotIn('too-old', set(result.Bestellnummer))
+
+    def test_recent_processed_positions_keeps_line_items_of_the_same_order_separate(self):
+        rows = [
+            {'Datum': '15.09.2026', 'Bestellnummer': 'same-order',
+             'Transaktionsnummer': f'tx-{index}', 'Artikelnummer': f'item-{index}',
+             'SKU': f'SKU-{index}', 'Angebotstitel': f'Artikel {index}'}
+            for index in range(3)
+        ]
+        result = subject.recent_processed_positions(pd.DataFrame(rows), now='2026-09-15')
+        self.assertEqual(result.Line_Item_ID.tolist(), ['tx-0', 'tx-1', 'tx-2'])
 
     def test_recent_processed_positions_excludes_unresolved_rows(self):
         data = pd.DataFrame([
-            {'Datum': '01.09.2026', 'Gruppe': 'Gruppe B', 'Art': 'Bestellung', 'Erlös_Brutto': 10,
-             'Prüfhinweis': '', 'Quellenpruefung': '', 'Bestellnummer': 'valid'},
-            {'Datum': '01.09.2026', 'Gruppe': 'Gruppe B', 'Art': 'Bestellung', 'Erlös_Brutto': 10,
-             'Prüfhinweis': 'unklar', 'Quellenpruefung': '', 'Bestellnummer': 'issue'},
-            {'Datum': '01.09.2026', 'Gruppe': 'Gruppe B', 'Art': 'Bestellung', 'Erlös_Brutto': 10,
-             'Prüfhinweis': '', 'Quellenpruefung': 'geändert', 'Bestellnummer': 'changed'},
+            {'Datum': '01.09.2026', 'Bestellnummer': 'valid', 'Transaktionsnummer': 'tx-valid',
+             'Artikelnummer': 'item-valid', 'SKU': 'SKU-1', 'Angebotstitel': 'Valid'},
+            {'Datum': '01.09.2026', 'Bestellnummer': 'no-title', 'Transaktionsnummer': 'tx-title',
+             'Artikelnummer': 'item-title', 'SKU': 'SKU-2', 'Angebotstitel': ''},
+            {'Datum': '01.09.2026', 'Bestellnummer': 'no-line-id', 'Transaktionsnummer': '',
+             'Artikelnummer': '', 'SKU': 'SKU-3', 'Angebotstitel': 'Ohne Identität'},
         ])
         result = subject.recent_processed_positions(data, now='2026-09-15')
         self.assertEqual(result.Bestellnummer.tolist(), ['valid'])
