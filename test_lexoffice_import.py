@@ -40,6 +40,36 @@ class FakeHttp:
 
 
 class ActiveOfferImportTests(unittest.TestCase):
+    def test_recent_processed_positions_has_no_row_limit_and_keeps_history_visible(self):
+        rows = []
+        for index in range(575):
+            rows.append({'Datum': '14.09.2026', 'Gruppe': 'Gruppe B', 'Art': 'Bestellung',
+                         'Erlös_Brutto': 10, 'Prüfhinweis': '', 'Quellenpruefung': '',
+                         'Bestellnummer': f'order-{index:03d}'})
+        rows.extend([
+            {'Datum': '15.08.2026', 'Gruppe': 'Gruppe B', 'Art': 'Bestellung', 'Erlös_Brutto': 10,
+             'Prüfhinweis': '', 'Quellenpruefung': '', 'Bestellnummer': 'too-old'},
+            {'Datum': '14.09.2026', 'Gruppe': 'Gruppe B', 'Art': 'Erstattung', 'Erlös_Brutto': -10,
+             'Prüfhinweis': '', 'Quellenpruefung': '', 'Bestellnummer': 'refund'},
+            {'Datum': '14.09.2026', 'Gruppe': 'Gruppe A', 'Art': 'Bestellung', 'Erlös_Brutto': 10,
+             'Prüfhinweis': '', 'Quellenpruefung': '', 'Bestellnummer': 'group-a'},
+        ])
+        result = subject.recent_processed_positions(pd.DataFrame(rows), now='2026-09-15 12:00:00+02:00')
+        self.assertEqual(len(result), 575)
+        self.assertNotIn('too-old', set(result.Bestellnummer))
+
+    def test_recent_processed_positions_excludes_unresolved_rows(self):
+        data = pd.DataFrame([
+            {'Datum': '01.09.2026', 'Gruppe': 'Gruppe B', 'Art': 'Bestellung', 'Erlös_Brutto': 10,
+             'Prüfhinweis': '', 'Quellenpruefung': '', 'Bestellnummer': 'valid'},
+            {'Datum': '01.09.2026', 'Gruppe': 'Gruppe B', 'Art': 'Bestellung', 'Erlös_Brutto': 10,
+             'Prüfhinweis': 'unklar', 'Quellenpruefung': '', 'Bestellnummer': 'issue'},
+            {'Datum': '01.09.2026', 'Gruppe': 'Gruppe B', 'Art': 'Bestellung', 'Erlös_Brutto': 10,
+             'Prüfhinweis': '', 'Quellenpruefung': 'geändert', 'Bestellnummer': 'changed'},
+        ])
+        result = subject.recent_processed_positions(data, now='2026-09-15')
+        self.assertEqual(result.Bestellnummer.tolist(), ['valid'])
+
     def test_csv_prices_are_divided_by_three_with_cent_rounding(self):
         upload = Upload('Titel;Preis;Verfügbare Menge;SKU\nArtikel A;10,00;2;SKU-A\nArtikel B;10,01;1;SKU-B\n'.encode(), 'angebote.csv')
         result = subject.read_active_offers(upload)

@@ -31,6 +31,35 @@ class OrderReportError(ValueError):
     pass
 
 
+def recent_processed_positions(business: pd.DataFrame, days: int = 30, now=None) -> pd.DataFrame:
+    """Return every valid processed Group-B sale in a rolling date window.
+
+    This is intentionally independent of invoice readiness: historical,
+    locked and already drafted rows remain visible, while the caller keeps
+    the existing creation gate for the actionable subset.
+    """
+    if business.empty:
+        return business.copy()
+    required = {'Datum', 'Gruppe', 'Art', 'Erlös_Brutto', 'Prüfhinweis', 'Quellenpruefung'}
+    if not required.issubset(business.columns):
+        raise OrderReportError('Verarbeiteter Bestand enthält nicht alle benötigten Positionsfelder.')
+    reference = pd.Timestamp.now(tz='Europe/Berlin') if now is None else pd.Timestamp(now)
+    if reference.tzinfo is None:
+        reference = reference.tz_localize('Europe/Berlin')
+    else:
+        reference = reference.tz_convert('Europe/Berlin')
+    end = reference.normalize()
+    start = end - pd.Timedelta(days=int(days))
+    dates = pd.to_datetime(business['Datum'], dayfirst=True, errors='coerce', utc=True).dt.tz_convert('Europe/Berlin')
+    valid = ((business.Gruppe == 'Gruppe B') & (business.Art == 'Bestellung')
+             & (business['Erlös_Brutto'] > 0) & ~business['Prüfhinweis'].astype(bool)
+             & ~business.Quellenpruefung.astype(bool)
+             & dates.between(start, end + pd.Timedelta(days=1), inclusive='left'))
+    result = business.loc[valid].copy()
+    result['_Importdatum'] = dates.loc[valid]
+    return result.sort_values(['_Importdatum', 'Bestellnummer'], ascending=[False, True]).drop(columns=['_Importdatum'])
+
+
 def _find_column(columns, aliases):
     lower = {str(c).strip().lower(): c for c in columns}
     for alias in aliases:

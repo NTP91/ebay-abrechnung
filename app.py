@@ -947,18 +947,32 @@ with lexoffice_import_tab:
     st.caption('Zwei getrennte Entwurfswege über api.lexware.io. Es werden ausschließlich nicht finalisierte Lexware-Entwürfe erzeugt.')
 
     st.markdown('**1 · Verarbeitete Auszahlungspositionen**')
-    lex_ready = evelyn['new_ready']
-    if lex_ready.empty:
-        st.info('Aktuell keine verarbeiteten Positionen ohne bestehenden Lexware-Entwurf.')
+    try:
+        lex_positions = lexoffice_import.recent_processed_positions(business, days=30)
+    except lexoffice_import.OrderReportError as exc:
+        lex_positions = business.iloc[0:0].copy()
+        st.error(str(exc))
+    ready_keys = set(evelyn['new_ready'].position_key) if not evelyn['new_ready'].empty else set()
+    lex_ready = lex_positions[lex_positions.position_key.isin(ready_keys)] if not lex_positions.empty else lex_positions
+    if lex_positions.empty:
+        st.info('Keine verarbeiteten Gruppe-B-Bestellungen innerhalb der letzten 30 Tage.')
     else:
-        payout_ids = sorted(lex_ready['Auszahlung Nr.'].unique())
-        lex_sum = lex_ready['Erlös_Brutto'].sum()
-        st.write(f'**{len(lex_ready)} Positionen** ohne bestehenden Lexware-Entwurf · {len(payout_ids)} Payout(s) · {euros(lex_sum)} brutto')
-        st.dataframe(lex_ready[['Auszahlung Nr.', 'Bestellnummer', 'Partner', 'SKU', 'Erlös_Brutto']], hide_index=True, use_container_width=True)
+        payout_ids = sorted(lex_ready['Auszahlung Nr.'].unique()) if not lex_ready.empty else []
+        display = lex_positions[['Datum', 'Auszahlung Nr.', 'Bestellnummer', 'Partner', 'SKU',
+                                 'Erlös_Brutto', 'Bearbeitungsstatus']].copy()
+        display['Lexware-Status'] = ['neu / Entwurf möglich' if key in ready_keys else 'bereits verarbeitet / gesperrt'
+                                     for key in lex_positions.position_key]
+        st.write(f'**{len(lex_positions)} Positionen** der letzten 30 Tage · '
+                 f'**{len(lex_ready)} neu für einen Entwurf** · {lex_positions["Auszahlung Nr."].nunique()} Payout(s) · '
+                 f'{euros(lex_positions["Erlös_Brutto"].sum())} brutto')
+        st.dataframe(display, hide_index=True, use_container_width=True)
 
-        if not api_key:
+        if lex_ready.empty:
+            st.info('Alle angezeigten Positionen sind bereits verarbeitet oder für einen neuen Entwurf gesperrt.')
+        elif not api_key:
             st.info('API-Key unter „Lexware-Verbindung“ in der Seitenleiste hinterlegen, um Entwürfe zu erstellen.')
-        if st.button('Rechnungsentwürfe erstellen (api.lexware.io)', type='primary', disabled=not api_key, key='lexoffice-import-create'):
+        if st.button('Rechnungsentwürfe erstellen (api.lexware.io)', type='primary',
+                     disabled=not api_key or lex_ready.empty, key='lexoffice-import-create'):
             try:
                 expected = {pid: core.payout_fingerprint(master[master['Auszahlung Nr.'] == pid]) for pid in payout_ids}
                 for pid in payout_ids:
