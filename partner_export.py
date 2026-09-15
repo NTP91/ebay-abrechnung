@@ -174,15 +174,21 @@ def prepare_partner_export(rows, payouts=None, orders=None, statement_type='part
               'Rechnung': [], 'Gutschriften': [], 'HistorischeGutschriften': []}
     refund_links = core.refund_links(rows)
     refund_sales = set(refund_links.values())
+    # Precomputed once (O(m) groupby) instead of re-scanning the full orders/
+    # payouts tables per row (O(n*m)) - both tables only grow with history, so
+    # the per-row scan cost was the export's dominant cost on large accounts.
+    order_index = core.order_match_index(orders)
+    payout_groups = payouts.groupby(
+        ['Auszahlung Nr.', 'Bestellnummer', 'Transaktionsnummer', 'Artikelnummer'], sort=False, dropna=False)
     for row_index, row in rows.iterrows():
         if row['Art'] not in ('Bestellung', 'Erstattung'):
             continue
-        match, issue = core.match_order(row, orders)
+        match, issue = core.match_order(row, orders, order_index)
         if issue or match is None or not core.clean(match['Angebotstitel']):
             raise ValueError('Partnerexport benötigt den eindeutig zugeordneten Bestellbericht-Titel.')
-        candidates = payouts
-        for key in ('Auszahlung Nr.', 'Bestellnummer', 'Transaktionsnummer', 'Artikelnummer'):
-            candidates = candidates[candidates[key] == row[key]]
+        payout_group_key = (row['Auszahlung Nr.'], row['Bestellnummer'], row['Transaktionsnummer'], row['Artikelnummer'])
+        candidates = (payout_groups.get_group(payout_group_key)
+                      if payout_group_key in payout_groups.groups else payouts.iloc[0:0])
         base = Decimal(str(row.get('Erlös_Brutto_Original', row['Erlös_Brutto'])))
         candidates = candidates[candidates['Betrag abzügl. Kosten'].map(core.parse_money) == base]
         metadata = set()

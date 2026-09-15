@@ -443,13 +443,34 @@ def configured_multi_item_match(row, matches):
     return result
 
 
-def match_order(row, orders):
-    for keys in [('Transaktionsnummer',), ('Bestellnummer', 'Artikelnummer'), ('Bestellnummer',)]:
+MATCH_ORDER_TIERS = (('Transaktionsnummer',), ('Bestellnummer', 'Artikelnummer'), ('Bestellnummer',))
+
+
+def order_match_index(orders):
+    """Precomputed groupby per match_order tier, built once per orders frame.
+
+    match_order's per-row `orders[orders[key]==row[key]]` filtering re-scans
+    the full orders table for every row - fine for a single lookup, but O(n*m)
+    when called in a loop over n rows. Passing this index turns that into one
+    O(m) groupby plus O(1) dict lookups per row, with identical tier results
+    (groupby preserves each group's original row order, same as the filter chain).
+    """
+    return {keys: orders.groupby(list(keys), sort=False, dropna=False) for keys in MATCH_ORDER_TIERS}
+
+
+def match_order(row, orders, group_index=None):
+    for keys in MATCH_ORDER_TIERS:
         if not all(row[key] for key in keys):
             continue
-        matches = orders
-        for key in keys:
-            matches = matches[matches[key] == row[key]]
+        if group_index is not None:
+            groups = group_index[keys]
+            group_key = row[keys[0]] if len(keys) == 1 else tuple(row[k] for k in keys)
+            get_group_key = (group_key,) if len(keys) == 1 else group_key
+            matches = groups.get_group(get_group_key) if group_key in groups.groups else orders.iloc[0:0]
+        else:
+            matches = orders
+            for key in keys:
+                matches = matches[matches[key] == row[key]]
         if len(matches) > 1:
             configured = configured_multi_item_match(row, matches)
             if configured is not None:
@@ -472,6 +493,7 @@ def load_master_data():
     import payout_reconciliation
     manual_gates = payout_reconciliation.gates(payouts)
     orders = read_master(ORDERS_DB_PATH)
+    order_index = order_match_index(orders)
     processed = []
     for index, row in payouts.iterrows():
         if index in child_indices:
@@ -486,7 +508,7 @@ def load_master_data():
         sku, title = '', ''
         issue = ''
         if not fee:
-            match, issue = match_order(row, orders)
+            match, issue = match_order(row, orders, order_index)
             if match is not None:
                 sku = match['SKU']
                 title = match['Angebotstitel']

@@ -187,14 +187,15 @@ def partner_summary(rows):
     return pd.DataFrame(records)
 
 
-def open_positions(raw):
-    all_orders = core.read_master(core.ORDERS_DB_PATH)
+def open_positions(raw, all_orders=None):
+    all_orders = core.read_master(core.ORDERS_DB_PATH) if all_orders is None else all_orders
     orders = all_orders[all_orders.SKU.str.split('/').str[0].str.strip() != ''].copy()
+    order_index = core.order_match_index(all_orders)
     records = []
     for _, row in raw[raw['Auszahlung Nr.'] == ''].iterrows():
         if row.Typ.strip().casefold() == 'einbehalten':
             continue
-        match, issue = core.match_order(row, all_orders)
+        match, issue = core.match_order(row, all_orders, order_index)
         if match is not None and not issue and not match.SKU.split('/')[0].strip():
             continue
         sku = match['SKU'] if match is not None and not issue else ''
@@ -220,10 +221,11 @@ def order_metrics(raw):
     return len(orders), assigned, len(orders) - assigned
 
 
-def order_catalogue(raw, business):
+def order_catalogue(raw, business, all_orders=None):
     """Union of order-report positions and unmatched order transactions; no invented payouts."""
-    all_orders = core.read_master(core.ORDERS_DB_PATH)
+    all_orders = core.read_master(core.ORDERS_DB_PATH) if all_orders is None else all_orders
     orders = all_orders[all_orders.SKU.str.split('/').str[0].str.strip() != ''].copy()
+    order_index = core.order_match_index(all_orders)
     records = {}
     for index, row in orders.iterrows():
         records[('order',index)] = dict(Bestellnummer=row['Bestellnummer'], Datum=next((core.clean(row.get(k,'')) for k in ('Verkauft am','Bestelldatum','Datum') if core.clean(row.get(k,''))),''),
@@ -236,7 +238,7 @@ def order_catalogue(raw, business):
                 continue
         except ValueError:
             pass
-        match, issue = core.match_order(row, all_orders)
+        match, issue = core.match_order(row, all_orders, order_index)
         if match is not None and not issue and not match.SKU.split('/')[0].strip():
             continue
         key = ('order',match.name) if match is not None and not issue else ('raw',index)
@@ -244,14 +246,14 @@ def order_catalogue(raw, business):
         entry['payout'] = entry['payout'] or bool(row['Auszahlung Nr.'])
     if not business.empty:
         for _, row in business[business.Art!='Gebühr'].iterrows():
-            match, issue = core.match_order(row, all_orders)
+            match, issue = core.match_order(row, all_orders, order_index)
             if match is not None and not issue:
                 records[('order',match.name)]['keys'].append(bool(row['closed_at']))
         for entry in records.values():
             entry['closed'] = bool(entry['payout'] and entry['keys'] and all(entry['keys']))
     held_orders = set()
     for _, row in raw[raw.Typ.str.strip().str.casefold() == 'einbehalten'].iterrows():
-        match, issue = core.match_order(row, all_orders)
+        match, issue = core.match_order(row, all_orders, order_index)
         if match is not None and not issue:
             held_orders.add(('order',match.name))
     for key, entry in records.items():

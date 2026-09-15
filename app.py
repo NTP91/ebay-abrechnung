@@ -61,13 +61,14 @@ def _load_dashboard_data_impl(_cache_key):
     partner_invoice_ready=partner_ready[~partner_ready.reviewed_at.astype(bool)] if not partner_ready.empty else partner_ready
     business_payout_status=position_workflow.payout_status(business)
     raw=core.read_master(core.PAYOUTS_DB_PATH)
-    open_rows=studio_view.open_positions(raw)
-    catalogue=studio_view.order_catalogue(raw,business)
+    orders_master=core.read_master(core.ORDERS_DB_PATH)
+    open_rows=studio_view.open_positions(raw,orders_master)
+    catalogue=studio_view.order_catalogue(raw,business,orders_master)
     open_orders=catalogue[~catalogue.payout & (catalogue.Status!='Einbehalt / Rücksendung in Klärung')] if not catalogue.empty else catalogue
     invoices=studio_view.invoice_history()
     api_imports=ebay_sync.load(Path(core.PAYOUTS_DB_PATH).parent)
     return (master,states,overview,ready,business,partner_ready,partner_invoice_ready,
-            business_payout_status,raw,open_rows,catalogue,open_orders,invoices,api_imports)
+            business_payout_status,raw,orders_master,open_rows,catalogue,open_orders,invoices,api_imports)
 
 
 if os.environ.get('PYTEST_CURRENT_TEST'):
@@ -123,7 +124,12 @@ def download(label, rows, key, kind='partner'):
     if rows.empty:
         return
     try:
-        current=position_workflow.positions()
+        # Reuses the already-loaded/cached `business` snapshot instead of
+        # position_workflow.positions() with no args, which re-runs the full
+        # load_master_data+ledger pipeline from scratch - previously this ran
+        # once per visible download button (every partner card, every
+        # historical payout), the dominant cost behind slow export tabs.
+        current=business
         if not current.empty:
             forbidden=set(current.loc[current.closed_at.astype(bool) | api_holds.mask(current), 'position_key'])
             rows=rows[~rows.apply(position_workflow.position_key,axis=1).isin(forbidden)]
@@ -497,7 +503,7 @@ with st.expander('So läuft die Wochenabrechnung'):
 
 try:
     (master,states,overview,ready,business,partner_ready,partner_invoice_ready,
-     business_payout_status,raw,open_rows,catalogue,open_orders,invoices,api_imports)=_load_dashboard_data(_dashboard_cache_key())
+     business_payout_status,raw,orders_master,open_rows,catalogue,open_orders,invoices,api_imports)=_load_dashboard_data(_dashboard_cache_key())
 except Exception as exc:
     st.error(f'Datenbestand benötigt Prüfung: {exc}')
     st.stop()
@@ -939,7 +945,7 @@ with dashboard:
         st.warning('Kennzahlen benötigen eindeutige Quelldaten: '+str(exc))
 
 with trust_risk_tab:
-    trust_risk_ui.render(Path(core.PAYOUTS_DB_PATH).parent, catalogue, core.read_master(core.ORDERS_DB_PATH), raw)
+    trust_risk_ui.render(Path(core.PAYOUTS_DB_PATH).parent, catalogue, orders_master, raw)
 
 if st.session_state.get('discard_request'):
     discard_dialog(st.session_state['discard_request'])
