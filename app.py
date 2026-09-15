@@ -114,6 +114,10 @@ p{line-height:1.55}[data-testid="stCaptionContainer"]{color:var(--muted);font-si
 [data-testid="stCheckbox"]{padding:.1rem 0;border-bottom:1px solid #e5e9ef}
 [data-testid="stCheckbox"] label{min-height:38px;color:var(--ink);font-weight:520}
 hr{border-color:#e5eaf0!important}
+@media (prefers-color-scheme: dark){
+[data-testid="stButton"] button,[data-testid="stDownloadButton"] button,[data-testid="stLinkButton"] a,[data-testid="stButton"] [data-testid="stBaseButton-primary"],[data-testid="stDownloadButton"] [data-testid="stBaseButton-primary"]{color:white!important}
+[data-testid="stButton"] button:hover,[data-testid="stDownloadButton"] button:hover,[data-testid="stLinkButton"] a:hover,[data-testid="stButton"] [data-testid="stBaseButton-primary"]:hover,[data-testid="stDownloadButton"] [data-testid="stBaseButton-primary"]:hover{color:white!important}
+}
 </style>''', unsafe_allow_html=True)
 
 
