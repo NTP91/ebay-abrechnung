@@ -1,6 +1,6 @@
 __pycache__/
 .pytest_cache/
-.streamlit/
+.streamlit/secrets.toml
 Master_*.csv
 Master_*.csv.*
 *.lock
