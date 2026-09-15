@@ -16,6 +16,7 @@ import group_b_rounds
 import payout_reconciliation
 import trust_risk_ui
 import supabase_store
+import lexoffice_import
 from datetime import date
 from partner_export import export_partner_excel, prepare_partner_export
 
@@ -595,7 +596,7 @@ with st.expander('Payout-Abgleich · Bankbetrag und einzelne Positionen'):
         except ValueError as exc:
             st.error(str(exc))
 
-home, group_a, group_b, pending, history, dashboard, trust_risk_tab = st.tabs(['Übersicht','Gruppe A','Gruppe B','Offene Positionen','Historie','Dashboard','Trust / Risk'])
+home, group_a, group_b, pending, history, dashboard, trust_risk_tab, lexoffice_import_tab = st.tabs(['Übersicht','Gruppe A','Gruppe B','Offene Positionen','Historie','Dashboard','Trust / Risk','Lexoffice Bestell-Import'])
 with home:
     total=len(catalogue)
     assigned=int(catalogue.payout.sum())
@@ -946,6 +947,53 @@ with dashboard:
 
 with trust_risk_tab:
     trust_risk_ui.render(Path(core.PAYOUTS_DB_PATH).parent, catalogue, orders_master, raw)
+
+with lexoffice_import_tab:
+    st.subheader('Lexoffice Bestell-Import')
+    st.caption('Isoliert von Supabase und der Live-Auszahlungslogik. Liest tatsächliche Bestelldaten aus einem eBay-Bestellbericht und legt daraus einen Rechnungsentwurf in Lexoffice an.')
+
+    entities = {}
+    try:
+        entities = dict(st.secrets.get('lexoffice', {}))
+    except Exception:
+        entities = {}
+
+    if not entities:
+        st.warning('Keine Lexoffice-Entitäten in st.secrets["lexoffice"] konfiguriert (je Entität: api_key, contact_id).')
+    else:
+        entity_name = st.selectbox('Rechnungs-Entität', list(entities.keys()))
+        uploaded = st.file_uploader('eBay-Bestellbericht (CSV oder Excel)', type=['csv', 'xlsx', 'xls'])
+
+        if uploaded is not None:
+            try:
+                order_df = lexoffice_import.read_order_report(uploaded)
+            except lexoffice_import.OrderReportError as exc:
+                st.error(str(exc))
+                order_df = None
+
+            if order_df is not None:
+                if order_df.empty:
+                    st.warning('Keine verwertbaren Positionen im Bestellbericht gefunden.')
+                else:
+                    st.dataframe(order_df, use_container_width=True)
+                    st.caption(f'{len(order_df)} Positionen erkannt · Summe {order_df["Preis"].sum():.2f} €')
+
+                    if st.button('Rechnungsentwurf in Lexoffice anlegen', type='primary'):
+                        cfg = entities.get(entity_name, {})
+                        api_key = cfg.get('api_key')
+                        contact_id = cfg.get('contact_id')
+                        line_items = lexoffice_import.build_line_items(order_df)
+                        try:
+                            result = lexoffice_import.create_draft_invoice(
+                                api_key, contact_id, line_items,
+                                title=f'Bestell-Import {entity_name}',
+                            )
+                            if result.ok:
+                                st.success(f'Rechnungsentwurf angelegt (ID {result.invoice_id}).')
+                            else:
+                                st.error(f'Lexoffice-Fehler ({result.status_code}): {result.message}')
+                        except Exception as exc:
+                            st.error(f'Unerwarteter Fehler: {exc}')
 
 if st.session_state.get('discard_request'):
     discard_dialog(st.session_state['discard_request'])
