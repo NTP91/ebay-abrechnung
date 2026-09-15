@@ -986,7 +986,7 @@ with lexoffice_import_tab:
 
     st.divider()
     st.markdown('**2 · Aktive Angebote als interner Bestandswert**')
-    st.caption('CSV oder XLSX hochladen. Jeder Angebotspreis wird centgenau durch 3 geteilt und als Netto-Positionswert in einen separaten Entwurf übernommen.')
+    st.caption('CSV oder Excel hochladen. „Current price“ (Fallback „Start price“) wird centgenau durch 3 geteilt; der Bruttowert wird für den Entwurf mit 19 % MwSt. aufgeteilt.')
     active_upload = st.file_uploader('Aktive Angebote hochladen', type=['csv', 'xlsx'],
                                      key='lexoffice-active-offers-upload')
     active_offers = None
@@ -995,6 +995,12 @@ with lexoffice_import_tab:
         try:
             active_digest = hashlib.sha256(active_upload.getvalue()).hexdigest()
             active_offers = lexoffice_import.read_active_offers(active_upload)
+            skipped_rows = active_offers.attrs.get('skipped_rows', 0)
+            fallback_rows = active_offers.attrs.get('fallback_rows', 0)
+            if skipped_rows:
+                st.warning(f'{skipped_rows} Zeile(n) mit fehlendem, unplausiblem oder nicht-numerischem Preis/Menge wurden übersprungen.')
+            if fallback_rows:
+                st.info(f'Bei {fallback_rows} Zeile(n) wurde „Start price“ als Fallback verwendet.')
             total_offer = sum(active_offers['Angebotspreis'] * active_offers['Menge'])
             total_inventory = sum(active_offers['Bestandswert'] * active_offers['Menge'])
             col1, col2, col3 = st.columns(3)
@@ -1003,10 +1009,13 @@ with lexoffice_import_tab:
             col3.metric('Bestandswert · Preis / 3', euros(total_inventory))
             preview = active_offers.copy()
             preview['Angebotspreis'] = preview['Angebotspreis'].map(float)
-            preview['Bestandswert'] = preview['Bestandswert'].map(float)
+            for money_column in ('Bestandswert', 'Bestandswert Netto', 'MwSt 19 %'):
+                preview[money_column] = preview[money_column].map(float)
             st.dataframe(preview, hide_index=True, use_container_width=True,
                          column_config={'Angebotspreis': st.column_config.NumberColumn(format='%.2f €'),
-                                        'Bestandswert': st.column_config.NumberColumn(format='%.2f €')})
+                                        'Bestandswert': st.column_config.NumberColumn('Bestandswert brutto', format='%.2f €'),
+                                        'Bestandswert Netto': st.column_config.NumberColumn(format='%.2f €'),
+                                        'MwSt 19 %': st.column_config.NumberColumn(format='%.2f €')})
         except lexoffice_import.OrderReportError as exc:
             st.error(str(exc))
     already_created = bool(active_digest and st.session_state.get('lexoffice-active-offers-created') == active_digest)

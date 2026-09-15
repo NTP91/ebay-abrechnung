@@ -8,6 +8,8 @@ Rechnungsentwurf (draft) ueber die offizielle Lexoffice API an.
 from __future__ import annotations
 
 import io
+import re
+from datetime import date, datetime
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
@@ -17,6 +19,8 @@ import requests
 LEXOFFICE_INVOICES_URL = 'https://api.lexware.io/v1/invoices?finalize=false'
 LEXOFFICE_CONTACTS_URL = 'https://api.lexware.io/v1/contacts'
 DEFAULT_CUSTOMER_NUMBER = 16335
+VAT_FACTOR = Decimal('1.19')
+MAX_PLAUSIBLE_OFFER_PRICE = Decimal('1000000.00')
 
 TITLE_ALIASES = ['Artikelbezeichnung', 'Artikelname', 'Title', 'Artikel', 'Bezeichnung']
 QTY_ALIASES = ['Menge', 'Anzahl', 'Quantity', 'Stückzahl', 'Stueckzahl']
@@ -61,7 +65,7 @@ def recent_processed_positions(business: pd.DataFrame, days: int = 30, now=None)
 
 
 def _find_column(columns, aliases):
-    lower = {str(c).strip().lower(): c for c in columns}
+    lower = {str(c).lstrip('\ufeff').strip().lower(): c for c in columns}
     for alias in aliases:
         hit = lower.get(alias.strip().lower())
         if hit is not None:
@@ -81,6 +85,13 @@ def _uploaded_bytes(uploaded_file):
 
 
 def _money(value):
+    if value is None or isinstance(value, (date, datetime, pd.Timestamp)):
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        return None
     text = str(value).replace('\u00a0', '').replace('€', '').replace('EUR', '').strip()
     if not text:
         return None
@@ -90,8 +101,26 @@ def _money(value):
         text = text.replace('.', '').replace(',', '.')
     try:
         return Decimal(text)
-    except InvalidOperation:
+    except (InvalidOperation, ValueError):
         return None
+
+
+_MONTH_TOKEN = re.compile(
+    r'(?i)(?:^|[^a-zäöü])(?:jan|feb|mar|mär|apr|may|mai|jun|jul|aug|sep|oct|okt|nov|dec|dez)(?:[^a-zäöü]|$)'
+)
+
+
+def _offer_price(value):
+    """Parse an eBay price while rejecting spreadsheet date conversions."""
+    if isinstance(value, (date, datetime, pd.Timestamp)):
+        return None
+    text = '' if value is None else str(value).strip()
+    if not text or _MONTH_TOKEN.search(text):
+        return None
+    price = _money(value)
+    if price is None or not price.is_finite() or price <= 0 or price > MAX_PLAUSIBLE_OFFER_PRICE:
+        return None
+    return price
 
 
 def read_order_report(uploaded_file) -> pd.DataFrame:
@@ -139,7 +168,7 @@ def read_order_report(uploaded_file) -> pd.DataFrame:
 
 
 def read_active_offers(uploaded_file) -> pd.DataFrame:
-    """Read active eBay offers and derive a cent-rounded internal value (price / 3)."""
+    """Read eBay offers and derive gross/net inventory values at 19% VAT."""
     name = getattr(uploaded_file, 'name', '') or ''
     raw = _uploaded_bytes(uploaded_file)
     if not raw:
@@ -157,32 +186,49 @@ def read_active_offers(uploaded_file) -> pd.DataFrame:
         df = max(attempts, key=lambda frame: frame.shape[1]) if attempts else pd.DataFrame()
     else:
         raise OrderReportError('Aktive Angebote bitte als CSV- oder XLSX-Datei hochladen.')
-    title_col = _find_column(df.columns, TITLE_ALIASES + ['Titel', 'Angebotstitel'])
-    price_col = _find_column(df.columns, PRICE_ALIASES + ['Aktueller Preis', 'Startpreis'])
+    title_col = _find_column(df.columns, ['Title'])
+    current_price_col = _find_column(df.columns, ['Current price'])
+    start_price_col = _find_column(df.columns, ['Start price'])
     qty_col = _find_column(df.columns, QTY_ALIASES + ['Verfügbare Menge', 'Verfuegbare Menge'])
     sku_col = _find_column(df.columns, SKU_ALIASES)
-    if title_col is None or price_col is None:
-        raise OrderReportError('Angebotsdatei benötigt erkennbare Spalten für Artikelname und Preis.')
+    if title_col is None or (current_price_col is None and start_price_col is None):
+        raise OrderReportError(
+            'Angebotsdatei benötigt „Title“ sowie „Current price“ oder „Start price“. '
+            f'Gefundene Spalten: {list(df.columns)}'
+        )
     rows = []
+    skipped_rows = 0
+    fallback_rows = 0
     for _, source in df.iterrows():
         title = str(source.get(title_col, '')).strip()
-        price = _money(source.get(price_col, ''))
+        current_price = _offer_price(source.get(current_price_col, '')) if current_price_col else None
+        start_price = _offer_price(source.get(start_price_col, '')) if start_price_col else None
+        price = current_price if current_price is not None else start_price
         if not title or title.lower() == 'nan' or price is None:
+            skipped_rows += 1
             continue
-        if price <= 0:
-            raise OrderReportError(f'Ungültiger Preis für „{title}“: Der Preis muss größer als 0 sein.')
+        price_source = 'Current price' if current_price is not None else 'Start price'
+        if price_source == 'Start price' and current_price_col is not None:
+            fallback_rows += 1
         quantity = _money(source.get(qty_col, 1)) if qty_col else Decimal(1)
         if quantity is None or quantity <= 0 or quantity != quantity.to_integral_value():
-            raise OrderReportError(f'Ungültige Menge für „{title}“.')
-        internal = (price / Decimal(3)).quantize(Decimal('.01'), rounding=ROUND_HALF_UP)
+            skipped_rows += 1
+            continue
+        inventory_gross = (price / Decimal(3)).quantize(Decimal('.01'), rounding=ROUND_HALF_UP)
+        inventory_net = (inventory_gross / VAT_FACTOR).quantize(Decimal('.01'), rounding=ROUND_HALF_UP)
+        vat_amount = inventory_gross - inventory_net
         rows.append({'Artikelname': title, 'SKU': '' if sku_col is None else str(source.get(sku_col, '')).strip(),
                      'Menge': int(quantity), 'Angebotspreis': price.quantize(Decimal('.01')),
-                     'Bestandswert': internal})
+                     'Preisquelle': price_source, 'Bestandswert': inventory_gross,
+                     'Bestandswert Netto': inventory_net, 'MwSt 19 %': vat_amount})
     if not rows:
         raise OrderReportError('Keine gültigen Angebotspositionen mit Preis gefunden.')
     if len(rows) > 300:
         raise OrderReportError('Mehr als 300 Positionen; Datei bitte auf mehrere Entwürfe aufteilen.')
-    return pd.DataFrame(rows)
+    result = pd.DataFrame(rows)
+    result.attrs['skipped_rows'] = skipped_rows
+    result.attrs['fallback_rows'] = fallback_rows
+    return result
 
 
 @dataclass
@@ -216,7 +262,7 @@ def build_active_offer_line_items(df: pd.DataFrame) -> list[dict]:
         item = {
             'type': 'custom', 'name': str(row['Artikelname'])[:250],
             'quantity': int(row['Menge']), 'unitName': 'Stück',
-            'unitPrice': {'currency': 'EUR', 'netAmount': float(Decimal(row['Bestandswert'])),
+            'unitPrice': {'currency': 'EUR', 'grossAmount': float(Decimal(row['Bestandswert'])),
                           'taxRatePercentage': 19},
         }
         sku = str(row.get('SKU', '')).strip()
@@ -291,7 +337,7 @@ def create_active_offers_draft(api_key: str, offers: pd.DataFrame, http=requests
         'address': {'contactId': contact_id},
         'lineItems': line_items,
         'totalPrice': {'currency': 'EUR'},
-        'taxConditions': {'taxType': 'net'},
+        'taxConditions': {'taxType': 'gross'},
         'title': 'Aktive Angebote – Bestandswert',
         'introduction': 'Aktive Angebote – interner Einstands-/Bestandswert (Angebotspreis / 3)',
         'remark': 'Automatisch aus der hochgeladenen Datei der aktiven Angebote erstellt.',
