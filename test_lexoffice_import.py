@@ -1,6 +1,7 @@
 import io
 import unittest
 from decimal import Decimal
+from pathlib import Path
 
 import pandas as pd
 
@@ -40,6 +41,13 @@ class FakeHttp:
 
 
 class ActiveOfferImportTests(unittest.TestCase):
+    def test_app_reloads_a_stale_lexoffice_import_before_using_recent_positions(self):
+        source = Path('app.py').read_text(encoding='utf-8')
+        guard = "if not callable(getattr(lexoffice_import,'recent_processed_positions',None)):"
+        call = 'lex_positions = lexoffice_import.recent_processed_positions(business, days=30)'
+        self.assertIn(guard, source)
+        self.assertLess(source.index(guard), source.index(call))
+
     def test_recent_processed_positions_has_no_row_limit_and_keeps_history_visible(self):
         rows = []
         for index in range(575):

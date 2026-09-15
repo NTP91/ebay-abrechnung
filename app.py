@@ -37,6 +37,10 @@ if not callable(getattr(studio_view,'evelyn_overview',None)):
     studio_view=importlib.reload(studio_view)
 if not callable(getattr(position_workflow,'_later_hold_on_bound_invoice',None)):
     position_workflow=importlib.reload(position_workflow)
+if not callable(getattr(lexoffice_import,'recent_processed_positions',None)):
+    # Streamlit re-executes app.py, but may retain an older dependency module
+    # from before a deployment. Reload once when the newly required API is absent.
+    lexoffice_import=importlib.reload(lexoffice_import)
 
 
 def _dashboard_cache_key():
