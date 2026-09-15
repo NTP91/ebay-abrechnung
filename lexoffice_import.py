@@ -22,6 +22,7 @@ DEFAULT_CUSTOMER_NUMBER = 16335
 VAT_FACTOR = Decimal('1.19')
 MAX_PLAUSIBLE_OFFER_PRICE = Decimal('1000000.00')
 RECENT_POSITIONS_API = 2
+ACTIVE_OFFER_BATCH_SIZE = 300
 
 TITLE_ALIASES = ['Artikelbezeichnung', 'Artikelname', 'Title', 'Artikel', 'Bezeichnung']
 QTY_ALIASES = ['Menge', 'Anzahl', 'Quantity', 'Stückzahl', 'Stueckzahl']
@@ -241,8 +242,6 @@ def read_active_offers(uploaded_file) -> pd.DataFrame:
                      'Bestandswert Netto': inventory_net, 'MwSt 19 %': vat_amount})
     if not rows:
         raise OrderReportError('Keine gültigen Angebotspositionen mit Preis gefunden.')
-    if len(rows) > 300:
-        raise OrderReportError('Mehr als 300 Positionen; Datei bitte auf mehrere Entwürfe aufteilen.')
     result = pd.DataFrame(rows)
     result.attrs['skipped_rows'] = skipped_rows
     result.attrs['fallback_rows'] = fallback_rows
@@ -255,6 +254,9 @@ class InvoiceDraftResult:
     invoice_id: str | None = None
     status_code: int | None = None
     message: str = ''
+    invoice_ids: tuple[str, ...] = ()
+    batch_count: int = 0
+    completed_batches: int = 0
 
 
 def build_line_items(df: pd.DataFrame) -> list[dict]:
@@ -341,30 +343,57 @@ def create_draft_invoice(api_key: str, contact_id: str, line_items: list[dict], 
 
 
 def create_active_offers_draft(api_key: str, offers: pd.DataFrame, http=requests) -> InvoiceDraftResult:
-    """Search the established customer and create one non-finalized inventory-value draft."""
+    """Create one non-finalized draft per block of at most 300 offer rows."""
     if not api_key:
         return InvoiceDraftResult(ok=False, message='API-Key fehlt.')
+    if offers is None or offers.empty:
+        return InvoiceDraftResult(ok=False, message='Keine Positionen zum Übertragen vorhanden.')
     try:
         contact_id = find_customer(api_key, http=http)
     except OrderReportError as exc:
         return InvoiceDraftResult(ok=False, message=str(exc))
-    line_items = build_active_offer_line_items(offers)
-    payload = {
-        'archived': False,
-        'voucherDate': pd.Timestamp.now().strftime('%Y-%m-%dT00:00:00.000+02:00'),
-        'address': {'contactId': contact_id},
-        'lineItems': line_items,
-        'totalPrice': {'currency': 'EUR'},
-        'taxConditions': {'taxType': 'gross'},
-        'title': 'Aktive Angebote – Bestandswert',
-        'introduction': 'Aktive Angebote – interner Einstands-/Bestandswert (Angebotspreis / 3)',
-        'remark': 'Automatisch aus der hochgeladenen Datei der aktiven Angebote erstellt.',
-    }
     headers = {'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json', 'Accept': 'application/json'}
-    try:
-        response = http.post(LEXOFFICE_INVOICES_URL, json=payload, headers=headers, timeout=30)
-    except requests.RequestException as exc:
-        return InvoiceDraftResult(ok=False, message=f'Netzwerkfehler: {exc}')
-    if response.status_code in (200, 201):
-        return InvoiceDraftResult(ok=True, invoice_id=response.json().get('id'), status_code=response.status_code)
-    return InvoiceDraftResult(ok=False, status_code=response.status_code, message=response.text[:500])
+    batch_count = (len(offers) + ACTIVE_OFFER_BATCH_SIZE - 1) // ACTIVE_OFFER_BATCH_SIZE
+    invoice_ids = []
+    last_status = None
+    for batch_index, start in enumerate(range(0, len(offers), ACTIVE_OFFER_BATCH_SIZE), start=1):
+        block = offers.iloc[start:start + ACTIVE_OFFER_BATCH_SIZE]
+        suffix = f' – Teil {batch_index}/{batch_count}' if batch_count > 1 else ''
+        payload = {
+            'archived': False,
+            'voucherDate': pd.Timestamp.now().strftime('%Y-%m-%dT00:00:00.000+02:00'),
+            'address': {'contactId': contact_id},
+            'lineItems': build_active_offer_line_items(block),
+            'totalPrice': {'currency': 'EUR'},
+            'taxConditions': {'taxType': 'gross'},
+            'title': 'Aktive Angebote – Bestandswert' + suffix,
+            'introduction': 'Aktive Angebote – interner Einstands-/Bestandswert (Angebotspreis / 3)' + suffix,
+            'remark': f'Automatisch aus der hochgeladenen Datei erstellt · Block {batch_index} von {batch_count}.',
+        }
+        try:
+            response = http.post(LEXOFFICE_INVOICES_URL, json=payload, headers=headers, timeout=30)
+        except requests.RequestException as exc:
+            return InvoiceDraftResult(
+                ok=False, invoice_id=invoice_ids[0] if invoice_ids else None,
+                message=f'Netzwerkfehler in Block {batch_index}/{batch_count}: {exc}',
+                invoice_ids=tuple(invoice_ids), batch_count=batch_count,
+                completed_batches=batch_index - 1,
+            )
+        last_status = response.status_code
+        if response.status_code not in (200, 201):
+            return InvoiceDraftResult(
+                ok=False, invoice_id=invoice_ids[0] if invoice_ids else None,
+                status_code=response.status_code,
+                message=(f'Block {batch_index}/{batch_count} fehlgeschlagen. '
+                         f'{len(invoice_ids)} Entwurf/Entwürfe wurden zuvor erstellt. {response.text[:400]}'),
+                invoice_ids=tuple(invoice_ids), batch_count=batch_count,
+                completed_batches=batch_index - 1,
+            )
+        invoice_id = response.json().get('id')
+        if invoice_id:
+            invoice_ids.append(invoice_id)
+    return InvoiceDraftResult(
+        ok=True, invoice_id=invoice_ids[0] if invoice_ids else None,
+        status_code=last_status, invoice_ids=tuple(invoice_ids),
+        batch_count=batch_count, completed_batches=batch_count,
+    )

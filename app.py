@@ -38,7 +38,8 @@ if not callable(getattr(studio_view,'evelyn_overview',None)):
 if not callable(getattr(position_workflow,'_later_hold_on_bound_invoice',None)):
     position_workflow=importlib.reload(position_workflow)
 if (not callable(getattr(lexoffice_import,'recent_processed_positions',None))
-        or getattr(lexoffice_import,'RECENT_POSITIONS_API',0) < 2):
+        or getattr(lexoffice_import,'RECENT_POSITIONS_API',0) < 2
+        or getattr(lexoffice_import,'ACTIVE_OFFER_BATCH_SIZE',0) != 300):
     # Streamlit re-executes app.py, but may retain an older dependency module
     # from before a deployment. Reload once when the required API is absent/stale.
     lexoffice_import=importlib.reload(lexoffice_import)
@@ -1009,6 +1010,9 @@ with lexoffice_import_tab:
             col1.metric('Positionen', str(len(active_offers)))
             col2.metric('Angebotspreise', euros(total_offer))
             col3.metric('Bestandswert · Preis / 3', euros(total_inventory))
+            batch_count = (len(active_offers) + lexoffice_import.ACTIVE_OFFER_BATCH_SIZE - 1) // lexoffice_import.ACTIVE_OFFER_BATCH_SIZE
+            if batch_count > 1:
+                st.info(f'Die Datei wird automatisch in {batch_count} separate Entwürfe mit jeweils maximal 300 Positionen aufgeteilt.')
             preview = active_offers.copy()
             preview['Angebotspreis'] = preview['Angebotspreis'].map(float)
             for money_column in ('Bestandswert', 'Bestandswert Netto', 'MwSt 19 %'):
@@ -1022,20 +1026,22 @@ with lexoffice_import_tab:
             st.error(str(exc))
     already_created = bool(active_digest and st.session_state.get('lexoffice-active-offers-created') == active_digest)
     if already_created:
-        st.success('Für diese unveränderte Datei wurde in dieser Sitzung bereits ein Entwurf erstellt.')
+        st.success('Für diese unveränderte Datei wurden in dieser Sitzung bereits alle Entwürfe erstellt.')
     if not api_key:
         st.info('API-Key unter „Lexware-Verbindung“ in der Seitenleiste hinterlegen.')
-    create_active = st.button('Aktive Angebote als Entwurf erstellen', type='primary',
+    create_active = st.button('Aktive Angebote als Entwurf/Entwürfe erstellen', type='primary',
                               disabled=active_offers is None or not api_key or already_created,
                               key='lexoffice-active-offers-create')
     if create_active:
         result = lexoffice_import.create_active_offers_draft(api_key, active_offers)
         if result.ok:
             st.session_state['lexoffice-active-offers-created'] = active_digest
-            st.success('Lexware-Entwurf erstellt · ID: ' + (result.invoice_id or 'nicht zurückgegeben'))
+            ids = ', '.join(result.invoice_ids) or 'keine IDs zurückgegeben'
+            st.success(f'{result.completed_batches} Lexware-Entwurf/Entwürfe erstellt · IDs: {ids}')
         else:
             detail = f' (HTTP {result.status_code})' if result.status_code else ''
-            st.error('Entwurf konnte nicht erstellt werden'+detail+': '+result.message)
+            created = f' Bereits erstellt: {", ".join(result.invoice_ids)}.' if result.invoice_ids else ''
+            st.error('Batch-Verarbeitung nicht vollständig'+detail+': '+result.message+created)
 
 if st.session_state.get('discard_request'):
     discard_dialog(st.session_state['discard_request'])

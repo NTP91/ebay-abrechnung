@@ -37,15 +37,17 @@ class FakeHttp:
 
     def post(self, url, **kwargs):
         self.post_calls.append((url, kwargs))
-        return Response(201, {'id': 'draft-1'})
+        return Response(201, {'id': f'draft-{len(self.post_calls)}'})
 
 
 class ActiveOfferImportTests(unittest.TestCase):
     def test_app_reloads_a_stale_lexoffice_import_before_using_recent_positions(self):
         source = Path('app.py').read_text(encoding='utf-8')
-        guard = "or getattr(lexoffice_import,'RECENT_POSITIONS_API',0) < 2):"
+        guard = "getattr(lexoffice_import,'RECENT_POSITIONS_API',0) < 2"
+        batch_guard = "getattr(lexoffice_import,'ACTIVE_OFFER_BATCH_SIZE',0) != 300"
         call = 'lex_positions = lexoffice_import.recent_processed_positions(orders_master, days=30)'
         self.assertIn(guard, source)
+        self.assertIn(batch_guard, source)
         self.assertLess(source.index(guard), source.index(call))
 
     def test_recent_processed_positions_has_no_row_limit_and_keeps_history_visible(self):
@@ -150,6 +152,31 @@ class ActiveOfferImportTests(unittest.TestCase):
         self.assertEqual(request['json']['lineItems'][0]['unitPrice']['grossAmount'], 10.0)
         self.assertEqual(request['json']['lineItems'][0]['unitPrice']['taxRatePercentage'], 19)
         self.assertEqual(request['json']['taxConditions'], {'taxType': 'gross'})
+
+    def test_more_than_300_offers_are_split_into_separate_drafts(self):
+        http = FakeHttp()
+        offers = pd.DataFrame([
+            {'Artikelname': f'Artikel {index}', 'SKU': f'SKU-{index}', 'Menge': 1,
+             'Angebotspreis': Decimal('30.00'), 'Bestandswert': Decimal('10.00'),
+             'Bestandswert Netto': Decimal('8.40')}
+            for index in range(601)
+        ])
+        result = subject.create_active_offers_draft('secret', offers, http=http)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.batch_count, 3)
+        self.assertEqual(result.completed_batches, 3)
+        self.assertEqual(result.invoice_ids, ('draft-1', 'draft-2', 'draft-3'))
+        self.assertEqual(len(http.get_calls), 1)
+        self.assertEqual([len(call[1]['json']['lineItems']) for call in http.post_calls], [300, 300, 1])
+        self.assertTrue(all(call[0] == 'https://api.lexware.io/v1/invoices?finalize=false'
+                            for call in http.post_calls))
+        self.assertEqual(http.post_calls[0][1]['json']['title'],
+                         'Aktive Angebote – Bestandswert – Teil 1/3')
+
+    def test_large_upload_is_accepted_without_a_300_row_parser_limit(self):
+        rows = ['Title;Current price'] + [f'Artikel {index};30,00' for index in range(301)]
+        result = subject.read_active_offers(Upload(('\n'.join(rows) + '\n').encode(), 'angebote.csv'))
+        self.assertEqual(len(result), 301)
 
     def test_invalid_or_ambiguous_input_is_blocked(self):
         with self.assertRaises(subject.OrderReportError):
