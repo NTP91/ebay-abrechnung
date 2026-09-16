@@ -271,8 +271,13 @@ def _snapshot_total(payload):
     total_after = previous_tax = Decimal(0)
     for item in payload.get('lineItems', []):
         unit = item.get('unitPrice', {})
-        net = Decimal(str(unit.get('netAmount', 0))) * Decimal(str(item.get('quantity', 1)))
         rate = Decimal(str(item.get('discountPercentage', 0))) / Decimal(100)
+        quantity = Decimal(str(item.get('quantity', 1)))
+        if 'grossAmount' in unit:
+            gross = Decimal(str(unit['grossAmount'])) * quantity
+            total_after += cents(gross * (Decimal(1) - rate))
+            continue
+        net = Decimal(str(unit.get('netAmount', 0))) * quantity
         after = cents(net * (Decimal(1) - rate))
         total_after += after
         previous_tax = cents(total_after * Decimal(str(unit.get('taxRatePercentage', 0))) / Decimal(100))

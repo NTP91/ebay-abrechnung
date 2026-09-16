@@ -112,7 +112,7 @@ class RealReportTests(unittest.TestCase):
                 self.assertEqual(item['quantity'], 1)
                 self.assertEqual(item['discountPercentage'], 0.5)
                 self.assertEqual(item['unitPrice']['taxRatePercentage'], 19)
-                self.assertEqual(item['unitPrice']['netAmount'], round(row['Erlös_Brutto'] / 1.19, 2))
+                self.assertEqual(item['unitPrice']['grossAmount'], round(row['Erlös_Brutto'], 2))
                 self.assertEqual(item['name'], row['Angebotstitel'])
                 self.assertIn(row['SKU'], item['description'])
                 self.assertIn(row['Bestellnummer'], item['description'])

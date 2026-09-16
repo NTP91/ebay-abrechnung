@@ -10,6 +10,14 @@ from test_recovery import payout
 
 
 class StudioViewTests(unittest.TestCase):
+    def test_snapshot_total_supports_current_gross_and_historic_net_payloads(self):
+        gross = {'lineItems': [{'quantity': 1, 'discountPercentage': .5,
+                                'unitPrice': {'grossAmount': 119, 'taxRatePercentage': 19}}]}
+        historic = {'lineItems': [{'quantity': 1, 'discountPercentage': .5,
+                                   'unitPrice': {'netAmount': 100, 'taxRatePercentage': 19}}]}
+        self.assertEqual(studio_view._snapshot_total(gross), Decimal('118.41'))
+        self.assertEqual(studio_view._snapshot_total(historic), Decimal('118.41'))
+
     def test_lexware_button_requires_key_scope_and_all_three_confirmations(self):
         self.assertFalse(studio_view.lexware_create_ready(['p1'], {'gross': 1}, '', (True, True, True)))
         self.assertFalse(studio_view.lexware_create_ready(['p1'], {'gross': 1}, 'key', (True, False, True)))
@@ -86,7 +94,7 @@ class StudioViewTests(unittest.TestCase):
             self.assertEqual(len(kwargs['json']['lineItems']),2)
             self.assertEqual(kwargs['json']['remark'],'eBay-Auszahlungsnummern: p2, p3')
             self.assertEqual(kwargs['params'],{'finalize':'false'})
-            self.assertEqual([i['unitPrice']['netAmount'] for i in kwargs['json']['lineItems']],[100,100])
+            self.assertEqual([i['unitPrice']['grossAmount'] for i in kwargs['json']['lineItems']],[119,119])
             return Mock(status_code=201,json=lambda:{'id':'new'})
         self.http.post.side_effect=post
         core.create_invoice_draft('fake',['p2','p3'],True,self.http)

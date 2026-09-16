@@ -49,6 +49,18 @@ class ApiWorkflowTests(unittest.TestCase):
         kwargs = self.http.post.call_args.kwargs
         self.assertEqual(kwargs['params'], {'finalize': 'false'})
         self.assertEqual(kwargs['json']['lineItems'][0]['name'], 'VERBINDLICHER BESTELLTITEL')
+        self.assertEqual(kwargs['json']['address']['contactId'], 'contact')
+        self.assertEqual(kwargs['json']['taxConditions'], {'taxType': 'gross'})
+        self.assertRegex(kwargs['json']['voucherDate'], r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$')
+        item = kwargs['json']['lineItems'][0]
+        self.assertEqual(item['type'], 'custom')
+        self.assertEqual(item['quantity'], 1)
+        self.assertEqual(item['unitName'], 'Stück')
+        self.assertEqual(item['unitPrice'], {
+            'currency': 'EUR', 'grossAmount': 119.0, 'taxRatePercentage': 19,
+        })
+        self.http.get.assert_called_once()
+        self.assertEqual(self.http.get.call_args.kwargs['params'], {'number': 16335, 'customer': 'true'})
         with self.assertRaises(ValueError):
             self.send()
         self.assertEqual(self.http.post.call_count, 1)
@@ -78,9 +90,11 @@ class ApiWorkflowTests(unittest.TestCase):
 
     def test_unknown_response_and_http_error_remain_locked(self):
         core.confirm_received('7700379513')
-        self.http.post.return_value.status_code = 500
-        with self.assertRaises(ValueError):
+        self.http.post.return_value.status_code = 400
+        self.http.post.return_value.text = '{"message":"grossAmount fehlt"}'
+        with self.assertLogs('core', level='ERROR') as captured, self.assertRaises(ValueError):
             self.send()
+        self.assertIn('{"message":"grossAmount fehlt"}', '\n'.join(captured.output))
         with self.assertRaises(ValueError):
             self.send()
 

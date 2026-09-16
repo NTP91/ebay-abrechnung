@@ -1,5 +1,6 @@
 import os
 import glob
+import logging
 import pandas as pd
 import io
 import csv
@@ -7,7 +8,7 @@ import re
 import json
 import tempfile
 from pathlib import Path
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import datetime, timezone
 from filelock import FileLock
 import sqlite3
@@ -18,6 +19,8 @@ from contextlib import contextmanager, nullcontext
 from atomic_io import replace_file
 import supabase_store
 from functools import lru_cache
+
+logger = logging.getLogger(__name__)
 
 DATA_DIR = Path(os.environ.get('PAYMENT_DATA_DIR') or Path(__file__).resolve().parent).expanduser().resolve()
 ORDERS_DB_PATH = str(DATA_DIR / 'Master_Orders.csv')
@@ -551,6 +554,28 @@ def invoice_payout_remark(payout_ids):
     return 'eBay-Auszahlungsnummern: ' + ', '.join(sorted({str(value) for value in payout_ids}))
 
 
+def lexware_voucher_date():
+    """Return the UTC timestamp format shown in Lexware's invoice examples."""
+    return datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+
+
+def lexware_gross_amount(value):
+    """Return a JSON number with the two-cent precision used by the settlement."""
+    return float(Decimal(str(value)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
+
+
+def log_lexware_error(response, operation):
+    """Log Lexware's complete response body without ever logging request headers."""
+    body = getattr(response, 'text', '')
+    if not isinstance(body, str) or not body:
+        try:
+            body = json.dumps(response.json(), ensure_ascii=False)
+        except Exception:
+            body = '<leere oder nicht lesbare Antwort>'
+    logger.error('Lexware API %s fehlgeschlagen (HTTP %s): %s',
+                 operation, getattr(response, 'status_code', 'unbekannt'), body)
+
+
 def known_group_b_partners():
     return set(partner_config()['group_b'])
 
@@ -584,19 +609,23 @@ def build_invoice_payload(master, payout_id, contact_id, money_received=False):
                 sales = sales.loc[allowed]
     if sales.empty:
         raise ValueError('Keine Gruppe-B-Bestellungen für diesen Payout.')
-    now = datetime.now(timezone.utc).isoformat(timespec='milliseconds')
+    now = lexware_voucher_date()
     items = []
     for _, row in sales.iterrows():
         items.append({
             'type': 'custom', 'name': row['Angebotstitel'],
             'description': f"eBay-Bestellnummer: {row['Bestellnummer']}\nSKU: {row['SKU']}",
             'quantity': 1, 'unitName': 'Stück',
-            'unitPrice': {'currency': 'EUR', 'netAmount': row['eBay_Netto'], 'taxRatePercentage': 19},
+            'unitPrice': {
+                'currency': 'EUR',
+                'grossAmount': lexware_gross_amount(row['Erlös_Brutto']),
+                'taxRatePercentage': 19,
+            },
             'discountPercentage': 0.5,
         })
     return {
         'voucherDate': now, 'address': {'contactId': contact_id}, 'lineItems': items,
-        'totalPrice': {'currency': 'EUR'}, 'taxConditions': {'taxType': 'net'},
+        'totalPrice': {'currency': 'EUR'}, 'taxConditions': {'taxType': 'gross'},
         'shippingConditions': {'shippingDate': now, 'shippingType': 'service'},
         'remark': invoice_payout_remark(sales['Auszahlung Nr.']),
     }
@@ -811,6 +840,7 @@ def create_invoice_draft(api_key, payout_id, prior_invoices_checked=False, http=
             try:
                 response = http.get(API_URL + '/contacts', params={'number': 16335, 'customer': 'true'}, headers=headers, timeout=20)
                 if response.status_code != 200:
+                    log_lexware_error(response, 'Kontaktabfrage')
                     raise ValueError('Kontaktabfrage fehlgeschlagen.')
                 contacts = [c for c in response.json().get('content', []) if
                             str(c.get('roles', {}).get('customer', {}).get('number')) == '16335']
@@ -833,6 +863,7 @@ def create_invoice_draft(api_key, payout_id, prior_invoices_checked=False, http=
     try:
         response = http.post(API_URL + '/invoices', params={'finalize': 'false'}, headers=headers, json=payload, timeout=30, allow_redirects=False)
         if response.status_code not in (200, 201):
+            log_lexware_error(response, 'Rechnungsentwurf')
             raise ValueError('Rechnungsantwort nicht erfolgreich.')
         invoice_id = response.json().get('id')
         if not isinstance(invoice_id, str) or not invoice_id:

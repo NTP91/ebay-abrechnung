@@ -105,13 +105,13 @@ class RecoveryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             core.build_invoice_payload(master, '7700379513', 'contact', True)
 
-    def test_product_priority_net_price_and_quantity_preserved(self):
+    def test_product_priority_gross_price_and_quantity_preserved(self):
         self.seed_orders()
         core.import_reports([payout()], self.payouts, 'payout')
         master = core.load_master_data()
         item = core.build_invoice_payload(master, '7700379513', 'contact', True)['lineItems'][0]
         self.assertEqual(item['name'], 'Produkt')
-        self.assertEqual(item['unitPrice']['netAmount'], 100)
+        self.assertEqual(item['unitPrice']['grossAmount'], 119)
         self.assertEqual(item['quantity'], 1)
         self.assertEqual(item['discountPercentage'], 0.5)
         self.assertIn('SKU: NB / 1', item['description'])
@@ -150,7 +150,7 @@ class RecoveryTests(unittest.TestCase):
         core.import_reports([payout(), payout('other', transaction='t2', amount='238,00')], self.payouts, 'payout')
         payload = core.build_invoice_payload(core.load_master_data(), '7700379513', 'contact', True)
         self.assertEqual(len(payload['lineItems']), 1)
-        self.assertEqual(payload['lineItems'][0]['unitPrice']['netAmount'], 100)
+        self.assertEqual(payload['lineItems'][0]['unitPrice']['grossAmount'], 119)
 
     def test_streamlit_modules_without_debug_payload(self):
         self.seed_orders()

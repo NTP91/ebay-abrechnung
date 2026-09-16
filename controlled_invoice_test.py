@@ -2,7 +2,6 @@
 import hashlib
 import json
 from collections import Counter
-from datetime import datetime, timezone
 from decimal import Decimal
 
 import openpyxl
@@ -36,13 +35,13 @@ def prepare(workbook):
     require(actual == expected, 'Excel und Originaldaten weichen ab')
     require(all(sheet.cell(r, 5).value == 1 and sheet.cell(r, 6).value == 'Stück' and sheet.cell(r, 8).value == .005 and sheet.cell(r, 9).value == .19 for r in range(15, 52)), 'Excel-Positionsparameter abweichend')
     book.close()
-    now = datetime.now(timezone.utc).isoformat(timespec='milliseconds')
+    now = core.lexware_voucher_date()
     payload = {
         'voucherDate': now, 'address': {'contactId': CONTACT},
         'lineItems': [{'type': 'custom', 'name': x['article'], 'description': x['extra'], 'quantity': 1, 'unitName': 'Stück',
-                       'unitPrice': {'currency': 'EUR', 'netAmount': float(x['net']), 'taxRatePercentage': 19},
+                       'unitPrice': {'currency': 'EUR', 'grossAmount': core.lexware_gross_amount(x['net'] * Decimal('1.19')), 'taxRatePercentage': 19},
                        'discountPercentage': .5} for x in model['Rechnung']],
-        'totalPrice': {'currency': 'EUR'}, 'taxConditions': {'taxType': 'net'},
+        'totalPrice': {'currency': 'EUR'}, 'taxConditions': {'taxType': 'gross'},
         'shippingConditions': {'shippingDate': now, 'shippingType': 'service'},
         'remark': core.invoice_payout_remark(rows['Auszahlung Nr.']),
     }
@@ -102,7 +101,7 @@ def verify(saved, payload):
     for key in ('name', 'description', 'quantity', 'unitName', 'discountPercentage'):
         if [i.get(key) for i in saved.get('lineItems', [])] != [i[key] for i in payload['lineItems']]:
             errors.append(key)
-    for key in ('netAmount', 'taxRatePercentage', 'currency'):
+    for key in ('grossAmount', 'taxRatePercentage', 'currency'):
         if [i.get('unitPrice', {}).get(key) for i in saved.get('lineItems', [])] != [i['unitPrice'][key] for i in payload['lineItems']]:
             errors.append('unitPrice.' + key)
     if len(saved.get('lineItems', [])) != 37:
