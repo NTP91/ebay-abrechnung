@@ -560,8 +560,9 @@ def lexware_voucher_date():
 
 
 def lexware_gross_amount(value):
-    """Return a JSON number with the two-cent precision used by the settlement."""
-    return float(Decimal(str(value)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
+    """Apply the contractual one-third price and return a cent-rounded JSON number."""
+    amount = Decimal(str(value)) / Decimal('3')
+    return float(amount.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
 
 
 def log_lexware_error(response, operation):

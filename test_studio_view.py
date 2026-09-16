@@ -94,7 +94,7 @@ class StudioViewTests(unittest.TestCase):
             self.assertEqual(len(kwargs['json']['lineItems']),2)
             self.assertEqual(kwargs['json']['remark'],'eBay-Auszahlungsnummern: p2, p3')
             self.assertEqual(kwargs['params'],{'finalize':'false'})
-            self.assertEqual([i['unitPrice']['grossAmount'] for i in kwargs['json']['lineItems']],[119,119])
+            self.assertEqual([i['unitPrice']['grossAmount'] for i in kwargs['json']['lineItems']],[39.67,39.67])
             return Mock(status_code=201,json=lambda:{'id':'new'})
         self.http.post.side_effect=post
         core.create_invoice_draft('fake',['p2','p3'],True,self.http)

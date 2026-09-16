@@ -8,6 +8,11 @@ from test_recovery import payout
 
 
 class ApiWorkflowTests(unittest.TestCase):
+    def test_contractual_third_price_is_rounded_to_cents(self):
+        self.assertEqual(core.lexware_gross_amount('119.00'), 39.67)
+        self.assertEqual(core.lexware_gross_amount('100.00'), 33.33)
+        self.assertEqual(core.lexware_gross_amount('0.02'), 0.01)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -57,7 +62,7 @@ class ApiWorkflowTests(unittest.TestCase):
         self.assertEqual(item['quantity'], 1)
         self.assertEqual(item['unitName'], 'Stück')
         self.assertEqual(item['unitPrice'], {
-            'currency': 'EUR', 'grossAmount': 119.0, 'taxRatePercentage': 19,
+            'currency': 'EUR', 'grossAmount': 39.67, 'taxRatePercentage': 19,
         })
         self.http.get.assert_called_once()
         self.assertEqual(self.http.get.call_args.kwargs['params'], {'number': 16335, 'customer': 'true'})
