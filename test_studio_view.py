@@ -44,7 +44,8 @@ class StudioViewTests(unittest.TestCase):
             db.commit()
         self.http=Mock()
         self.http.get.return_value.status_code=200
-        self.http.get.return_value.json.return_value={'content':[{'id':'contact','roles':{'customer':{'number':16335}}}]}
+        self.http.get.return_value.json.return_value={'id':core.LEXWARE_EVELYN_CONTACT_ID,
+                                                      'roles':{'customer':{'number':16335}}}
         self.http.post.return_value.status_code=201
         self.http.post.return_value.json.return_value={'id':'new'}
 
@@ -94,7 +95,7 @@ class StudioViewTests(unittest.TestCase):
             self.assertEqual(len(kwargs['json']['lineItems']),2)
             self.assertEqual(kwargs['json']['remark'],'eBay-Auszahlungsnummern: p2, p3')
             self.assertEqual(kwargs['params'],{'finalize':'false'})
-            self.assertEqual([i['unitPrice']['grossAmount'] for i in kwargs['json']['lineItems']],[39.67,39.67])
+            self.assertEqual([i['unitPrice']['netAmount'] for i in kwargs['json']['lineItems']],[33.33,33.33])
             return Mock(status_code=201,json=lambda:{'id':'new'})
         self.http.post.side_effect=post
         core.create_invoice_draft('fake',['p2','p3'],True,self.http)

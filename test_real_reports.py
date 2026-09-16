@@ -112,8 +112,8 @@ class RealReportTests(unittest.TestCase):
                 self.assertEqual(item['quantity'], 1)
                 self.assertEqual(item['discountPercentage'], 0.5)
                 self.assertEqual(item['unitPrice']['taxRatePercentage'], 19)
-                expected_gross = core.lexware_gross_amount(row['Erlös_Brutto'])
-                self.assertEqual(item['unitPrice']['grossAmount'], expected_gross)
+                expected_net = core.lexware_third_net_amount(row['eBay_Netto'])
+                self.assertEqual(item['unitPrice']['netAmount'], expected_net)
                 self.assertEqual(item['name'], row['Angebotstitel'])
                 self.assertIn(row['SKU'], item['description'])
                 self.assertIn(row['Bestellnummer'], item['description'])
@@ -150,7 +150,8 @@ class RealReportTests(unittest.TestCase):
         from unittest.mock import Mock
         http = Mock()
         http.get.return_value.status_code = 200
-        http.get.return_value.json.return_value = {'content': [{'id': 'test-contact', 'roles': {'customer': {'number': 16335}}}]}
+        http.get.return_value.json.return_value = {'id': core.LEXWARE_EVELYN_CONTACT_ID,
+                                                   'roles': {'customer': {'number': 16335}}}
         http.post.return_value.status_code = 201
         http.post.return_value.json.side_effect = [{'id': 'test-draft-' + str(i)} for i in range(3)]
         for payout_id in self.master['Auszahlung Nr.'].unique():

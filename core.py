@@ -559,8 +559,8 @@ def lexware_voucher_date():
     return datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
 
 
-def lexware_gross_amount(value):
-    """Apply the contractual one-third price and return a cent-rounded JSON number."""
+def lexware_third_net_amount(value):
+    """Apply the contractual one-third price to the proven net-price payload."""
     amount = Decimal(str(value)) / Decimal('3')
     return float(amount.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
 
@@ -619,20 +619,21 @@ def build_invoice_payload(master, payout_id, contact_id, money_received=False):
             'quantity': 1, 'unitName': 'Stück',
             'unitPrice': {
                 'currency': 'EUR',
-                'grossAmount': lexware_gross_amount(row['Erlös_Brutto']),
+                'netAmount': lexware_third_net_amount(row['eBay_Netto']),
                 'taxRatePercentage': 19,
             },
             'discountPercentage': 0.5,
         })
     return {
         'voucherDate': now, 'address': {'contactId': contact_id}, 'lineItems': items,
-        'totalPrice': {'currency': 'EUR'}, 'taxConditions': {'taxType': 'gross'},
+        'totalPrice': {'currency': 'EUR'}, 'taxConditions': {'taxType': 'net'},
         'shippingConditions': {'shippingDate': now, 'shippingType': 'service'},
         'remark': invoice_payout_remark(sales['Auszahlung Nr.']),
     }
 
 
 API_URL = 'https://api.lexware.io/v1'
+LEXWARE_EVELYN_CONTACT_ID = 'a9f15779-2ab7-4905-9c04-63a6bf979f6d'
 FOLLOWUP = {
     'Lexoffice-Entwurf erstellt': 'Partnerrechnung geprüft',
     'Partnerrechnung geprüft': 'Partner ausgezahlt',
@@ -827,7 +828,9 @@ def create_invoice_draft(api_key, payout_id, prior_invoices_checked=False, http=
     """Single attempt per payout. Any uncertain POST outcome remains locked."""
     if not api_key or not prior_invoices_checked:
         raise ValueError('API-Key und Bestätigung der bisherigen Rechnungsprüfung erforderlich.')
-    http = http or requests
+    session = http or requests.Session()
+    if http is None:
+        session.mount('https://', requests.adapters.HTTPAdapter(max_retries=0))
     payout_ids = sorted({str(value) for value in payout_id}) if isinstance(payout_id, (list, tuple, set)) else [str(payout_id)]
     if not payout_ids:
         raise ValueError('Keine Payouts ausgewählt.')
@@ -846,15 +849,16 @@ def create_invoice_draft(api_key, payout_id, prior_invoices_checked=False, http=
                 if expected_fingerprints is not None and expected_fingerprints.get(payout_id) != payout_fingerprint(master[master['Auszahlung Nr.'] == payout_id]):
                     raise ValueError('Datenstand geändert. Übersicht aktualisieren und erneut prüfen; kein Entwurf erstellt.')
             try:
-                response = http.get(API_URL + '/contacts', params={'number': 16335, 'customer': 'true'}, headers=headers, timeout=20)
+                response = session.get(API_URL + '/contacts/' + LEXWARE_EVELYN_CONTACT_ID,
+                                       headers=headers, timeout=20)
                 if response.status_code != 200:
                     log_lexware_error(response, 'Kontaktabfrage')
                     raise ValueError('Kontaktabfrage fehlgeschlagen.')
-                contacts = [c for c in response.json().get('content', []) if
-                            str(c.get('roles', {}).get('customer', {}).get('number')) == '16335']
-                if len(contacts) != 1 or not contacts[0].get('id'):
-                    raise ValueError('Kundennummer 16335 nicht eindeutig gefunden.')
-                parts = [build_invoice_payload(master, pid, contacts[0]['id'], True) for pid in payout_ids]
+                contact = response.json()
+                if contact.get('id') not in (None, LEXWARE_EVELYN_CONTACT_ID) or \
+                        str(contact.get('roles', {}).get('customer', {}).get('number')) != '16335':
+                    raise ValueError('Kundennummer 16335 gehört nicht zum hinterlegten Evelyn-Kontakt.')
+                parts = [build_invoice_payload(master, pid, LEXWARE_EVELYN_CONTACT_ID, True) for pid in payout_ids]
                 payload = dict(parts[0])
                 payload['lineItems'] = [item for part in parts for item in part['lineItems']]
                 payload['remark'] = invoice_payout_remark(payout_ids)
@@ -869,7 +873,8 @@ def create_invoice_draft(api_key, payout_id, prior_invoices_checked=False, http=
                 audit(db, payout_id, 'Entwurfsversuch reserviert; Altbestand manuell geprüft')
             db.commit()  # durable BEFORE the network write; never automatically retry
     try:
-        response = http.post(API_URL + '/invoices', params={'finalize': 'false'}, headers=headers, json=payload, timeout=30, allow_redirects=False)
+        response = session.post(API_URL + '/invoices', params={'finalize': 'false'}, headers=headers,
+                                json=payload, timeout=(10, 30), allow_redirects=False)
         if response.status_code not in (200, 201):
             log_lexware_error(response, 'Rechnungsentwurf')
             raise ValueError('Rechnungsantwort nicht erfolgreich.')

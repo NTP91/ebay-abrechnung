@@ -2,7 +2,7 @@
 import hashlib
 import json
 from collections import Counter
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 
 import openpyxl
 import requests
@@ -39,9 +39,9 @@ def prepare(workbook):
     payload = {
         'voucherDate': now, 'address': {'contactId': CONTACT},
         'lineItems': [{'type': 'custom', 'name': x['article'], 'description': x['extra'], 'quantity': 1, 'unitName': 'Stück',
-                       'unitPrice': {'currency': 'EUR', 'grossAmount': core.lexware_gross_amount(x['net'] * Decimal('1.19')), 'taxRatePercentage': 19},
+                       'unitPrice': {'currency': 'EUR', 'netAmount': core.lexware_third_net_amount(x['net']), 'taxRatePercentage': 19},
                        'discountPercentage': .5} for x in model['Rechnung']],
-        'totalPrice': {'currency': 'EUR'}, 'taxConditions': {'taxType': 'gross'},
+        'totalPrice': {'currency': 'EUR'}, 'taxConditions': {'taxType': 'net'},
         'shippingConditions': {'shippingDate': now, 'shippingType': 'service'},
         'remark': core.invoice_payout_remark(rows['Auszahlung Nr.']),
     }
@@ -101,13 +101,21 @@ def verify(saved, payload):
     for key in ('name', 'description', 'quantity', 'unitName', 'discountPercentage'):
         if [i.get(key) for i in saved.get('lineItems', [])] != [i[key] for i in payload['lineItems']]:
             errors.append(key)
-    for key in ('grossAmount', 'taxRatePercentage', 'currency'):
+    for key in ('netAmount', 'taxRatePercentage', 'currency'):
         if [i.get('unitPrice', {}).get(key) for i in saved.get('lineItems', [])] != [i['unitPrice'][key] for i in payload['lineItems']]:
             errors.append('unitPrice.' + key)
     if len(saved.get('lineItems', [])) != 37:
         errors.append('Positionsanzahl')
-    for key, expected in {'totalNetAmount': '3496.06', 'totalTaxAmount': '664.25', 'totalGrossAmount': '4160.31'}.items():
-        if Decimal(str(saved.get('totalPrice', {}).get(key))) != Decimal(expected):
+    cent = Decimal('0.01')
+    total_net = sum((Decimal(str(item['unitPrice']['netAmount']))
+                     * Decimal(str(item.get('quantity', 1)))
+                     * (Decimal('1') - Decimal(str(item.get('discountPercentage', 0))) / Decimal('100'))
+                     ).quantize(cent, rounding=ROUND_HALF_UP) for item in payload['lineItems'])
+    total_tax = (total_net * Decimal('.19')).quantize(cent, rounding=ROUND_HALF_UP)
+    expected_totals = {'totalNetAmount': total_net, 'totalTaxAmount': total_tax,
+                       'totalGrossAmount': total_net + total_tax}
+    for key, expected in expected_totals.items():
+        if Decimal(str(saved.get('totalPrice', {}).get(key))) != expected:
             errors.append(key)
     if saved.get('remark') != payload['remark']:
         errors.append('Freitext')

@@ -37,7 +37,7 @@ class OpenTransactionTests(unittest.TestCase):
         self.assertEqual(len(core.load_master_data()),1)
         payload=core.build_invoice_payload(core.load_master_data(),'7700379513','contact',True)
         self.assertEqual(len(payload['lineItems']),1)
-        self.assertEqual(payload['lineItems'][0]['unitPrice']['grossAmount'],39.67)
+        self.assertEqual(payload['lineItems'][0]['unitPrice']['netAmount'],33.33)
         later=payout('7712804241',transaction='t2',order='o2',amount='238,00')
         result=self.upload([later])
         self.assertFalse(result['error'])

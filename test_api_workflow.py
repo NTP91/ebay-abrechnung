@@ -8,10 +8,10 @@ from test_recovery import payout
 
 
 class ApiWorkflowTests(unittest.TestCase):
-    def test_contractual_third_price_is_rounded_to_cents(self):
-        self.assertEqual(core.lexware_gross_amount('119.00'), 39.67)
-        self.assertEqual(core.lexware_gross_amount('100.00'), 33.33)
-        self.assertEqual(core.lexware_gross_amount('0.02'), 0.01)
+    def test_contractual_third_net_price_is_rounded_to_cents(self):
+        self.assertEqual(core.lexware_third_net_amount('119.00'), 39.67)
+        self.assertEqual(core.lexware_third_net_amount('100.00'), 33.33)
+        self.assertEqual(core.lexware_third_net_amount('0.02'), 0.01)
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -27,7 +27,10 @@ class ApiWorkflowTests(unittest.TestCase):
         core.import_reports([source], core.PAYOUTS_DB_PATH, 'payout')
         self.http = Mock()
         self.http.get.return_value.status_code = 200
-        self.http.get.return_value.json.return_value = {'content': [{'id': 'contact', 'roles': {'customer': {'number': 16335}}}]}
+        self.http.get.return_value.json.return_value = {
+            'id': core.LEXWARE_EVELYN_CONTACT_ID,
+            'roles': {'customer': {'number': 16335}},
+        }
         self.http.post.return_value.status_code = 201
         self.http.post.return_value.json.return_value = {'id': 'draft-1'}
 
@@ -54,18 +57,19 @@ class ApiWorkflowTests(unittest.TestCase):
         kwargs = self.http.post.call_args.kwargs
         self.assertEqual(kwargs['params'], {'finalize': 'false'})
         self.assertEqual(kwargs['json']['lineItems'][0]['name'], 'VERBINDLICHER BESTELLTITEL')
-        self.assertEqual(kwargs['json']['address']['contactId'], 'contact')
-        self.assertEqual(kwargs['json']['taxConditions'], {'taxType': 'gross'})
+        self.assertEqual(kwargs['json']['address']['contactId'], core.LEXWARE_EVELYN_CONTACT_ID)
+        self.assertEqual(kwargs['json']['taxConditions'], {'taxType': 'net'})
         self.assertRegex(kwargs['json']['voucherDate'], r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$')
         item = kwargs['json']['lineItems'][0]
         self.assertEqual(item['type'], 'custom')
         self.assertEqual(item['quantity'], 1)
         self.assertEqual(item['unitName'], 'Stück')
         self.assertEqual(item['unitPrice'], {
-            'currency': 'EUR', 'grossAmount': 39.67, 'taxRatePercentage': 19,
+            'currency': 'EUR', 'netAmount': 33.33, 'taxRatePercentage': 19,
         })
         self.http.get.assert_called_once()
-        self.assertEqual(self.http.get.call_args.kwargs['params'], {'number': 16335, 'customer': 'true'})
+        self.assertEqual(self.http.get.call_args.args[0],
+                         core.API_URL + '/contacts/' + core.LEXWARE_EVELYN_CONTACT_ID)
         with self.assertRaises(ValueError):
             self.send()
         self.assertEqual(self.http.post.call_count, 1)
@@ -96,10 +100,10 @@ class ApiWorkflowTests(unittest.TestCase):
     def test_unknown_response_and_http_error_remain_locked(self):
         core.confirm_received('7700379513')
         self.http.post.return_value.status_code = 400
-        self.http.post.return_value.text = '{"message":"grossAmount fehlt"}'
+        self.http.post.return_value.text = '{"message":"netAmount fehlt"}'
         with self.assertLogs('core', level='ERROR') as captured, self.assertRaises(ValueError):
             self.send()
-        self.assertIn('{"message":"grossAmount fehlt"}', '\n'.join(captured.output))
+        self.assertIn('{"message":"netAmount fehlt"}', '\n'.join(captured.output))
         with self.assertRaises(ValueError):
             self.send()
 

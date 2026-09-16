@@ -123,7 +123,8 @@ class PaymentReadinessTests(unittest.TestCase):
         evelyn_history=next(expander for expander in app.expander if expander.label.startswith('Historie ·'))
         self.assertFalse(evelyn_history.proto.expanded)
         http=Mock();http.get.return_value.status_code=200
-        http.get.return_value.json.return_value={'content':[{'id':'contact','roles':{'customer':{'number':16335}}}]}
+        http.get.return_value.json.return_value={'id':core.LEXWARE_EVELYN_CONTACT_ID,
+                                                 'roles':{'customer':{'number':16335}}}
         http.post.return_value.status_code=201;http.post.return_value.json.return_value={'id':'real-draft-simulated'}
         core.confirm_received('new')
         core.create_invoice_draft('FAKE','new',True,http)
