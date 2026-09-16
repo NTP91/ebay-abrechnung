@@ -361,6 +361,42 @@ class SupabaseLedgerSchemaTests(unittest.TestCase):
                 saved = [row[0] for row in db.execute('SELECT id FROM group_b_rounds')]
         self.assertEqual(saved, [rounds.ROUND_ONE])
 
+    def test_ledger_migrates_and_persists_missing_import_coverage_columns(self):
+        legacy = sqlite3.connect(':memory:')
+        legacy.execute('CREATE TABLE imports (id INTEGER PRIMARY KEY, kind TEXT, filename TEXT, at TEXT, '
+                       'start TEXT, end TEXT, detected INTEGER, added INTEGER, present INTEGER, '
+                       'issues INTEGER, error TEXT)')
+        legacy.execute("INSERT INTO imports(kind,filename,error) VALUES('orders','legacy.csv','')")
+        legacy.commit()
+        store = {'settlement': (supabase_store.sqlite_to_bytes(legacy), 1)}
+        legacy.close()
+
+        def fake_get(key, required=True):
+            return store['settlement']
+
+        def fake_put(key, content, expected_version=None):
+            self.assertEqual(expected_version, store['settlement'][1])
+            store['settlement'] = (content, expected_version + 1)
+            return expected_version + 1
+
+        patches = (patch.object(supabase_store, 'enabled', return_value=True),
+                   patch.object(supabase_store, 'get', side_effect=fake_get),
+                   patch.object(supabase_store, 'put', side_effect=fake_put))
+        with patches[0], patches[1], patches[2]:
+            with core.ledger() as db:
+                columns = {row[1] for row in db.execute('PRAGMA table_info(imports)')}
+                self.assertTrue({'status', 'coverage_start', 'coverage_end',
+                                 'observed_start', 'observed_end'}.issubset(columns))
+                self.assertEqual(db.execute('SELECT observed_start FROM imports').fetchone()[0], None)
+
+        self.assertEqual(store['settlement'][1], 2)
+        with patch.object(supabase_store, 'enabled', return_value=True), \
+             patch.object(supabase_store, 'get', side_effect=fake_get), \
+             patch.object(supabase_store, 'put', side_effect=fake_put):
+            with core.ledger() as db:
+                columns = {row[1] for row in db.execute('PRAGMA table_info(imports)')}
+        self.assertIn('observed_start', columns)
+
 
 if __name__ == '__main__':
     unittest.main()

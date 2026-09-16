@@ -640,6 +640,22 @@ FOLLOWUP = {
 }
 
 
+def initialize_import_schema(connection):
+    """Bring legacy local or Supabase SQLite registers to the current import schema."""
+    connection.execute('CREATE TABLE IF NOT EXISTS imports (id INTEGER PRIMARY KEY, kind TEXT, filename TEXT, at TEXT, start TEXT, end TEXT, detected INTEGER, added INTEGER, present INTEGER, issues INTEGER, error TEXT)')
+    import_columns = {row[1] for row in connection.execute('PRAGMA table_info(imports)')}
+    for name, definition in (
+        ('status', "TEXT NOT NULL DEFAULT 'legacy_unverified'"),
+        ('coverage_start', 'TEXT'),
+        ('coverage_end', 'TEXT'),
+        ('observed_start', 'TEXT'),
+        ('observed_end', 'TEXT'),
+    ):
+        if name not in import_columns:
+            connection.execute(f'ALTER TABLE imports ADD COLUMN {name} {definition}')
+    connection.execute("UPDATE imports SET status=CASE WHEN COALESCE(error,'')='' THEN 'legacy_unverified' ELSE 'failed' END WHERE status IS NULL OR status='' OR status='legacy_unverified'")
+
+
 @contextmanager
 def ledger():
     """Mirror locks independently; rebuilding SQLite cannot release a reservation."""
@@ -647,9 +663,11 @@ def ledger():
         raw, version = supabase_store.get('state/settlement.sqlite3')
         connection = supabase_store.sqlite_from_bytes(raw)
         connection.row_factory = sqlite3.Row
+        before = supabase_store.sqlite_to_bytes(connection)
+        initialize_import_schema(connection)
         import group_b_rounds
         group_b_rounds.initialize(connection)
-        before = supabase_store.sqlite_to_bytes(connection)
+        connection.commit()
         try:
             yield connection
         finally:
@@ -674,18 +692,7 @@ def ledger():
             connection.execute('PRAGMA synchronous=FULL')
             connection.execute('CREATE TABLE IF NOT EXISTS payouts (id TEXT PRIMARY KEY, status TEXT NOT NULL, fingerprint TEXT, invoice_id TEXT, attempt TEXT, snapshot TEXT)')
             connection.execute('CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, payout TEXT, at TEXT, event TEXT)')
-            connection.execute('CREATE TABLE IF NOT EXISTS imports (id INTEGER PRIMARY KEY, kind TEXT, filename TEXT, at TEXT, start TEXT, end TEXT, detected INTEGER, added INTEGER, present INTEGER, issues INTEGER, error TEXT)')
-            import_columns = {row[1] for row in connection.execute('PRAGMA table_info(imports)')}
-            for name, definition in (
-                ('status', "TEXT NOT NULL DEFAULT 'legacy_unverified'"),
-                ('coverage_start', 'TEXT'),
-                ('coverage_end', 'TEXT'),
-                ('observed_start', 'TEXT'),
-                ('observed_end', 'TEXT'),
-            ):
-                if name not in import_columns:
-                    connection.execute(f'ALTER TABLE imports ADD COLUMN {name} {definition}')
-            connection.execute("UPDATE imports SET status=CASE WHEN COALESCE(error,'')='' THEN 'legacy_unverified' ELSE 'failed' END WHERE status IS NULL OR status='' OR status='legacy_unverified'")
+            initialize_import_schema(connection)
             connection.execute('CREATE TABLE IF NOT EXISTS import_warnings (id INTEGER PRIMARY KEY, payout TEXT, at TEXT, reason TEXT, snapshot TEXT)')
             connection.execute('CREATE TABLE IF NOT EXISTS position_workflow (position_key TEXT PRIMARY KEY, reviewed_at TEXT, paid_at TEXT, received_at TEXT, closed_at TEXT, source TEXT)')
             connection.execute('CREATE TABLE IF NOT EXISTS discarded_invoices (invoice_id TEXT PRIMARY KEY, label TEXT, discarded_at TEXT, snapshot TEXT)')
