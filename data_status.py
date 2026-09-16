@@ -1,5 +1,5 @@
 """Import receipts and concise source-derived data status; no network calls."""
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 
 import pandas as pd
 import core
@@ -24,6 +24,28 @@ def display_date(value):
     return value.strftime('%d.%m.%Y') if value else 'nicht bekannt'
 
 
+def _day(value):
+    if value is None or value == '':
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        return datetime.fromisoformat(str(value)).date()
+    except ValueError:
+        return report_date(value).date()
+
+
+def _coverage(start, end):
+    start, end = _day(start), _day(end)
+    if start is None or end is None:
+        raise ValueError('Berichtszeitraum fehlt. Für Bestellberichte müssen Von und Bis bestätigt werden.')
+    if start > end:
+        raise ValueError('Berichtszeitraum ist ungültig: Von liegt nach Bis.')
+    return start, end
+
+
 def record_legacy_orders():
     existing = core.read_master(core.ORDERS_DB_PATH)
     if existing.empty:
@@ -31,22 +53,38 @@ def record_legacy_orders():
     with core.ledger() as db:
         if not db.execute("SELECT 1 FROM imports WHERE kind='orders' LIMIT 1").fetchone():
             period = dates(existing, 'orders')
-            db.execute('INSERT INTO imports(kind,filename,start,end,detected,added,present,issues,error) VALUES(?,?,?,?,?,?,?,?,?)',
+            db.execute('''INSERT INTO imports(kind,filename,start,end,detected,added,present,issues,error,status,
+                          observed_start,observed_end) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)''',
                        ('orders', 'Altbestand (Importdatum unbekannt)', period[0].isoformat() if period else None,
-                        period[-1].isoformat() if period else None, len(existing), 0, len(existing), 0, ''))
+                        period[-1].isoformat() if period else None, len(existing), 0, len(existing), 0, '',
+                        'legacy_unverified', period[0].isoformat() if period else None,
+                        period[-1].isoformat() if period else None))
+            db.commit()
+        else:
+            db.execute("""UPDATE imports SET observed_start=COALESCE(observed_start,start),
+                          observed_end=COALESCE(observed_end,end)
+                          WHERE kind='orders' AND status='legacy_unverified'""")
             db.commit()
 
 
-def import_file(upload, kind):
+def import_file(upload, kind, coverage_start=None, coverage_end=None):
     result = dict(kind=kind, filename=upload.name, detected=0, added=0, present=0, issues=0,
-                  historical_without_sku=0, error='', payouts=[])
+                  historical_without_sku=0, error='', status='failed', payouts=[],
+                  coverage_start=None, coverage_end=None, observed_start=None, observed_end=None)
     period = []
+    covered = (None, None)
     try:
         if kind == 'orders':
             record_legacy_orders()
+            covered = _coverage(coverage_start, coverage_end)
+            result['coverage_start'], result['coverage_end'] = map(display_date, covered)
         frame = core.read_report(upload, kind)
         result['detected'] = len(frame)
         period = dates(frame, kind)
+        if period:
+            result['observed_start'], result['observed_end'] = map(display_date, (period[0], period[-1]))
+        if kind == 'orders' and period and (period[0] < covered[0] or period[-1] > covered[1]):
+            raise ValueError('Bestellposition liegt außerhalb des bestätigten Berichtszeitraums; keine Daten übernommen.')
         path = core.PAYOUTS_DB_PATH if kind == 'payout' else core.ORDERS_DB_PATH
         before = core.read_master(path)
         if kind == 'payout':
@@ -57,9 +95,9 @@ def import_file(upload, kind):
         result['present'] = result['detected'] - result['added']
         if kind == 'payout':
             result['present'] = counters['known_paid'] + counters['still_open']
-        master = core.load_master_data()
-        states = core.sync_status(master)
         if kind == 'payout':
+            master = core.load_master_data()
+            states = core.sync_status(master)
             if not master.empty:
                 relevant = master[master['Auszahlung Nr.'].isin(frame['Auszahlung Nr.'])]
                 result['issues'] = int(relevant['Prüfhinweis'].astype(bool).sum())
@@ -78,14 +116,41 @@ def import_file(upload, kind):
             # Missing SKU means there is deliberately no partner workflow.
             # Other defects in assignable rows remain real review issues.
             result['issues'] = int((~without_sku & (frame['Angebotstitel'] == '')).sum())
+        result['status'] = 'success'
     except Exception as exc:
         result['error'] = str(exc)
     with core.ledger() as db:
-        db.execute('INSERT INTO imports(kind,filename,at,start,end,detected,added,present,issues,error) VALUES(?,?,?,?,?,?,?,?,?,?)',
-                   (kind, upload.name, datetime.now(timezone.utc).isoformat(), period[0].isoformat() if period else None,
-                    period[-1].isoformat() if period else None, result['detected'], result['added'], result['present'], result['issues'], result['error']))
+        db.execute('''INSERT INTO imports(kind,filename,at,start,end,detected,added,present,issues,error,status,
+                      coverage_start,coverage_end,observed_start,observed_end) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                   (kind, upload.name, datetime.now(timezone.utc).isoformat(),
+                    period[0].isoformat() if period else None, period[-1].isoformat() if period else None,
+                    result['detected'], result['added'], result['present'], result['issues'], result['error'], result['status'],
+                    covered[0].isoformat() if covered[0] else None, covered[1].isoformat() if covered[1] else None,
+                    period[0].isoformat() if period else None, period[-1].isoformat() if period else None))
         db.commit()
     return result
+
+
+def coverage(imports):
+    """Return merged successful order-report coverage and exact uncovered days."""
+    order_imports = imports[imports.kind == 'orders'].copy()
+    successful = order_imports[(order_imports.status == 'success')
+                               & order_imports.coverage_start.notna() & order_imports.coverage_end.notna()]
+    intervals = sorted((_day(row.coverage_start), _day(row.coverage_end)) for _, row in successful.iterrows())
+    merged = []
+    for start, end in intervals:
+        if not merged or start > merged[-1][1] + timedelta(days=1):
+            merged.append([start, end])
+        else:
+            merged[-1][1] = max(merged[-1][1], end)
+    gaps = []
+    for left, right in zip(merged, merged[1:]):
+        gaps.append((left[1] + timedelta(days=1), right[0] - timedelta(days=1)))
+    last_success = successful.sort_values('id').iloc[-1] if not successful.empty else None
+    last_attempt = order_imports.sort_values('id').iloc[-1] if not order_imports.empty else None
+    return {'intervals': merged, 'gaps': gaps, 'start': merged[0][0] if merged else None,
+            'end': merged[-1][1] if merged else None, 'last_success': last_success,
+            'last_attempt': last_attempt}
 
 
 def overview(master, states):
@@ -109,17 +174,9 @@ def overview(master, states):
     latest = history[0] if history else None
     for row in history:
         row.pop('_date')
-    gaps = []
-    # Transaction-free days do not establish missing reports. Compare only observed
-    # imported report ranges, and label the inference explicitly as a possibility.
-    valid = imports[(imports.kind == 'orders') & (imports.error == '') & imports.start.notna() & imports.end.notna()]
-    end = None
-    for _, row in valid.sort_values('start').iterrows():
-        start = datetime.fromisoformat(row.start).date()
-        finish = datetime.fromisoformat(row.end).date()
-        if end and start > end + timedelta(days=1):
-            gaps.append(f'Mögliche Datenlücke zwischen {display_date(end)} und {display_date(start)}. Aus beobachteten Berichtspositionen abgeleitet; verkaufsfreie Tage sind ebenfalls möglich.')
-        end = max(end, finish) if end else finish
+    order_coverage = coverage(imports)
+    gaps = [f'Datenlücke: {display_date(start)} bis {display_date(end)} ist durch keinen erfolgreich importierten Bestellbericht abgedeckt.'
+            for start, end in order_coverage['gaps']]
     return {'latest': latest, 'order_end': display_date(order_dates[-1]) if order_dates else None,
             'history': history, 'imports': imports, 'gaps': gaps, 'warnings': warnings,
-            'unbilled': int(states['Sperre'].isna().sum())}
+            'order_coverage': order_coverage, 'unbilled': int(states['Sperre'].isna().sum())}

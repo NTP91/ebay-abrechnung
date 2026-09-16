@@ -19,7 +19,7 @@ class HistoricalWithoutSkuTests(unittest.TestCase):
         rows=[payout(transaction=f't{i}',order=f'o{i}',sku='',title='Historischer Titel') for i in range(23)]
         rows.append(payout(transaction='current',order='current',sku='NB / 1',title='Aktuell'))
         upload=Upload(core.pd.concat(rows).to_csv(sep=';',index=False).encode('utf-8'),'orders.csv')
-        receipt=data_status.import_file(upload,'orders')
+        receipt=data_status.import_file(upload,'orders','2026-01-01','2026-12-31')
         self.assertEqual(receipt['historical_without_sku'],23)
         self.assertEqual(receipt['issues'],0)
         self.assertEqual(len(core.read_master(core.ORDERS_DB_PATH)),24)

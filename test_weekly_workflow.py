@@ -90,7 +90,7 @@ class WeeklyWorkflowTests(unittest.TestCase):
         for day, transaction in [('31.08.2026','t2'),('03.09.2026','t3')]:
             frame=payout(transaction=transaction)
             frame['Verkauft am']=day
-            result=data_status.import_file(Upload(frame.to_csv(sep=';',index=False).encode('utf-8'),'orders.csv'),'orders')
+            result=data_status.import_file(Upload(frame.to_csv(sep=';',index=False).encode('utf-8'),'orders.csv'),'orders',day,day)
             self.assertFalse(result['error'])
         state=core.sync_status(core.load_master_data())
         overview=data_status.overview(core.load_master_data(),state)

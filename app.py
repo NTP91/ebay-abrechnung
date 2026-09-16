@@ -444,12 +444,25 @@ with st.sidebar:
     with st.expander('eBay-Berichte hochladen', expanded=True):
         payouts = st.file_uploader('Transaktionsberichte', type=['csv'], accept_multiple_files=True)
         orders = st.file_uploader('Bestellberichte', type=['csv','xlsx'], accept_multiple_files=True)
-        if st.button('Dateien importieren', type='primary', disabled=not(payouts or orders), use_container_width=True):
+        order_periods=[]
+        if orders:
+            st.caption('Berichtszeitraum je Bestellbericht bestätigen. Er beschreibt den vollständigen bei eBay angeforderten Zeitraum, auch an Tagen ohne Verkäufe.')
+            for index,uploaded in enumerate(orders):
+                st.write('**'+uploaded.name+'**')
+                start_col,end_col=st.columns(2)
+                start=start_col.date_input('Abgedeckt von',value=None,key=f'order-coverage-start-{index}-{uploaded.name}')
+                end=end_col.date_input('Abgedeckt bis',value=None,key=f'order-coverage-end-{index}-{uploaded.name}')
+                order_periods.append((start,end))
+        missing_order_period=bool(orders) and any(not start or not end for start,end in order_periods)
+        if missing_order_period:
+            st.warning('Vor dem Import den vollständigen Berichtszeitraum für jeden Bestellbericht angeben.')
+        if st.button('Dateien importieren', type='primary', disabled=not(payouts or orders) or missing_order_period, use_container_width=True):
             try:
                 receipts=[]
-                for kind, files in [('orders',orders),('payout',payouts)]:
-                    for uploaded in files:
-                        receipts.append(data_status.import_file(uploaded,kind))
+                for index,uploaded in enumerate(orders or []):
+                    receipts.append(data_status.import_file(uploaded,'orders',*order_periods[index]))
+                for uploaded in payouts or []:
+                    receipts.append(data_status.import_file(uploaded,'payout'))
                 _load_dashboard_data.clear()
                 st.session_state['import_receipts']=receipts
             except Exception as exc:
@@ -473,6 +486,8 @@ with st.sidebar:
                             st.warning(f"{receipt['issues']} Zuordnungen prüfen")
                     else:
                         st.caption(f"{receipt['added']} neu · {receipt['present']} bereits vorhanden · {receipt['issues']} unvollständig")
+                        if receipt.get('coverage_start'):
+                            st.caption(f"Abgedeckter Berichtszeitraum: {receipt['coverage_start']} – {receipt['coverage_end']}")
                         if receipt.get('historical_without_sku'):
                             st.caption(f"{receipt['historical_without_sku']} historische Positionen ohne SKU archiviert · nicht abrechnungsrelevant")
     invoice_entry = st.empty()
@@ -617,9 +632,20 @@ with home:
     with left,st.container(border=True):
         st.subheader('Datenstand')
         latest=overview['latest']
+        order_coverage=overview['order_coverage']
         st.write('**Letzter bekannter Payout**')
         st.write(latest['Payoutnummer']+' · '+latest['Datum / Zeitraum'] if latest else 'Noch keine Payouts importiert')
-        st.caption('Bestelldaten vorhanden bis: '+(overview['order_end'] or 'noch nicht bekannt'))
+        last_success=order_coverage['last_success']
+        last_success_text=(studio_view.local_datetime(core.pd.Series([last_success.at])).iloc[0]
+                           if last_success is not None and last_success.at else 'noch kein bestätigter Import')
+        st.caption('Letzter erfolgreicher Bestellbericht-Import: '+last_success_text)
+        if order_coverage['start']:
+            coverage_text=f"{data_status.display_date(order_coverage['start'])} – {data_status.display_date(order_coverage['end'])}"
+            coverage_text+=f" · {len(order_coverage['gaps'])} Datenlücke(n)" if order_coverage['gaps'] else ' · lückenlos'
+        else:
+            coverage_text='noch kein bestätigter Berichtszeitraum'
+        st.caption('Abgedeckter Bestellbericht-Zeitraum: '+coverage_text)
+        st.caption('Letzte beobachtete Bestellposition: '+(overview['order_end'] or 'noch nicht bekannt'))
         st.caption(f"{len(states)} Payouts im Bestand · {sum(s != 'abgeschlossen' for s in business_payout_status.values())} noch nicht abgeschlossen")
     with right,st.container(border=True):
         st.subheader('Nächster Schritt')
@@ -913,9 +939,17 @@ with history:
             st.info('Noch keine Bestellberichte importiert.')
         else:
             logs['at']=core.pd.to_datetime(logs['at'],utc=True).dt.tz_convert('Europe/Berlin').dt.strftime('%d.%m.%Y %H:%M').fillna('nicht bekannt')
-            for col in ['start','end']:
-                logs[col]=core.pd.to_datetime(logs[col]).dt.strftime('%d.%m.%Y').fillna('nicht bekannt')
-            st.dataframe(logs[['filename','start','end','at','added','present','error']].rename(columns={'filename':'Bericht','start':'Von','end':'Bis','at':'Importdatum','added':'Neu','present':'Bereits vorhanden','error':'Prüfhinweis'}),hide_index=True,use_container_width=True)
+            for col in ['coverage_start','coverage_end','observed_start','observed_end']:
+                logs[col]=core.pd.to_datetime(logs[col]).dt.strftime('%d.%m.%Y').fillna('nicht bestätigt')
+            logs['status']=logs.status.map({'success':'Erfolgreich','failed':'Fehlgeschlagen','legacy_unverified':'Altbestand · Zeitraum unbestätigt'}).fillna(logs.status)
+            st.dataframe(logs[['filename','coverage_start','coverage_end','observed_start','observed_end','at','status','added','present','error']].rename(columns={
+                'filename':'Bericht','coverage_start':'Abgedeckt von','coverage_end':'Abgedeckt bis',
+                'observed_start':'Erste Bestellposition','observed_end':'Letzte Bestellposition','at':'Importzeitpunkt',
+                'status':'Importstatus','added':'Neu','present':'Bereits vorhanden','error':'Prüfhinweis'}),hide_index=True,use_container_width=True)
+            if overview['gaps']:
+                st.error('Nicht abgedeckte Zeiträume')
+                for gap in overview['gaps']:
+                    st.write('• '+gap)
     with lh:
         if not invoices:
             st.info('Noch keine Lexware-Entwürfe im Register.')

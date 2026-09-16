@@ -72,10 +72,10 @@ class OverlappingPayoutTests(unittest.TestCase):
     def test_71_known_orders_are_not_duplicated(self):
         orders=core.pd.concat([payout(transaction=f't{i}',order=f'o{i}') for i in range(71)])
         report=Upload(orders.to_csv(sep=';',index=False).encode('utf-8'),'orders.csv')
-        first=data_status.import_file(report,'orders')
+        first=data_status.import_file(report,'orders','2026-01-01','2026-12-31')
         self.assertEqual(first['added'],71)
         before=Path(core.ORDERS_DB_PATH).read_bytes()
-        second=data_status.import_file(report,'orders')
+        second=data_status.import_file(report,'orders','2026-01-01','2026-12-31')
         self.assertEqual((second['added'],second['present']),(0,71))
         self.assertEqual(before,Path(core.ORDERS_DB_PATH).read_bytes())
 
