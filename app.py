@@ -636,8 +636,9 @@ with home:
         st.write('**Letzter bekannter Payout**')
         st.write(latest['Payoutnummer']+' · '+latest['Datum / Zeitraum'] if latest else 'Noch keine Payouts importiert')
         last_success=order_coverage['last_success']
-        last_success_text=(studio_view.local_datetime(core.pd.Series([last_success.at])).iloc[0]
-                           if last_success is not None and last_success.at else 'noch kein bestätigter Import')
+        last_success_at=last_success['at'] if last_success is not None else None
+        last_success_text=(studio_view.local_datetime(core.pd.Series([last_success_at])).iloc[0]
+                           if last_success_at else 'noch kein bestätigter Import')
         st.caption('Letzter erfolgreicher Bestellbericht-Import: '+last_success_text)
         if order_coverage['start']:
             coverage_text=f"{data_status.display_date(order_coverage['start'])} – {data_status.display_date(order_coverage['end'])}"
