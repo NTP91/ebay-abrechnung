@@ -26,8 +26,6 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-os.environ.setdefault('PAYMENT_BACKEND', 'supabase')
-
 BERLIN = ZoneInfo('Europe/Berlin')
 
 
@@ -69,6 +67,7 @@ def already_ran_today(berlin_today):
 
 
 def main():
+    os.environ.setdefault('PAYMENT_BACKEND', 'supabase')
     event = os.environ.get('GITHUB_EVENT_NAME', 'workflow_dispatch')
     trigger = 'automatic' if event == 'schedule' else 'manual'
     print(f'Ausloeser: {event} -> ebay_sync trigger={trigger}')

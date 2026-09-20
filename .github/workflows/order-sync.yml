@@ -1,0 +1,70 @@
+name: Daily Order Sync
+
+on:
+  schedule:
+    # 22:15 Europe/Berlin, both DST offsets covered so no seasonal edits are
+    # needed (mirrors the payout-sync pattern). core.import_reports(kind='orders')
+    # is idempotent -- a duplicate trigger for the "wrong" season is a harmless
+    # no-op re-import, not a bookkeeping hazard, so no extra run-guard is needed.
+    - cron: '15 20 * * *'  # 22:15 CEST (UTC+2, summer)
+    - cron: '15 21 * * *'  # 22:15 CET  (UTC+1, winter)
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: order-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Preflight - verify required secrets are configured
+        env:
+          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          EBAY_CLIENT_ID: ${{ secrets.EBAY_CLIENT_ID }}
+          EBAY_CLIENT_SECRET: ${{ secrets.EBAY_CLIENT_SECRET }}
+          EBAY_RU_NAME: ${{ secrets.EBAY_RU_NAME }}
+          EBAY_REFRESH_TOKEN: ${{ secrets.EBAY_REFRESH_TOKEN }}
+        run: |
+          missing=""
+          for name in SUPABASE_PROJECT_REF SUPABASE_ACCESS_TOKEN EBAY_CLIENT_ID EBAY_CLIENT_SECRET EBAY_RU_NAME EBAY_REFRESH_TOKEN; do
+            value="${!name}"
+            if [ -z "$value" ]; then
+              missing="$missing $name"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Fehlende Repository Secrets:$missing"
+            exit 1
+          fi
+          echo "Alle benoetigten Secrets sind konfiguriert."
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install "pandas>=2.2,<3" "requests>=2.32,<3" "filelock>=3.16,<4" "cryptography>=43,<47"
+
+      - name: Run daily order sync
+        env:
+          PAYMENT_BACKEND: supabase
+          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          EBAY_CLIENT_ID: ${{ secrets.EBAY_CLIENT_ID }}
+          EBAY_CLIENT_SECRET: ${{ secrets.EBAY_CLIENT_SECRET }}
+          EBAY_RU_NAME: ${{ secrets.EBAY_RU_NAME }}
+          EBAY_REFRESH_TOKEN: ${{ secrets.EBAY_REFRESH_TOKEN }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: python scripts/run_daily_order_sync.py
