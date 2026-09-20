@@ -9,6 +9,19 @@ import api_holds
 
 FIELDS = ('reviewed_at', 'paid_at', 'received_at', 'closed_at')
 
+# Additive historical marker: a documented payment made without ever receiving/
+# reviewing a partner invoice (e.g. a proven pre-automation payout). Deliberately
+# kept out of FIELDS/confirm()'s normal action set -- it must never be set by
+# faking reviewed_at, and normal review/payment confirmations stay untouched.
+PAID_WITHOUT_INVOICE = 'paid_without_invoice_at'
+
+
+def ensure_schema(db):
+    """Add the paid_without_invoice_at column to an existing position_workflow table."""
+    columns = {row[1] for row in db.execute('PRAGMA table_info(position_workflow)')}
+    if PAID_WITHOUT_INVOICE not in columns:
+        db.execute(f'ALTER TABLE position_workflow ADD COLUMN {PAID_WITHOUT_INVOICE} TEXT')
+
 
 def position_key(row):
     values = [str(row[k]) for k in ('Auszahlung Nr.', 'Transaktionsnummer', 'Bestellnummer', 'Artikelnummer', 'Art')]
@@ -25,6 +38,7 @@ def positions(master=None, states=None):
     if master.empty:
         return master.copy()
     with core.ledger() as db:
+        ensure_schema(db)
         saved = {r['position_key']: dict(r) for r in db.execute('SELECT * FROM position_workflow')}
         snapshots = {r['id']: json.loads(r['snapshot']) for r in db.execute('SELECT id,snapshot FROM payouts WHERE snapshot IS NOT NULL AND snapshot != ""')}
     transport = {r.Auszahlung: r for r in states.itertuples()}
@@ -39,6 +53,7 @@ def positions(master=None, states=None):
     for _, row in result.iterrows():
         stored = saved.get(row.position_key, {})
         record = {field: stored.get(field) or '' for field in FIELDS}
+        record[PAID_WITHOUT_INVOICE] = stored.get(PAID_WITHOUT_INVOICE) or ''
         state = transport.get(row['Auszahlung Nr.'])
         transferred = bool(state is not None and state.Entwurf and row.Gruppe == 'Gruppe B' and row.Art == 'Bestellung' and row['Erlös_Brutto'] > 0)
         if transferred and row['Auszahlung Nr.'] in snapshots:
@@ -60,6 +75,8 @@ def positions(master=None, states=None):
                       else 'Erstattung neutralisiert Verkauf · separat zu klären')
         elif not valid:
             status = 'Prüfung erforderlich'
+        elif record[PAID_WITHOUT_INVOICE] and not record['reviewed_at']:
+            status = 'bezahlt · Rechnung fehlt'
         elif record['paid_at'] or record['received_at']:
             status = 'teilweise bezahlt / erhalten'
         elif record['reviewed_at']:
@@ -71,10 +88,11 @@ def positions(master=None, states=None):
         record.update(Bearbeitungsstatus=status, Lexware_uebertragen=transferred,
                       API_Korrekturfall='Geschützter Korrekturfall · nachträglicher Hold' if correction else '',
                       Partnerrechnung='geprüft' if record['reviewed_at'] else 'noch nicht geprüft',
-                      Partnerzahlung='bezahlt' if record['paid_at'] else 'offen',
+                      Partnerzahlung='bezahlt' if (record['paid_at'] or record[PAID_WITHOUT_INVOICE]) else 'offen',
                       Evelyn_Zahlung=('erhalten' if record['received_at'] else 'offen') if row.Gruppe == 'Gruppe B' else 'nicht zutreffend',
                       Quellenpruefung='Quelldaten seit Bestätigung verändert' if source_changed else '',
-                      partner_ready=bool(valid and not neutralized and not record['closed_at'] and not record['paid_at'] and row.Art=='Bestellung' and row['Erlös_Brutto'] > 0))
+                      partner_ready=bool(valid and not neutralized and not record['closed_at'] and not record['paid_at']
+                                          and not record[PAID_WITHOUT_INVOICE] and row.Art=='Bestellung' and row['Erlös_Brutto'] > 0))
         records.append(record)
     return pd.concat([result.reset_index(drop=True), pd.DataFrame(records)], axis=1)
 
@@ -150,6 +168,7 @@ def confirm(keys, action, event_date, expected_sources=None, invoice_id=None, ac
             raise ValueError('Abrechnungsdaten verändert. Bitte erneut prüfen.')
         active_holds = api_holds.active(api_holds.load(Path(core.PAYOUTS_DB_PATH).parent))
         with core.ledger() as db:
+            ensure_schema(db)
             db.execute('BEGIN IMMEDIATE')
             if action=='review':
                 import partner_invoices
@@ -170,6 +189,8 @@ def confirm(keys, action, event_date, expected_sources=None, invoice_id=None, ac
                 elif action == 'partner_paid':
                     if not saved['reviewed_at'] or row.Art != 'Bestellung':
                         raise ValueError('Zuerst die Partnerrechnung prüfen; Erstattungen separat erledigen.')
+                    if saved.get(PAID_WITHOUT_INVOICE):
+                        raise ValueError('Position bereits historisch ohne Rechnung bezahlt; keine zweite Zahlung.')
                     field = 'paid_at'
                 elif action == 'evelyn_received':
                     if row.Gruppe != 'Gruppe B' or not row.Lexware_uebertragen:
@@ -188,8 +209,59 @@ def confirm(keys, action, event_date, expected_sources=None, invoice_id=None, ac
                         saved['received_at'] = value.isoformat()
                 if saved['reviewed_at'] and saved['paid_at'] and (row.Gruppe=='Gruppe A' or (saved['received_at'] and row.Lexware_uebertragen)):
                     saved['closed_at'] = max(saved['reviewed_at'], saved['paid_at'], saved['received_at'] or '')
-                db.execute('INSERT OR REPLACE INTO position_workflow(position_key,reviewed_at,paid_at,received_at,closed_at,source) VALUES(?,?,?,?,?,?)',
-                           (row.position_key, *(saved[f] for f in FIELDS), source_snapshot(row)))
+                db.execute('INSERT OR REPLACE INTO position_workflow(position_key,reviewed_at,paid_at,received_at,closed_at,source,paid_without_invoice_at) VALUES(?,?,?,?,?,?,?)',
+                           (row.position_key, *(saved[f] for f in FIELDS), source_snapshot(row), saved.get(PAID_WITHOUT_INVOICE)))
                 proof=f'Eingangsrechnung {invoice_id}; bestätigt durch {actor}' if action=='review' else 'manuell durch Nutzer'
                 core.audit(db, row['Auszahlung Nr.'], f"Positionsbestätigung {action}: {row.position_key}; Datum {value.isoformat()}; {proof}")
             db.commit()
+
+
+def mark_paid_without_invoice(keys, event_date, partner, rounds, payout_numbers, actor, note):
+    """Document a historical payment made without ever receiving/reviewing a
+    partner invoice (e.g. a proven pre-automation payout). Strictly additive:
+    never sets reviewed_at/paid_at/received_at/closed_at and never runs through
+    confirm()'s normal action set. Re-verifies the exact scope (partner, Gruppe-B
+    rounds, payout numbers) against fresh live data and aborts without writing
+    on any mismatch."""
+    keys = set(keys)
+    if not keys:
+        raise ValueError('Keine Positionen ausgewählt.')
+    value = date.fromisoformat(str(event_date))
+    if value > date.today():
+        raise ValueError('Ein zukünftiges Zahlungsdatum ist nicht zulässig.')
+    current = positions()
+    chosen = current[current.position_key.isin(keys)] if not current.empty else current
+    if len(chosen) != len(keys):
+        raise ValueError('Positionen nicht mehr eindeutig vorhanden. Ansicht aktualisieren.')
+    if (chosen.Partner != partner).any():
+        raise ValueError(f'Nicht alle Positionen gehören zu Partner {partner}.')
+    if (chosen.Art != 'Bestellung').any():
+        raise ValueError('Nur Bestellpositionen können ohne Rechnung als bezahlt markiert werden.')
+    payout_numbers = set(payout_numbers)
+    if not chosen['Auszahlung Nr.'].isin(payout_numbers).all():
+        raise ValueError('Positionen enthalten Payoutnummern außerhalb der freigegebenen Liste.')
+    rounds = set(rounds)
+    with core.ledger() as db:
+        ensure_schema(db)
+        round_map = {r['position_key']: r['round_id'] for r in db.execute(
+            'SELECT position_key, round_id FROM group_b_round_positions')}
+        if any(round_map.get(key) not in rounds for key in keys):
+            raise ValueError('Positionen enthalten Runden außerhalb der freigegebenen Liste.')
+        db.execute('BEGIN IMMEDIATE')
+        for _, row in chosen.iterrows():
+            old = db.execute('SELECT * FROM position_workflow WHERE position_key=?', (row.position_key,)).fetchone()
+            saved = dict(old) if old else dict.fromkeys((*FIELDS, PAID_WITHOUT_INVOICE))
+            if saved.get('closed_at'):
+                raise ValueError('Position bereits abgeschlossen; keine erneute Bearbeitung.')
+            if saved.get('paid_at'):
+                raise ValueError('Position bereits regulär als bezahlt bestätigt; keine zweite Zahlungsmarkierung.')
+            if saved.get(PAID_WITHOUT_INVOICE):
+                raise ValueError('Position bereits historisch ohne Rechnung als bezahlt markiert.')
+            db.execute(
+                'INSERT OR REPLACE INTO position_workflow(position_key,reviewed_at,paid_at,received_at,closed_at,source,paid_without_invoice_at) VALUES(?,?,?,?,?,?,?)',
+                (row.position_key, saved.get('reviewed_at'), saved.get('paid_at'), saved.get('received_at'),
+                 saved.get('closed_at'), source_snapshot(row), value.isoformat()))
+        for payout_id in sorted(payout_numbers):
+            core.audit(db, payout_id, note)
+        db.commit()
+    return len(chosen)
