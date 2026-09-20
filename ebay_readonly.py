@@ -69,6 +69,11 @@ class Client:
         if not 200 <= status < 300:
             label = 'OAuth-Tokenfehler' if oauth else 'Berechtigung/Scope oder API-Zugangsanforderung fehlt' if status == 403 else 'API-Fehler'
             raise EbayError(f'{label} (HTTP {status}).')
+        if status == 204:
+            # Documented eBay Finances API behaviour for an empty result set (e.g. no
+            # payouts in the queried window) -- not an error. pages() reads total==0
+            # as zero items, without ever calling response.json() on an empty body.
+            return {'total': 0}
         try:
             value = response.json()
             if not isinstance(value, dict):
