@@ -1,16 +1,25 @@
-"""Read-only planning simulation for the neutral post-2026-002 settlement round
-(2026-003+). Never writes anything -- no group_b_rounds/group_b_round_positions
-insert, no status field, no Excel/Lexware call. Every number here is derived
-fresh from position_workflow.positions() and the existing historical round
+"""Planning simulation and idempotent creation for the neutral post-2026-002
+settlement round (2026-003+).
+
+plan_round() never writes anything -- no group_b_rounds/group_b_round_positions
+insert, no status field, no Excel/Lexware call. Every number is derived fresh
+from position_workflow.positions() and the existing historical round
 assignment table at call time, exactly the sources the rest of the app already
 treats as authoritative.
 
-Explicitly independent of the historical Gruppe-B/Lexware model: no RE0090
-lookup, no has_re0090 gate, no Patrick-collects-then-invoices-Evelyn export
-mode, no evelyn_invoice_id/evelyn_document_number. Rounds 001/002 keep that
-model unchanged; this module only ever reasons about 003+.
+commit_round() is the one function in this module that writes: it reuses
+group_b_rounds._insert_round()'s exact hash-locked insert/idempotency pattern
+and the same group_b_rounds/group_b_round_positions tables - no new schema, no
+'GB-' id, no RE0090/Lexware dependency, and no touch of an existing round's
+rows (a real INSERT OR REPLACE never happens for position_key values already
+present - the table's PRIMARY KEY on position_key makes a second assignment a
+hard error, not a silent overwrite).
+
+Explicitly independent of the historical Gruppe-B/Lexware model throughout:
+no RE0090 lookup, no has_re0090 gate, no Patrick-collects-then-invoices-Evelyn
+export mode, no evelyn_invoice_id/evelyn_document_number. Rounds 001/002 keep
+that model unchanged; this module only ever reasons about 003+.
 """
-import sqlite3
 from datetime import datetime, time, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -123,17 +132,14 @@ def plan_round(now=None, base_cut=None, open_round_ids=(), business=None, payout
     business = position_workflow.positions() if business is None else business
     payouts = core.read_master(core.PAYOUTS_DB_PATH) if payouts is None else payouts
 
-    own_db = db is None
-    if own_db:
-        import supabase_store
-        raw, _ = supabase_store.get('state/settlement.sqlite3')
-        db = supabase_store.sqlite_from_bytes(raw)
-        db.row_factory = sqlite3.Row
-    try:
+    if db is None:
+        # core.ledger() already abstracts local-file vs. Supabase; a pure SELECT
+        # here never changes the connection's bytes, so its own before/after
+        # diff on exit correctly skips any write-back.
+        with core.ledger() as own_db:
+            historical_assignment = _historical_round_positions(own_db)
+    else:
         historical_assignment = _historical_round_positions(db)
-    finally:
-        if own_db:
-            db.close()
 
     payout_dates = {}
     if not payouts.empty:
@@ -155,17 +161,29 @@ def plan_round(now=None, base_cut=None, open_round_ids=(), business=None, payout
     # 001/002 model (rule 2: always final, never a "2026-00x" round id).
     earliest_neutral_start = round_for_sequence(FIRST_NEUTRAL_SEQUENCE, base_cut)['start']
 
+    # core.load_master_data() (position_workflow.positions()'s own source)
+    # already drops every row without an 'Auszahlung Nr.' before business ever
+    # sees it - Gruppe A and Gruppe B alike, no exception. So a "no payout yet"
+    # order structurally never reaches the loop below; it is found instead via
+    # the same existing open-transaction report the rest of the app uses.
+    import studio_view
+    open_orders_from_master = [dict(Bestellnummer=r['Bestellnummer'], Partner=r['Partner'])
+                                for _, r in studio_view.open_positions(payouts).iterrows()]
+
     included = []
     excluded = {
         'historisch_zugeordnet': [],       # already tied to a specific round (001/002 or any earlier 003+ round)
-        'kein_payout': [],                 # no 'Auszahlung Nr.' yet - order without payout, stays outside every round
+        # no real eBay payout yet - stays outside every round (Gruppe A and B alike).
+        # Starts with the open-transaction report's own findings; the defensive
+        # guard below appends to this same list if a `business` row ever slips
+        # through load_master_data's filter without a payout.
+        'kein_payout': list(open_orders_from_master),
         'bereits_bezahlt_abgeschlossen': [],  # closed_at / paid_at / paid_without_invoice_at already set
         'ungeklaerte_sperre': [],          # Prüfhinweis / Quellenpruefung / API-Hold, unrelated to partner recognition
         'unbekannter_partner': [],         # SKU prefix not (yet) a confirmed partner
         'aeltere_offene_runde': [],        # payout date belongs to an older, still-open 003+ round instead
     }
     unknown_prefixes = {}
-    orders_without_payout = []
 
     for _, row in business.iterrows():
         if row['Art'] != 'Bestellung':
@@ -173,9 +191,12 @@ def plan_round(now=None, base_cut=None, open_round_ids=(), business=None, payout
         payout_id = row['Auszahlung Nr.']
         position_key = row['position_key']
 
+        # payout_id is always non-empty here (see the studio_view.open_positions
+        # note above) - kept as a defensive, never-expected-to-fire guard so a
+        # future change to load_master_data's filtering can never silently
+        # let an unpaid order through.
         if not payout_id:
-            orders_without_payout.append(dict(Bestellnummer=row['Bestellnummer'], Partner=row['Partner']))
-            excluded['kein_payout'].append(position_key)
+            excluded['kein_payout'].append(dict(position_key=position_key, Bestellnummer=row['Bestellnummer']))
             continue
 
         if position_key in historical_assignment:
@@ -247,6 +268,87 @@ def plan_round(now=None, base_cut=None, open_round_ids=(), business=None, payout
         cut_passed=cut_passed, next_round_required=cut_passed,
         derived_status=derived_status,
         partners=partners_view, included=included, excluded=excluded,
-        unknown_prefixes=unknown_prefixes, orders_without_payout=orders_without_payout,
+        unknown_prefixes=unknown_prefixes, orders_without_payout=excluded['kein_payout'],
         total_positions=total_positions, total_claim=total_claim,
     )
+
+
+def commit_round(now=None, base_cut=None, open_round_ids=()):
+    """Idempotently create the neutral round plan_round() reports as current.
+
+    True no-op on repeat: once a round exists, its own assigned positions
+    become 'historisch_zugeordnet' from plan_round()'s own point of view, so
+    re-planning after creation would (correctly) describe a *smaller* round
+    than the one just created - comparing that against the original insert's
+    snapshot would look like drift, not stability. So existence is checked
+    FIRST, directly against group_b_rounds, before any (re-)planning happens
+    at all: if the round already exists, this returns immediately with
+    `created=False` and does not touch plan_round or group_b_round_positions
+    again. Only a round that does not exist yet is actually planned and
+    inserted, via group_b_rounds._insert_round() - the same hash-locked
+    insert this module deliberately did not reimplement.
+
+    Every accepted position already went through plan_round()'s payout/
+    partner/history/lock checks identically for Gruppe A and Gruppe B - there
+    is no group-specific branch anywhere in this path.
+
+    Returns (round_id, created, plan_or_None). plan is None when created is
+    False because the round already existed (no re-planning was done).
+    """
+    import group_b_rounds
+
+    now_berlin = (now or datetime.now(BERLIN)).astimezone(BERLIN)
+    base_cut_value = base_cut or default_base_cut(now_berlin)
+    sequence = current_sequence(now_berlin, base_cut_value)
+    round_id_value = round_id(FIRST_NEUTRAL_YEAR, sequence)
+
+    with core.ledger() as db:
+        group_b_rounds.initialize(db)
+        if db.execute('SELECT 1 FROM group_b_rounds WHERE id=?', (round_id_value,)).fetchone():
+            return round_id_value, False, None
+
+    # Gather everything read-only, outside any lock: position_workflow.positions()
+    # and the ledger() read below each open their own short-lived core.ledger()
+    # internally, and core.ledger()'s local FileLock is not reentrant - nesting
+    # a second ledger() call inside an already-open one deadlocks. Only the
+    # write below needs the lock held.
+    business = position_workflow.positions()
+    payouts = core.read_master(core.PAYOUTS_DB_PATH)
+    with core.ledger() as read_db:
+        plan = plan_round(now=now, base_cut=base_cut, open_round_ids=open_round_ids,
+                           business=business, payouts=payouts, db=read_db)
+    accepted_keys = {item['position_key'] for item in plan['included']}
+    if not accepted_keys:
+        # An empty business frame (e.g. no eligible position at all) carries
+        # no columns to filter by - and there is nothing to assign anyway.
+        positions = business.iloc[0:0]
+    else:
+        positions = business[business['position_key'].isin(accepted_keys)].copy()
+    if len(positions) != len(accepted_keys):
+        raise ValueError('Positionsbestand hat sich seit der Planung verändert; Anlage abgebrochen.')
+    snapshot = {
+        'source': 'neutral_weekly_round',
+        'window_start': plan['start'].isoformat(),
+        'window_end': plan['end'].isoformat(),
+        'payouts': sorted({item['Payout'] for item in plan['included']}),
+        'positions': sorted(position_workflow.source_snapshot(row) for _, row in positions.iterrows()),
+    }
+
+    with core.ledger() as db:
+        group_b_rounds.initialize(db)
+        db.execute('BEGIN IMMEDIATE')
+        # Re-check both possibilities that could have changed since the reads
+        # above (TOCTOU): the round itself may have been created concurrently,
+        # or one of the accepted positions may already have been assigned to
+        # any round (historical or a concurrently created neutral one).
+        if db.execute('SELECT 1 FROM group_b_rounds WHERE id=?', (plan['round_id'],)).fetchone():
+            return plan['round_id'], False, None
+        already_assigned = accepted_keys & set(_historical_round_positions(db))
+        if already_assigned:
+            raise ValueError('Positionen wurden seit der Planung bereits einer Runde zugeordnet; '
+                              f'Anlage abgebrochen: {sorted(already_assigned)[:5]}')
+        created = group_b_rounds._insert_round(
+            db, plan['round_id'], plan['sequence'], 'neutral_weekly', None, None,
+            plan['total_claim'], snapshot, positions, {})
+        db.commit()
+    return plan['round_id'], created, plan
