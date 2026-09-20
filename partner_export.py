@@ -37,11 +37,15 @@ CENT = Decimal('.01')
 # (even empty) so the export shape never depends on whether such a case exists.
 DISPLAY_NAMES = {'Rechnung': 'Rechnung', 'Gutschriften': 'Erstattungen-Abzüge',
                   'HistorischeGutschriften': 'Offene Rückforderungen'}
-# GESAMTABRECHNUNG (Rechnung sheet only): sales basis, partner discount, final
-# sales amount - never netted against Gutschriften, which stays its own,
-# separately settled sheet with its own closing line. Shared by
-# _closing_statement_rows and _fill_sheet so their row math can never drift.
-FINALE_LINE_COUNT = 3
+# GESAMTABRECHNUNG (Rechnung sheet only): sales basis, partner discount, regular
+# claim, and the already-known refunds/deductions from Gutschriften (Tab 2,
+# refunds on a not-yet-paid sale) netted into one FINALER RECHNUNGSBETRAG - the
+# exact amount the partner may invoice, so nobody has to subtract Tab 1 and
+# Tab 2 by hand. HistorischeGutschriften (Tab 3: refunds on a sale already paid
+# out in an earlier run) is a separate, not-yet-settled repayment case and is
+# deliberately never part of this sum. Shared by _closing_statement_rows and
+# _fill_sheet so their row math can never drift.
+FINALE_LINE_COUNT = 4
 MONTHS = {
     'jan': 1, 'feb': 2, 'mär': 3, 'märz': 3, 'mar': 3, 'mrz': 3,
     'apr': 4, 'mai': 5, 'may': 5, 'jun': 6, 'jul': 7, 'aug': 8,
@@ -229,7 +233,13 @@ def prepare_partner_export(rows, payouts=None, orders=None, statement_type='part
             # Default False - callers that never computed this (Gruppe A,
             # group_b_evelyn, ad-hoc slices) keep the original single-bucket
             # behavior unchanged. Fall A nets internally as before.
-            item['_paid_out'] = bool(row.get('Bereits_An_Partner_Bezahlt', False))
+            # NaN-safe: a row sliced out of studio_view.partner_rows()'s
+            # concatenated frame (e.g. a Gruppe-A refund, which never gets
+            # this column set) reads back as float('nan'), and bool(nan) is
+            # True in Python - the x==x check below is False only for NaN,
+            # so an unset value still defaults to False as documented above.
+            paid_out_value = row.get('Bereits_An_Partner_Bezahlt', False)
+            item['_paid_out'] = bool(paid_out_value) and paid_out_value == paid_out_value
             bucket = 'HistorischeGutschriften' if item['_paid_out'] else 'Gutschriften'
         else:
             item['_paid_out'] = False
@@ -418,21 +428,29 @@ def _fill_sheet(xml, model, name):
     row_from(27, layout['note_row'], {'A': note})
     if name == 'Rechnung':
         # Closing statement for the merchant: only already-computed
-        # calculate_sheet totals, nothing recalculated with a new rule.
-        # Sales and refunds are separate documents settled separately (Variant
-        # B): this sheet's final amount is the sales total only, never netted
-        # against Gutschriften - that sheet carries its own closing line.
+        # calculate_sheet totals, nothing recalculated with a new rule. The
+        # regular claim is netted with Gutschriften (Tab 2: refunds already
+        # known before this claim is paid) so FINALER RECHNUNGSBETRAG is the
+        # one number the partner may actually invoice - never with
+        # HistorischeGutschriften (Tab 3), which is its own, not-yet-settled
+        # repayment case and must never reduce a still-open claim.
+        gutschriften_totals = model['totals']['Gutschriften']
+        final_amount = rechnung_totals['gross'] + gutschriften_totals['gross']
         row_from(9, layout['section_header_row'], {'A': 'GESAMTABRECHNUNG'})
         rate_pct = f"{model['rate']*100:.1f}".replace('.', ',') + ' %'
         finale_lines = [
             ('Verkaufs-/Abrechnungsbasis brutto', rechnung_totals['ebay']),
             (f'abzgl. Partnerabzug {rate_pct} auf Netto', -rechnung_totals['discount']),
             ('Regulärer Abrechnungsbetrag', rechnung_totals['gross']),
+            ('bereits berücksichtigte Erstattungen/Abzüge (siehe Tab „Erstattungen-Abzüge")', gutschriften_totals['gross']),
         ]
         assert len(finale_lines) == FINALE_LINE_COUNT
         for offset, (label, value) in enumerate(finale_lines):
             row_from(19, layout['finale_start'] + offset, {'A': label, 'K': value})
-        row_from(23, layout['final_row'], {'A': 'FINALER RECHNUNGSBETRAG', 'K': rechnung_totals['gross']})
+        regular_row = layout['finale_start'] + 2
+        refunds_row = layout['finale_start'] + 3
+        row_from(23, layout['final_row'], {'A': 'FINALER RECHNUNGSBETRAG', 'K': final_amount},
+                 {'K': f'K{regular_row}+K{refunds_row}'})
     # Formula-only calculation rows, outside the print area and hidden. This
     # keeps exactly eleven visible columns and avoids fragile array formulas.
     # G: undiscounted net; H: rounded line net; I: running net; J: running VAT.

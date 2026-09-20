@@ -286,30 +286,103 @@ class PartnerExportTests(unittest.TestCase):
                       'Partnerwirkung:','Status:'):
             self.assertNotIn(label,refund_extra)
 
-    def test_finale_amount_never_nets_refunds(self):
-        """GESAMTABRECHNUNG on the Rechnung sheet is that sheet's own closing
-        amount - the sales invoice. Gutschriften is a separate document with
-        its own closing line (asserted elsewhere) and must never be blended
-        into this sheet's final figure, even though a real refund exists."""
+    def test_finale_amount_nets_gutschriften_once_and_never_historical(self):
+        """GESAMTABRECHNUNG on the Rechnung sheet must show the one amount the
+        partner may actually invoice: the regular claim minus refunds/deductions
+        already known before payment (Gutschriften, Tab 2) - so nobody has to
+        subtract Tab 1 and Tab 2 by hand. HistorischeGutschriften (Tab 3: a
+        refund on a sale already paid out earlier) is a separate, not-yet-
+        settled repayment case and must never reduce this figure."""
         master = self.seed(refund=True)
         model = prepare_partner_export(master)
         self.assertLess(model['totals']['Gutschriften']['gross'], Decimal('0'))  # a real refund is present
 
         book = load_workbook(io.BytesIO(export_partner_excel(master)), data_only=True)
+        formula_book = load_workbook(io.BytesIO(export_partner_excel(master)), data_only=False)
         rechnung = book[DISPLAY_NAMES['Rechnung']]
         layout = _closing_statement_rows('Rechnung', len(model['Rechnung']))
         regular_row = layout['finale_start'] + 2  # third finale line: 'Regulärer Abrechnungsbetrag'
+        refunds_row = layout['finale_start'] + 3  # fourth finale line: already-considered refunds/deductions
         self.assertEqual(rechnung.cell(row=regular_row, column=1).value, 'Regulärer Abrechnungsbetrag')
         regular_value = Decimal(str(rechnung.cell(row=regular_row, column=11).value))
+        refunds_label = rechnung.cell(row=refunds_row, column=1).value
+        self.assertIn('bereits berücksichtigte Erstattungen', refunds_label)
+        refunds_value = Decimal(str(rechnung.cell(row=refunds_row, column=11).value))
+        self.assertEqual(refunds_value, model['totals']['Gutschriften']['gross'])
         self.assertEqual(rechnung.cell(row=layout['final_row'], column=1).value, 'FINALER RECHNUNGSBETRAG')
         final_value = Decimal(str(rechnung.cell(row=layout['final_row'], column=11).value))
 
-        self.assertEqual(final_value, regular_value)
+        self.assertEqual(final_value, regular_value + refunds_value)
+        self.assertEqual(final_value, model['totals']['Rechnung']['gross'] + model['totals']['Gutschriften']['gross'])
+        self.assertNotEqual(final_value, model['totals']['Rechnung']['gross'])
+        formula = formula_book[DISPLAY_NAMES['Rechnung']].cell(row=layout['final_row'], column=11).value
+        self.assertEqual(formula, f'=K{regular_row}+K{refunds_row}')
+
+    def test_finale_amount_ignores_historical_already_paid_refunds(self):
+        """A refund whose original sale was already paid out to the partner in
+        an earlier run (Fall B, Tab 3) must never reduce the current claim -
+        only Tab 2 (refund known before payment) is netted."""
+        master = self.seed(refund=True)
+        master = master.copy()
+        master.loc[master.Art == 'Erstattung', 'Bereits_An_Partner_Bezahlt'] = True
+        model = prepare_partner_export(master)
+        self.assertEqual(len(model['Gutschriften']), 0)
+        self.assertEqual(len(model['HistorischeGutschriften']), 1)
+
+        book = load_workbook(io.BytesIO(export_partner_excel(master)), data_only=True)
+        rechnung = book[DISPLAY_NAMES['Rechnung']]
+        layout = _closing_statement_rows('Rechnung', len(model['Rechnung']))
+        final_value = Decimal(str(rechnung.cell(row=layout['final_row'], column=11).value))
+        self.assertEqual(final_value, model['totals']['Rechnung']['gross'])  # unaffected by the historical refund
+
+    def test_finale_amount_without_any_refund_equals_regular_amount(self):
+        """No refund at all -> Gutschriften is empty, so the final amount is
+        exactly the regular claim (0 EUR netted)."""
+        master = self.seed(refund=False)
+        model = prepare_partner_export(master)
+        self.assertEqual(model['totals']['Gutschriften']['gross'], Decimal('0.00'))
+
+        book = load_workbook(io.BytesIO(export_partner_excel(master)), data_only=True)
+        rechnung = book[DISPLAY_NAMES['Rechnung']]
+        layout = _closing_statement_rows('Rechnung', len(model['Rechnung']))
+        final_value = Decimal(str(rechnung.cell(row=layout['final_row'], column=11).value))
         self.assertEqual(final_value, model['totals']['Rechnung']['gross'])
-        self.assertNotEqual(final_value, model['totals']['Rechnung']['gross'] + model['totals']['Gutschriften']['gross'])
-        finale_labels = [rechnung.cell(row=r, column=1).value
-                         for r in range(layout['finale_start'], layout['final_row'] + 1)]
-        self.assertFalse(any('Erstattung' in (label or '') for label in finale_labels))
+
+    def test_refund_never_appears_in_both_gutschriften_and_historical(self):
+        """A single refund is bucketed by exactly one if/else branch (Gutschriften
+        vs. HistorischeGutschriften per _paid_out) - never counted in both."""
+        for paid_out in (False, True):
+            with self.subTest(paid_out=paid_out):
+                master = self.seed(refund=True).copy()
+                master.loc[master.Art == 'Erstattung', 'Bereits_An_Partner_Bezahlt'] = paid_out
+                model = prepare_partner_export(master)
+                gutschrift_keys = {(item['order'], item['finance_id']) for item in model['Gutschriften']}
+                historical_keys = {(item['order'], item['finance_id']) for item in model['HistorischeGutschriften']}
+                self.assertEqual(gutschrift_keys & historical_keys, set())
+                self.assertEqual(len(model['Gutschriften']) + len(model['HistorischeGutschriften']), 1)
+                self.assertEqual(len(model['HistorischeGutschriften' if paid_out else 'Gutschriften']), 1)
+
+    def test_missing_paid_out_flag_defaults_to_not_historical_even_as_nan(self):
+        """A refund row sliced from a combined frame where the paid-out column
+        exists but is unset for this particular row (e.g. a Gruppe-A refund in
+        studio_view.partner_rows()'s concatenated output) reads back as NaN,
+        not a real bool - bool(nan) is True in Python, so this must not
+        silently misroute the refund into HistorischeGutschriften."""
+        master = self.seed(refund=True).copy()
+        master['Bereits_An_Partner_Bezahlt'] = float('nan')
+        model = prepare_partner_export(master)
+        self.assertEqual(len(model['Gutschriften']), 1)
+        self.assertEqual(len(model['HistorischeGutschriften']), 0)
+
+    def test_historical_mh_reference_regular_minus_refunds_equals_final(self):
+        """Documents the exact historical MH reference figures (regulärer
+        Rechnungsbetrag 5.062,98 EUR, bereits berücksichtigte Erstattungen/
+        Abzüge -763,24 EUR, FINALER RECHNUNGSBETRAG 4.299,74 EUR) as a fixed
+        regression pin for the closing-line arithmetic the code now performs
+        (Rechnung.gross + Gutschriften.gross)."""
+        regular = Decimal('5062.98')
+        refunds = Decimal('-763.24')
+        self.assertEqual(regular + refunds, Decimal('4299.74'))
 
     def test_header_payouts_period_and_counts_match_the_actual_positions(self):
         """Header (payout numbers, payout period, both sheets' position
