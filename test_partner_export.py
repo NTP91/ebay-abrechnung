@@ -5,16 +5,19 @@ import os
 import shutil
 import tempfile
 import unittest
+import zipfile
 from datetime import datetime
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
 from unittest.mock import patch
+from xml.etree import ElementTree as ET
 
 from openpyxl import load_workbook  # Independent read-only verification.
 
 import core
-from partner_export import export_partner_excel, prepare_partner_export, report_date, calculate_sheet, DISPLAY_NAMES, _closing_statement_rows
+from partner_export import (export_partner_excel, prepare_partner_export, report_date, calculate_sheet,
+                             DISPLAY_NAMES, _closing_statement_rows, format_euro, TAG)
 from test_recovery import payout
 
 
@@ -29,7 +32,8 @@ def reference_cents(value):
 def check_workbook(case, blob, rows, rate, recipient):
     book = load_workbook(io.BytesIO(blob), data_only=True)
     formula_book = load_workbook(io.BytesIO(blob), data_only=False)
-    case.assertEqual(book.sheetnames, [DISPLAY_NAMES['Rechnung'], DISPLAY_NAMES['Gutschriften'], DISPLAY_NAMES['HistorischeGutschriften']])
+    case.assertEqual(book.sheetnames, [DISPLAY_NAMES['Rechnung'], DISPLAY_NAMES['Gutschriften'],
+                                        DISPLAY_NAMES['HistorischeGutschriften'], 'Bestellnachweis', 'Payoutnachweis'])
     payout_ids = set(rows['Auszahlung Nr.'])
     for name, kind in [('Rechnung', 'Bestellung'), ('Gutschriften', 'Erstattung')]:
         expected = rows[rows.Art == kind]
@@ -301,12 +305,12 @@ class PartnerExportTests(unittest.TestCase):
         formula_book = load_workbook(io.BytesIO(export_partner_excel(master)), data_only=False)
         rechnung = book[DISPLAY_NAMES['Rechnung']]
         layout = _closing_statement_rows('Rechnung', len(model['Rechnung']))
-        regular_row = layout['finale_start'] + 2  # third finale line: 'Regulärer Abrechnungsbetrag'
-        refunds_row = layout['finale_start'] + 3  # fourth finale line: already-considered refunds/deductions
-        self.assertEqual(rechnung.cell(row=regular_row, column=1).value, 'Regulärer Abrechnungsbetrag')
+        regular_row = layout['finale_start'] + 2  # third finale line: 'Zwischensumme Verkäufe nach Rabatt'
+        refunds_row = layout['finale_start'] + 3  # fourth finale line: refunds/deductions of this settlement
+        self.assertEqual(rechnung.cell(row=regular_row, column=1).value, 'Zwischensumme Verkäufe nach Rabatt')
         regular_value = Decimal(str(rechnung.cell(row=regular_row, column=11).value))
         refunds_label = rechnung.cell(row=refunds_row, column=1).value
-        self.assertIn('bereits berücksichtigte Erstattungen', refunds_label)
+        self.assertIn('Erstattungen / Abzüge dieser Abrechnung', refunds_label)
         refunds_value = Decimal(str(rechnung.cell(row=refunds_row, column=11).value))
         self.assertEqual(refunds_value, model['totals']['Gutschriften']['gross'])
         self.assertEqual(rechnung.cell(row=layout['final_row'], column=1).value, 'FINALER RECHNUNGSBETRAG')
@@ -419,6 +423,157 @@ class PartnerExportTests(unittest.TestCase):
         self.assertEqual(rechnung['A12'].value, f'Reguläre Positionen: {len(sales)}')
         self.assertEqual(rechnung['G12'].value, f'Erstattungen / Abzüge: {len(refunds)}')
         self.assertEqual(gutschriften['A12'].value, f'Erstattungen: {len(refunds)}')
+
+    def test_subtotal_row_relabeled_and_distinct_from_final_amount(self):
+        """Tab 1's own sales-only subtotal must never read like the final
+        payable amount - it carries its own, clearly qualified label, while
+        FINALER RECHNUNGSBETRAG (further down, in the GESAMTABRECHNUNG block)
+        stays the one number a partner may actually invoice."""
+        master = self.seed(refund=True)
+        model = prepare_partner_export(master)
+        book = load_workbook(io.BytesIO(export_partner_excel(master)), data_only=True)
+        rechnung = book[DISPLAY_NAMES['Rechnung']]
+        layout = _closing_statement_rows('Rechnung', len(model['Rechnung']))
+        subtotal_row = layout['start'] + 4  # offset 4 = 'gross' in the totals block
+        self.assertEqual(rechnung.cell(row=subtotal_row, column=1).value,
+                         'Zwischensumme Verkäufe nach Rabatt (vor Erstattungen/Abzügen)')
+        subtotal_value = Decimal(str(rechnung.cell(row=subtotal_row, column=11).value))
+        self.assertEqual(subtotal_value, model['totals']['Rechnung']['gross'])
+        final_value = Decimal(str(rechnung.cell(row=layout['final_row'], column=11).value))
+        # A real refund is present, so the two must genuinely differ - the
+        # exact scenario a partner could otherwise misread.
+        self.assertNotEqual(subtotal_value, final_value)
+        self.assertEqual(rechnung.cell(row=layout['final_row'], column=1).value, 'FINALER RECHNUNGSBETRAG')
+
+    def test_bestellnachweis_and_payoutnachweis_present_and_partner_scoped(self):
+        """New Bestellnachweis/Payoutnachweis tabs: purely evidentiary (no
+        formulas, no recomputed amounts), scoped to exactly this partner's
+        export - never a foreign partner's rows, never global order data."""
+        master = self.seed(sku='NB / TEST', refund=True)
+        model = prepare_partner_export(master)
+        book = load_workbook(io.BytesIO(export_partner_excel(master)), data_only=True)
+        self.assertIn('Bestellnachweis', book.sheetnames)
+        self.assertIn('Payoutnachweis', book.sheetnames)
+
+        orders_sheet = book['Bestellnachweis']
+        self.assertEqual([cell.value for cell in orders_sheet[3]][:5],
+                         ['Bestellnummer', 'Produkttitel', 'SKU', 'Partner', 'Transaktionskennung'])
+        expected_items = model['Rechnung'] + model['Gutschriften'] + model['HistorischeGutschriften']
+        order_rows = [[cell.value for cell in row] for row in orders_sheet.iter_rows(min_row=4)]
+        self.assertEqual(len(order_rows), len(expected_items))
+        for row, item in zip(order_rows, expected_items):
+            self.assertEqual(row[0], item['order'])
+            self.assertEqual(row[2], item['sku'])
+            self.assertEqual(row[3], model['partner'])  # only this partner, never a foreign one
+        self.assertTrue(all(row[3] == model['partner'] for row in order_rows))
+
+        payouts_sheet = book['Payoutnachweis']
+        self.assertEqual([cell.value for cell in payouts_sheet[3]][:5],
+                         ['Bestellnummer', 'SKU', 'eBay-Payout Nr.', 'Payoutdatum', 'Ausgezahlter Betrag (eBay, brutto)'])
+        payout_rows = [[cell.value for cell in row] for row in payouts_sheet.iter_rows(min_row=4)]
+        self.assertEqual(len(payout_rows), len(expected_items))
+        for row, item in zip(payout_rows, expected_items):
+            self.assertEqual(row[0], item['order'])
+            self.assertEqual(row[2], item['payout_id'])
+        # No new amount is computed - every payout amount is the exact same
+        # eBay control figure already used elsewhere in the export.
+        for row, item in zip(payout_rows, expected_items):
+            self.assertIn(format_euro(item['ebay']), row[4])
+
+    def test_evidence_tabs_never_include_a_foreign_partners_positions(self):
+        """A second partner's data must never leak into this partner's
+        Bestellnachweis/Payoutnachweis - prepare_partner_export already
+        requires exactly one partner per call, so this is a structural
+        guarantee, not a filter that could be forgotten."""
+        nb_master = self.seed(sku='NB / TEST')
+        foreign = nb_master.copy()
+        foreign['Partner'] = 'OTHER'
+        mixed = core.pd.concat([nb_master, foreign], ignore_index=True)
+        with self.assertRaises(ValueError):
+            export_partner_excel(mixed)
+
+    def test_sheet_order_matches_manuscript(self):
+        master = self.seed(refund=True)
+        book = load_workbook(io.BytesIO(export_partner_excel(master)))
+        self.assertEqual(book.sheetnames, ['Rechnung', 'Erstattungen-Abzüge', 'Offene Rückforderungen',
+                                            'Bestellnachweis', 'Payoutnachweis'])
+
+    def test_finalized_snapshot_bytes_stay_byte_identical_across_new_export_version(self):
+        """A snapshot finalized before this export-structure change (raw
+        bytes stored as-is) is never regenerated - partner_snapshot.final_
+        file() only ever returns what is already stored, regardless of how
+        export_partner_excel() has since evolved."""
+        import hashlib
+        import partner_snapshot
+        master = self.seed(sku='PP / TEST')
+        old_style_bytes = b'not a real xlsx - simulates an already-stored older-format snapshot'
+        with core.ledger() as db:
+            partner_snapshot.initialize(db)
+            db.execute('''INSERT INTO partner_round_snapshots VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''', (
+                'GB-9999-999', 'PP', 'Gruppe A', '2026-01-01T00:00:00+02:00', '2026-01-08T00:00:00+02:00',
+                '[]', 0, '0', '0', '0', '[]', '0.005', 'hash', '2026-01-01T00:00:00Z',
+                old_style_bytes, hashlib.sha256(old_style_bytes).hexdigest(), '[]'))
+            db.commit()
+        self.assertEqual(partner_snapshot.final_file('GB-9999-999', 'PP'), old_style_bytes)
+        self.assertEqual(partner_snapshot.final_file('GB-9999-999', 'PP'), old_style_bytes)  # re-download, still identical
+
+    def test_new_export_is_deterministic_for_re_download(self):
+        """A fresh export (the new 5-sheet structure) called twice on the
+        exact same input produces byte-identical output - the basis for
+        finalize()'s own no-second-generation guarantee and Re-Download
+        never recomputing anything."""
+        master = self.seed(refund=True)
+        self.assertEqual(export_partner_excel(master), export_partner_excel(master))
+
+    def test_mh_reference_case_final_amount_unambiguous_with_new_labels(self):
+        """Read-only reconstruction of the documented historical MH figures
+        (5.062,98 EUR sales subtotal, -763,24 EUR refunds, 4.299,74 EUR final)
+        against the new Tab 1 layout: only 4.299,74 EUR may appear next to
+        FINALER RECHNUNGSBETRAG; the 5.062,98 EUR subtotal must carry its own
+        distinct, clearly-qualified label; Tab 3 (HistorischeGutschriften)
+        must stay 0,00 EUR for this case (all 7 refunds are Fall A, already
+        known before payment - none of MH's positions were refunded after
+        already being paid out in an earlier run)."""
+        model = {
+            'partner': 'MH', 'group': 'Gruppe B', 'rate': Decimal('.035'),
+            'payouts': {'7700000000': datetime(2026, 9, 1)},
+            'recipient': 'Patrick Pfender', 'address': 'Lindenplatz 1\n72622 Nürtingen',
+            'statement_type': 'partner', 'Rechnung': [], 'Gutschriften': [], 'HistorischeGutschriften': [],
+            'totals': {
+                'Rechnung': {'net': Decimal('0'), 'discount': Decimal('0'), 'net_after': Decimal('0'),
+                             'tax': Decimal('0'), 'gross': Decimal('5062.98'), 'ebay': Decimal('0'),
+                             'gross_discount': Decimal('0')},
+                'Gutschriften': {'net': Decimal('0'), 'discount': Decimal('0'), 'net_after': Decimal('0'),
+                                 'tax': Decimal('0'), 'gross': Decimal('-763.24'), 'ebay': Decimal('0'),
+                                 'gross_discount': Decimal('0')},
+                'HistorischeGutschriften': {'net': Decimal('0'), 'discount': Decimal('0'), 'net_after': Decimal('0'),
+                                            'tax': Decimal('0'), 'gross': Decimal('0.00'), 'ebay': Decimal('0'),
+                                            'gross_discount': Decimal('0')},
+            },
+        }
+        from partner_export import _fill_sheet
+        template = zipfile.ZipFile(Path('templates') / 'partner.xlsx').read('xl/worksheets/sheet1.xml')
+        xml = _fill_sheet(template, model, 'Rechnung')
+        sheet = ET.fromstring(xml)
+        layout = _closing_statement_rows('Rechnung', 0)
+        subtotal_row = layout['start'] + 4
+
+        def cell_text(row_number, col):
+            for row in sheet.find(TAG('sheetData')):
+                if int(row.get('r')) == row_number:
+                    for cell in row:
+                        if cell.get('r') == f'{col}{row_number}':
+                            is_ = cell.find(TAG('is'))
+                            v = cell.find(TAG('v'))
+                            return ''.join(t.text or '' for t in is_.iter(TAG('t'))) if is_ is not None else (v.text if v is not None else None)
+            return None
+
+        self.assertEqual(cell_text(subtotal_row, 'A'),
+                         'Zwischensumme Verkäufe nach Rabatt (vor Erstattungen/Abzügen)')
+        self.assertEqual(Decimal(cell_text(subtotal_row, 'K')), Decimal('5062.98'))
+        self.assertEqual(cell_text(layout['final_row'], 'A'), 'FINALER RECHNUNGSBETRAG')
+        self.assertEqual(Decimal(cell_text(layout['final_row'], 'K')), Decimal('4299.74'))
+        self.assertEqual(model['totals']['HistorischeGutschriften']['gross'], Decimal('0.00'))
 
 
 @unittest.skipUnless(os.environ.get('EBAY_REAL_MASTER_DIR'),'Set EBAY_REAL_MASTER_DIR for original imported data')

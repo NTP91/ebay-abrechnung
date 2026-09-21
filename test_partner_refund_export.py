@@ -189,7 +189,8 @@ class PartnerRefundExportTests(unittest.TestCase):
         path = Path(self.temp.name) / f'Partner_Patrick_{partner_name}.xlsx'
         path.write_bytes(blob)
         book = load_workbook(io.BytesIO(path.read_bytes()), data_only=True)
-        self.assertEqual(book.sheetnames, [DISPLAY_NAMES['Rechnung'], DISPLAY_NAMES['Gutschriften'], DISPLAY_NAMES['HistorischeGutschriften']])
+        self.assertEqual(book.sheetnames, [DISPLAY_NAMES['Rechnung'], DISPLAY_NAMES['Gutschriften'],
+                                            DISPLAY_NAMES['HistorischeGutschriften'], 'Bestellnachweis', 'Payoutnachweis'])
         rechnung, gutschriften = book[DISPLAY_NAMES['Rechnung']], book[DISPLAY_NAMES['Gutschriften']]
         historische = book[DISPLAY_NAMES['HistorischeGutschriften']]
         rechnung_text = '\n'.join(str(cell.value) for row in rechnung for cell in row if cell.value is not None)

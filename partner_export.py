@@ -219,6 +219,11 @@ def prepare_partner_export(rows, payouts=None, orders=None, statement_type='part
             # eBay order and payout from the Zusatztext alone.
             'extra': 'eBay-Bestellnummer: ' + str(row['Bestellnummer']) + '\nSKU: ' + str(match['SKU']),
             'net': net, 'ebay': original_gross,
+            # Plain additive field for Bestellnachweis/Payoutnachweis (never
+            # read by calculate_sheet/calculate_partner_variant_b) - the SKU
+            # was already resolved above, just not previously kept as its
+            # own key.
+            'sku': str(match['SKU']),
         }
         is_refund = base < 0 or row['Art'] == 'Erstattung'
         item['finance_id'] = str(row['Transaktionsnummer'])
@@ -416,7 +421,14 @@ def _fill_sheet(xml, model, name):
                 f'SUM(J{FIRST_ROW}:J{last})-K{start+2}', f'SUM(J{FIRST_ROW}:J{last})',
                 f'SUM(K{FIRST_ROW}:K{last})', f'K{start+5}-K{start+4}']
     for offset, key in enumerate(['net', 'discount', 'net_after', 'tax', 'gross', 'ebay', 'gross_discount']):
-        row_from(19 + offset, start + offset, {'K': totals[key]}, {'K': formulas[offset]})
+        values = {'K': totals[key]}
+        if name == 'Rechnung' and key == 'gross':
+            # This row is only this sheet's own sales-only subtotal, before
+            # Tab 2's Erstattungen/Abzüge are netted in below (GESAMTABRECHNUNG
+            # block) - relabeled so it can never be mistaken for the actual
+            # payable amount, which is FINALER RECHNUNGSBETRAG further down.
+            values['A'] = 'Zwischensumme Verkäufe nach Rabatt (vor Erstattungen/Abzügen)'
+        row_from(19 + offset, start + offset, values, {'K': formulas[offset]})
     note = ('Rechenweg: VK netto × Menge, danach Positionsrabatt; jede Nettoposition auf Cent runden. '
             '19 % Umsatzsteuer auf die Nettosumme. Die Steuer wird centgenau auf die Positionsbruttos verteilt. '
             'eBay-Beträge dienen nur zur Kontrolle.')
@@ -441,8 +453,8 @@ def _fill_sheet(xml, model, name):
         finale_lines = [
             ('Verkaufs-/Abrechnungsbasis brutto', rechnung_totals['ebay']),
             (f'abzgl. Partnerabzug {rate_pct} auf Netto', -rechnung_totals['discount']),
-            ('Regulärer Abrechnungsbetrag', rechnung_totals['gross']),
-            ('bereits berücksichtigte Erstattungen/Abzüge (siehe Tab „Erstattungen-Abzüge")', gutschriften_totals['gross']),
+            ('Zwischensumme Verkäufe nach Rabatt', rechnung_totals['gross']),
+            ('Erstattungen / Abzüge dieser Abrechnung (siehe Tab „Erstattungen-Abzüge")', gutschriften_totals['gross']),
         ]
         assert len(finale_lines) == FINALE_LINE_COUNT
         for offset, (label, value) in enumerate(finale_lines):
@@ -503,17 +515,98 @@ def _fill_sheet(xml, model, name):
     return ET.tostring(sheet, encoding='utf-8', xml_declaration=True)
 
 
-# Third worksheet part added at export time (the template itself, authored
-# with an external tool per the module docstring, only ever shipped sheet1/2).
-# Fixed synthetic ids for the new relationship/content-type/sheet entries -
-# only required to be unique within this workbook, never read back anywhere.
+def _evidence_row(sheet_data, number, values):
+    row = ET.SubElement(sheet_data, TAG('row'), {'r': str(number)})
+    for offset, value in enumerate(values):
+        col = chr(65 + offset)
+        cell = ET.SubElement(row, TAG('c'), {'r': f'{col}{number}'})
+        _set_cell(cell, value)
+    return row
+
+
+def _build_evidence_sheet(title, headers, data_rows, column_widths):
+    """Plain, unstyled evidentiary worksheet (Bestellnachweis/Payoutnachweis).
+
+    No formulas, no computed amounts - every value is already known from
+    prepare_partner_export()'s own per-item fields (order/sku/article/payout_
+    id/ebay) and only re-displayed here for traceability. Built fresh rather
+    than from the money-calculation template: it needs none of that
+    template's tax/discount columns, and reusing it would just carry
+    irrelevant styling. Never affects Rechnung/Gutschriften/
+    HistorischeGutschriften content or totals."""
+    worksheet = ET.Element(TAG('worksheet'))
+    last_row = 3 + max(1, len(data_rows))
+    last_col = chr(64 + len(headers))
+    ET.SubElement(worksheet, TAG('dimension'), {'ref': f'A1:{last_col}{last_row}'})
+    sheet_views = ET.SubElement(worksheet, TAG('sheetViews'))
+    ET.SubElement(sheet_views, TAG('sheetView'), {'workbookViewId': '0'})
+    ET.SubElement(worksheet, TAG('sheetFormatPr'), {'defaultRowHeight': '15'})
+    cols = ET.SubElement(worksheet, TAG('cols'))
+    for index, width in enumerate(column_widths, start=1):
+        ET.SubElement(cols, TAG('col'), {'min': str(index), 'max': str(index),
+                                         'width': str(width), 'customWidth': '1'})
+    data = ET.SubElement(worksheet, TAG('sheetData'))
+    _evidence_row(data, 1, [title])
+    _evidence_row(data, 3, headers)
+    if data_rows:
+        for offset, values in enumerate(data_rows):
+            _evidence_row(data, 4 + offset, values)
+    else:
+        _evidence_row(data, 4, ['Keine Positionen in diesem Abrechnungspaket.'])
+    view = sheet_views.find(TAG('sheetView'))
+    ET.SubElement(view, TAG('pane'), {'ySplit': '3', 'topLeftCell': 'A4',
+                                      'activePane': 'bottomLeft', 'state': 'frozen'})
+    ET.SubElement(view, TAG('selection'), {'pane': 'bottomLeft', 'activeCell': 'A4', 'sqref': 'A4'})
+    ET.SubElement(worksheet, TAG('autoFilter'), {'ref': f'A3:{last_col}{last_row}'})
+    ET.SubElement(worksheet, TAG('pageMargins'), {'left': '0.7', 'right': '0.7', 'top': '0.75',
+                                                   'bottom': '0.75', 'header': '0.3', 'footer': '0.3'})
+    return ET.tostring(worksheet, encoding='utf-8', xml_declaration=True)
+
+
+# Additional worksheet parts added at export time (the template itself,
+# authored with an external tool per the module docstring, only ever shipped
+# sheet1/2). Fixed synthetic ids for the new relationship/content-type/sheet
+# entries - only required to be unique within this workbook, never read back
+# anywhere.
 THIRD_SHEET_TARGET = 'xl/worksheets/sheet3.xml'
 THIRD_SHEET_RID = 'Rhist0f3a9c7d5e21'
+FOURTH_SHEET_TARGET = 'xl/worksheets/sheet4.xml'
+FOURTH_SHEET_RID = 'Rorders0f3a9c7d5e21'
+FIFTH_SHEET_TARGET = 'xl/worksheets/sheet5.xml'
+FIFTH_SHEET_RID = 'Rpayouts0f3a9c7d5e21'
 SHEET_NAMES = ('Rechnung', 'Gutschriften', 'HistorischeGutschriften')
 REL_NS = 'http://schemas.openxmlformats.org/package/2006/relationships'
 CT_NS = 'http://schemas.openxmlformats.org/package/2006/content-types'
 WORKSHEET_CONTENT_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml'
 R_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+
+
+def _evidence_items(model):
+    """Every position of this export/snapshot, across all three money
+    sheets - already scoped to exactly one partner by prepare_partner_export
+    itself, never a second selection rule."""
+    return model['Rechnung'] + model['Gutschriften'] + model['HistorischeGutschriften']
+
+
+def _bestellnachweis_sheet(model):
+    rows = [[item['order'], item['article'], item['sku'], model['partner'], item['finance_id']]
+            for item in _evidence_items(model)]
+    return _build_evidence_sheet(f"BESTELLNACHWEIS – {model['partner']}",
+                                  ['Bestellnummer', 'Produkttitel', 'SKU', 'Partner', 'Transaktionskennung'],
+                                  rows, [16, 45, 24, 14, 20])
+
+
+def _payoutnachweis_sheet(model):
+    rows = []
+    for item in _evidence_items(model):
+        payout_date = model['payouts'].get(item['payout_id'])
+        rows.append([item['order'], item['sku'], item['payout_id'],
+                     payout_date.strftime('%d.%m.%Y') if payout_date else 'nicht angegeben',
+                     format_euro(item['ebay'])])
+    return _build_evidence_sheet(f"PAYOUTNACHWEIS – {model['partner']}",
+                                  ['Bestellnummer', 'SKU', 'eBay-Payout Nr.', 'Payoutdatum',
+                                   'Ausgezahlter Betrag (eBay, brutto)'],
+                                  rows, [16, 24, 16, 14, 22])
 
 
 def export_partner_excel(rows, payouts=None, orders=None, statement_type='partner'):
@@ -526,6 +619,22 @@ def export_partner_excel(rows, payouts=None, orders=None, statement_type='partne
         # sheet2/sheet3's own template bytes are never used as a structural source.
         master_template = source.read('xl/worksheets/sheet1.xml')
         third_sheet_content = _fill_sheet(master_template, model, 'HistorischeGutschriften')
+        fourth_sheet_content = _bestellnachweis_sheet(model)
+        fifth_sheet_content = _payoutnachweis_sheet(model)
+        # Bestellnachweis/Payoutnachweis restate the same Bestellnummer/SKU
+        # columns already itemized in Rechnung/Gutschriften/HistorischeGutschriften
+        # - a second, generic-looking "Bestellnummer" table in the same
+        # workbook. invoice_parser.extract() (used unchanged when a partner's
+        # own invoice is later uploaded and reconciled - never touched here)
+        # scans every *visible* sheet for such tables, so leaving these two
+        # visible would make it see every position twice and misreport
+        # "Rechnungsposition doppelt enthalten". Marking them hidden (not
+        # deleted, not inaccessible - Excel: right-click a tab -> Unhide...)
+        # keeps the evidentiary data fully in the file without touching that
+        # unrelated, protected reconciliation logic at all.
+        extra_sheets = ((THIRD_SHEET_TARGET, THIRD_SHEET_RID, '3', DISPLAY_NAMES['HistorischeGutschriften'], None),
+                        (FOURTH_SHEET_TARGET, FOURTH_SHEET_RID, '4', 'Bestellnachweis', 'hidden'),
+                        (FIFTH_SHEET_TARGET, FIFTH_SHEET_RID, '5', 'Payoutnachweis', 'hidden'))
         for entry in source.infolist():
             content = source.read(entry.filename)
             if entry.filename in ('xl/worksheets/sheet1.xml', 'xl/worksheets/sheet2.xml'):
@@ -533,13 +642,15 @@ def export_partner_excel(rows, payouts=None, orders=None, statement_type='partne
                 content = _fill_sheet(master_template, model, name)
             elif entry.filename == 'xl/_rels/workbook.xml.rels':
                 rels = ET.fromstring(content)
-                ET.SubElement(rels, f'{{{REL_NS}}}Relationship', {
-                    'Type': f'{R_NS}/worksheet', 'Target': '/' + THIRD_SHEET_TARGET, 'Id': THIRD_SHEET_RID})
+                for target_path, rid, _, _, _ in extra_sheets:
+                    ET.SubElement(rels, f'{{{REL_NS}}}Relationship', {
+                        'Type': f'{R_NS}/worksheet', 'Target': '/' + target_path, 'Id': rid})
                 content = ET.tostring(rels, encoding='utf-8', xml_declaration=True)
             elif entry.filename == '[Content_Types].xml':
                 types = ET.fromstring(content)
-                ET.SubElement(types, f'{{{CT_NS}}}Override', {
-                    'PartName': '/' + THIRD_SHEET_TARGET, 'ContentType': WORKSHEET_CONTENT_TYPE})
+                for target_path, _, _, _, _ in extra_sheets:
+                    ET.SubElement(types, f'{{{CT_NS}}}Override', {
+                        'PartName': '/' + target_path, 'ContentType': WORKSHEET_CONTENT_TYPE})
                 content = ET.tostring(types, encoding='utf-8', xml_declaration=True)
             elif entry.filename == 'xl/workbook.xml':
                 workbook = ET.fromstring(content)
@@ -547,9 +658,11 @@ def export_partner_excel(rows, payouts=None, orders=None, statement_type='partne
                 for sheet in sheets_el:
                     if sheet.get('name') in DISPLAY_NAMES:
                         sheet.set('name', DISPLAY_NAMES[sheet.get('name')])
-                ET.SubElement(sheets_el, TAG('sheet'), {
-                    'name': DISPLAY_NAMES['HistorischeGutschriften'], 'sheetId': '3',
-                    f'{{{R_NS}}}id': THIRD_SHEET_RID})
+                for _, rid, sheet_id, sheet_name, state in extra_sheets:
+                    attrib = {'name': sheet_name, 'sheetId': sheet_id, f'{{{R_NS}}}id': rid}
+                    if state:
+                        attrib['state'] = state
+                    ET.SubElement(sheets_el, TAG('sheet'), attrib)
                 names = workbook.find(TAG('definedNames'))
                 if names is None:
                     names = ET.Element(TAG('definedNames'))
@@ -560,4 +673,6 @@ def export_partner_excel(rows, payouts=None, orders=None, statement_type='partne
                 content = ET.tostring(workbook, encoding='utf-8', xml_declaration=True)
             target.writestr(entry, content)
         target.writestr(THIRD_SHEET_TARGET, third_sheet_content)
+        target.writestr(FOURTH_SHEET_TARGET, fourth_sheet_content)
+        target.writestr(FIFTH_SHEET_TARGET, fifth_sheet_content)
     return output.getvalue()
