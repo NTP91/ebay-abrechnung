@@ -106,6 +106,25 @@ def _line_items(rows, model):
     return items
 
 
+def _recovery_rows(db, business, round_id, partner):
+    """Tab 3 (HistorischeGutschriften) now comes exclusively from the
+    recovery-case model: every refund recovery_cases.detect() has parked in
+    THIS round for THIS partner (regardless of its origin round/sale, which
+    is by definition a different, already-finalized round - never the one
+    being finalized now, so this can never double up with the normal Tab-2
+    refunds _partner_round_rows() already found via core.refund_links()).
+    Flagging Bereits_An_Partner_Bezahlt=True reuses partner_export.py's own
+    existing Fall-B bucketing unchanged - no export-module edits needed."""
+    keys = [r[0] for r in db.execute(
+        'SELECT refund_position_key FROM recovery_cases WHERE current_round_id=? AND partner=?',
+        (round_id, partner))]
+    if not keys:
+        return business.iloc[0:0]
+    rows = business.loc[business.position_key.isin(keys)].copy()
+    rows['Bereits_An_Partner_Bezahlt'] = True
+    return rows
+
+
 def interim_export(round_id, partner, business=None, payouts=None, orders=None):
     """Always-live Zwischenstand: never stored, never locks anything, safe to
     call any number of times while the round is still 'laufend' (or even
@@ -139,6 +158,7 @@ def finalize(round_id, partner, now=None, business=None, payouts=None, orders=No
     Returns (record: dict, created: bool).
     """
     import group_b_rounds
+    import recovery_cases
 
     now_berlin = (now or datetime.now(BERLIN)).astimezone(BERLIN)
     business = position_workflow.positions() if business is None else business
@@ -148,6 +168,7 @@ def finalize(round_id, partner, now=None, business=None, payouts=None, orders=No
     with core.ledger() as db:
         group_b_rounds.initialize(db)
         initialize(db)
+        recovery_cases.initialize(db)
         window_start, window_end = _round_window(db, round_id)
         if now_berlin < datetime.fromisoformat(window_end):
             raise ValueError(f'{round_id} ist noch laufend; nur ein Zwischenstand ist moeglich, kein finaler Download.')
@@ -159,9 +180,12 @@ def finalize(round_id, partner, now=None, business=None, payouts=None, orders=No
         assigned_keys = {r[0] for r in db.execute(
             'SELECT position_key FROM group_b_round_positions WHERE round_id=?', (round_id,))}
         rows = _partner_round_rows(business, assigned_keys, partner)
-        if rows.empty:
+        recovery_rows = _recovery_rows(db, business, round_id, partner)
+        if rows.empty and recovery_rows.empty:
             raise ValueError(f'{partner} hat 0 Positionen in {round_id}; kein finaler Snapshot noetig '
                               f'("0 Positionen - nichts erforderlich").')
+        if not recovery_rows.empty:
+            rows = core.pd.concat([rows, recovery_rows]).drop_duplicates('position_key')
 
         model = partner_export.prepare_partner_export(rows, payouts, orders, statement_type='partner')
         file_bytes = partner_export.export_partner_excel(rows, payouts, orders, statement_type='partner')
