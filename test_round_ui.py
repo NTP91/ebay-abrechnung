@@ -89,6 +89,26 @@ class RoundUiSmokeTests(unittest.TestCase):
             self.assertNotIn('Finale Einzelabrechnung fehlt', value)
             self.assertLessEqual(len(value), 2)  # a single emoji, no long label
 
+    def test_no_banned_symbols_in_matrix_or_body(self):
+        self.seed_sale('p1', 'order-a', 'PP / TEST')
+        planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
+        app = self.run_app()
+        self.assertFalse(list(app.exception))
+        matrix = self.round_matrix(app)
+        allowed = {'✅', '❌', '➖'}
+        for value in matrix.values.flatten():
+            self.assertIn(value, allowed)
+        body = self.all_text(app)
+        self.assertNotIn('⏳', body)
+        self.assertNotIn('🟠', body)
+
+    def test_2026_003_labeled_as_first_shared_round(self):
+        self.seed_sale('p1', 'order-a', 'PP / TEST')
+        planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
+        app = self.run_app()
+        expander_labels = [exp.label for exp in app.expander]
+        self.assertTrue(any('2026-003' in label and 'erste gemeinsame Runde' in label for label in expander_labels))
+
     def test_partner_001_is_a_column_not_confused_with_a_round(self):
         self.seed_sale('p1', 'order-a', 'PP / TEST')
         planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
@@ -96,16 +116,17 @@ class RoundUiSmokeTests(unittest.TestCase):
         matrix = self.round_matrix(app)
         self.assertIn('001', matrix.columns)
 
-    def test_zero_position_partner_shows_all_ok_icons(self):
+    def test_zero_position_partner_shows_all_dash_never_a_fake_checkmark(self):
         self.seed_sale('p1', 'order-a', 'PP / TEST')
         planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
         app = self.run_app()
         matrix = self.round_matrix(app)
         self.assertIn('MK', matrix.columns)  # confirmed Gruppe-A partner with 0 positions in 2026-003
-        self.assertEqual(matrix.loc['Rechnung', 'MK'], '✅')
-        self.assertEqual(matrix.loc['Zahlung', 'MK'], '✅')
-        self.assertEqual(matrix.loc['Gutschrift', 'MK'], '✅')
-        self.assertEqual(matrix.loc['Status', 'MK'], '✅')
+        self.assertEqual(matrix.loc['Einzelabrechnung', 'MK'], '➖')
+        self.assertEqual(matrix.loc['Rechnung', 'MK'], '➖')
+        self.assertEqual(matrix.loc['Zahlung', 'MK'], '➖')
+        self.assertEqual(matrix.loc['Gutschrift', 'MK'], '➖')
+        self.assertEqual(matrix.loc['Status', 'MK'], '➖')
 
     def test_finalized_and_paid_partner_shows_ok_icons_and_round_completed(self):
         self.seed_sale('p1', 'order-a', 'PP / TEST')

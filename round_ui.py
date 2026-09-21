@@ -89,36 +89,43 @@ def _period(result):
     return f"{display_date(result['window_start'])}–{display_date(result['window_end'])}"
 
 
+MATRIX_LEGEND = '✅ erledigt/vorhanden · ❌ erforderlich/offen · ➖ nicht erforderlich'
+
+
 def _statement_icon(p):
+    if p['positions'] == 0:
+        return '➖'
     return '✅' if p['snapshot_status'] == 'vorhanden' else '❌'
 
 
 def _invoice_icon(p):
-    return {'noch_nicht_moeglich': '⏳', 'fehlt': '❌', 'geprueft': '✅', 'nicht_erforderlich': '✅'}[p['invoice_status']]
+    # 'noch_nicht_moeglich' (snapshot missing yet) is still a real, currently
+    # unmet requirement - never displayed as done, and never as "not
+    # required" either, so it maps to ❌ like 'fehlt', not to ➖.
+    return {'noch_nicht_moeglich': '❌', 'fehlt': '❌', 'geprueft': '✅', 'nicht_erforderlich': '➖'}[p['invoice_status']]
 
 
 def _payment_icon(p):
-    if p['payment_status'] in ('bezahlt', 'nicht_erforderlich'):
-        return '✅'
-    # payment_status=='offen': distinguish "not even reviewed yet" (not yet
-    # actionable) from "reviewed, payment actually required now" - both are
-    # the same backend status, this only picks which of the two already-
-    # computed fields (invoice_status) decides the icon.
-    return '⏳' if p['invoice_status'] != 'geprueft' else '❌'
+    return {'offen': '❌', 'bezahlt': '✅', 'nicht_erforderlich': '➖'}[p['payment_status']]
 
 
 def _credit_icon(p):
-    return '🟠' if p['credit_status'] == 'fehlt' else '✅'
+    return {'fehlt': '❌', 'erledigt': '✅', 'nicht_erforderlich': '➖'}[p['credit_status']]
 
 
 def _status_icon(p):
-    return {'laufend': '🔵', 'in_Abwicklung': '🟠', 'abgeschlossen': '🟢', 'nichts_erforderlich': '✅'}[p['overall_status']]
+    if p['overall_status'] == 'nichts_erforderlich':
+        return '➖'
+    return '✅' if p['overall_status'] == 'abgeschlossen' else '❌'
 
 
 def render_round_matrix(result):
-    """Compact icon-only matrix (✅ ❌ ⏳ 🟠) - long explanatory text belongs
-    to the blocker list underneath, never to a matrix cell. Partner code
-    '001' is just another column here, never confused with a round id."""
+    """Compact icon-only matrix (✅ ❌ ➖ - no ⏳, no orange dot) - long
+    explanatory text belongs to the blocker list underneath, never to a
+    matrix cell. Partner code '001' is just another column here, never
+    confused with a round id. ➖ is reserved strictly for "not required in
+    this round" (e.g. a 0-position partner); it is never used to paper over
+    something that is actually still open."""
     import pandas as pd
     columns = {}
     for p in result['partners']:
@@ -126,6 +133,16 @@ def render_round_matrix(result):
                                   _credit_icon(p), _status_icon(p)]
     frame = pd.DataFrame(columns, index=['Einzelabrechnung', 'Rechnung', 'Zahlung', 'Gutschrift', 'Status'])
     st.dataframe(frame, use_container_width=True)
+
+
+def _historical_partner_icon(partner):
+    """Same ✅/❌/➖ convention, derived only from group_b_rounds.overview()'s
+    own existing figures for this partner in this historical round - never
+    recomputed, and ➖ (not a green check) whenever nothing was ever claimed
+    here, matching the "never fake a checkmark" rule from the new matrix."""
+    if not partner['current'] and not partner['paid']:
+        return '➖'
+    return '❌' if partner['open'] > 0 else '✅'
 
 
 def render_historical_rounds(business=None):
@@ -154,7 +171,8 @@ def render_historical_rounds(business=None):
             settlement = overview_by_id.get(round_id)
             if settlement:
                 for partner in settlement['partners']:
-                    st.write(f"{partner['partner']} · Anspruch {euros(partner['current'])} · "
+                    icon = _historical_partner_icon(partner)
+                    st.write(f"{icon} {partner['partner']} · Anspruch {euros(partner['current'])} · "
                              f"bezahlt {euros(partner['paid'])} · offen {euros(max(partner['open'], 0))}")
             else:
                 st.caption('Keine aktuell zuordenbaren offenen Partnerpositionen.')
@@ -177,14 +195,18 @@ def render_overview_section(business=None):
     collapsed, historical GB-2026-001/002 shown separately below with their
     own existing data only. No partner-card navigation here (next UI step)."""
     business = position_workflow.positions() if business is None else business
-    st.subheader('Abrechnungsrunden')
+    st.subheader('Abrechnungsrunden', help=MATRIX_LEGEND)
     round_ids = _neutral_round_ids()
     if not round_ids:
         st.caption('Noch keine neutrale Wochenrunde vorhanden.')
     else:
         for round_id in round_ids:
             result = round_status.round_status(round_id, business=business)
-            header = f"{round_id} · {_period(result)} · {round_label(result['round_status'])}"
+            # One-time orientation note: 2026-003 is technically unchanged,
+            # only labeled here as the first round shared by Gruppe A and B -
+            # GB-2026-001/002 were the old Gruppe-B-only model.
+            marker = ' · erste gemeinsame Runde' if round_id == '2026-003' else ''
+            header = f"{round_id}{marker} · {_period(result)} · {round_label(result['round_status'])}"
             with st.expander(header, expanded=(result['round_status'] != 'abgeschlossen')):
                 render_round_matrix(result)
                 if result['blockers']:
