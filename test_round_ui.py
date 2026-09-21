@@ -16,6 +16,7 @@ BERLIN = ZoneInfo('Europe/Berlin')
 # (this suite is meant to run on/after 2026-09-21), so round_status.py's own
 # real-time cut_passed check is exercised without mocking time.
 BASE_CUT = datetime(2026, 9, 20, 23, 59, tzinfo=BERLIN)
+MATRIX_ROWS = ['Einzelabrechnung', 'Rechnung', 'Zahlung', 'Gutschrift', 'Status']
 
 
 def berlin(*args):
@@ -53,34 +54,60 @@ class RoundUiSmokeTests(unittest.TestCase):
             parts.append(f'{metric.label} {metric.value}')
         return '\n'.join(parts)
 
-    def test_app_loads_with_new_tab_and_no_exception(self):
+    def round_matrix(self, app):
+        return next(el.value for el in app.dataframe if list(el.value.index) == MATRIX_ROWS)
+
+    def test_old_round_tab_removed_no_exception(self):
         self.seed_sale('p1', 'order-a', 'PP / TEST')
         planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
         app = self.run_app()
         self.assertFalse(list(app.exception))
         labels = [tab.label for tab in app.tabs]
-        self.assertIn('Runde 2026-003+', labels)
+        self.assertNotIn('Runde 2026-003+', labels)
+        for label in ['Übersicht', 'Gruppe A', 'Gruppe B', 'Offene Positionen', 'Historie']:
+            self.assertIn(label, labels)
 
-    def test_round_003_shown_in_abwicklung_with_concrete_blocker(self):
+    def test_abrechnungsrunden_block_in_uebersicht_with_concrete_blocker(self):
         self.seed_sale('p1', 'order-a', 'PP / TEST')
         planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
         app = self.run_app()
         self.assertFalse(list(app.exception))
         body = self.all_text(app)
-        self.assertIn('2026-003', body)
-        self.assertIn('in Abwicklung', body)
-        self.assertIn('Finale Einzelabrechnung fehlt', body)
+        self.assertIn('Abrechnungsrunden', body)
+        expander_labels = [exp.label for exp in app.expander]
+        self.assertTrue(any('2026-003' in label and 'in Abwicklung' in label for label in expander_labels))
+        self.assertIn('PP · Finale Einzelabrechnung fehlt', body)
 
-    def test_zero_position_partner_shows_nichts_erforderlich(self):
+    def test_matrix_is_compact_icon_only(self):
         self.seed_sale('p1', 'order-a', 'PP / TEST')
         planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
         app = self.run_app()
         self.assertFalse(list(app.exception))
-        matrix = next(el.value for el in app.dataframe if list(el.value.index) == ['Rechnung', 'Zahlung', 'Gutschrift', 'Status'])
-        self.assertIn('MK', matrix.columns)  # confirmed Gruppe-A partner with 0 positions in 2026-003
-        self.assertEqual(matrix.loc['Status', 'MK'], 'nichts erforderlich')
+        matrix = self.round_matrix(app)
+        self.assertEqual(list(matrix.index), MATRIX_ROWS)
+        for value in matrix.values.flatten():
+            self.assertNotIn('Finale Einzelabrechnung fehlt', value)
+            self.assertLessEqual(len(value), 2)  # a single emoji, no long label
 
-    def test_finalized_and_paid_partner_shows_completed_status(self):
+    def test_partner_001_is_a_column_not_confused_with_a_round(self):
+        self.seed_sale('p1', 'order-a', 'PP / TEST')
+        planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
+        app = self.run_app()
+        matrix = self.round_matrix(app)
+        self.assertIn('001', matrix.columns)
+
+    def test_zero_position_partner_shows_all_ok_icons(self):
+        self.seed_sale('p1', 'order-a', 'PP / TEST')
+        planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
+        app = self.run_app()
+        matrix = self.round_matrix(app)
+        self.assertIn('MK', matrix.columns)  # confirmed Gruppe-A partner with 0 positions in 2026-003
+        self.assertEqual(matrix.loc['Rechnung', 'MK'], '✅')
+        self.assertEqual(matrix.loc['Zahlung', 'MK'], '✅')
+        self.assertEqual(matrix.loc['Gutschrift', 'MK'], '✅')
+        self.assertEqual(matrix.loc['Status', 'MK'], '✅')
+
+    def test_finalized_and_paid_partner_shows_ok_icons_and_round_completed(self):
         self.seed_sale('p1', 'order-a', 'PP / TEST')
         planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
         snap, created = partner_snapshot.finalize('2026-003', 'PP', now=berlin(2026, 9, 21, 0, 5))
@@ -94,11 +121,40 @@ class RoundUiSmokeTests(unittest.TestCase):
         incoming.confirm_payment('2026-003', 'PP')
         app = self.run_app()
         self.assertFalse(list(app.exception))
-        body = self.all_text(app)
-        self.assertIn('abgeschlossen', body)
-        self.assertIn('bezahlt am', body)
+        matrix = self.round_matrix(app)
+        self.assertEqual(matrix.loc['Einzelabrechnung', 'PP'], '✅')
+        self.assertEqual(matrix.loc['Rechnung', 'PP'], '✅')
+        self.assertEqual(matrix.loc['Zahlung', 'PP'], '✅')
+        self.assertIn('abgeschlossen', self.all_text(app))
 
-    def test_no_debug_payload_leaks_in_new_tab(self):
+    def test_historical_rounds_shown_separately_and_expandable(self):
+        self.seed_sale('p1', 'order-a', 'PP / TEST')
+        planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
+        with core.ledger() as db:
+            import group_b_rounds
+            group_b_rounds.initialize(db)
+            db.execute("INSERT INTO group_b_rounds VALUES('GB-2026-001',2026,1,'test',NULL,NULL,'0','h','{}','2026-01-01T00:00:00Z')")
+            db.commit()
+        app = self.run_app()
+        self.assertFalse(list(app.exception))
+        body = self.all_text(app)
+        self.assertIn('Historische Runden (altes Modell)', body)
+        self.assertIn('GB-2026-001', body)
+        expander_labels = [exp.label for exp in app.expander]
+        self.assertTrue(any('GB-2026-001' in label for label in expander_labels))
+
+    def test_legacy_group_b_panel_never_shows_a_neutral_round(self):
+        self.seed_sale('p1', 'order-a', 'PP / TEST')
+        planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
+        app = self.run_app()
+        self.assertFalse(list(app.exception))
+        # No dataframe/table anywhere should list the neutral round id under
+        # the legacy per-partner "Gesamtsicht je Partner" round-id column.
+        for element in app.dataframe:
+            if 'Partner' in getattr(element.value, 'columns', []) and 'round_id' in str(element.value.columns).lower():
+                self.assertNotIn('2026-003', element.value.astype(str).values)
+
+    def test_no_debug_payload_leaks(self):
         self.seed_sale('p1', 'order-a', 'PP / TEST')
         planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
         app = self.run_app()

@@ -16,6 +16,7 @@ import core
 import group_b_rounds
 import partner_round_invoices
 import partner_snapshot
+import position_workflow
 import recovery_cases
 import round_status
 
@@ -88,63 +89,107 @@ def _period(result):
     return f"{display_date(result['window_start'])}–{display_date(result['window_end'])}"
 
 
+def _statement_icon(p):
+    return '✅' if p['snapshot_status'] == 'vorhanden' else '❌'
+
+
+def _invoice_icon(p):
+    return {'noch_nicht_moeglich': '⏳', 'fehlt': '❌', 'geprueft': '✅', 'nicht_erforderlich': '✅'}[p['invoice_status']]
+
+
+def _payment_icon(p):
+    if p['payment_status'] in ('bezahlt', 'nicht_erforderlich'):
+        return '✅'
+    # payment_status=='offen': distinguish "not even reviewed yet" (not yet
+    # actionable) from "reviewed, payment actually required now" - both are
+    # the same backend status, this only picks which of the two already-
+    # computed fields (invoice_status) decides the icon.
+    return '⏳' if p['invoice_status'] != 'geprueft' else '❌'
+
+
+def _credit_icon(p):
+    return '🟠' if p['credit_status'] == 'fehlt' else '✅'
+
+
+def _status_icon(p):
+    return {'laufend': '🔵', 'in_Abwicklung': '🟠', 'abgeschlossen': '🟢', 'nichts_erforderlich': '✅'}[p['overall_status']]
+
+
 def render_round_matrix(result):
+    """Compact icon-only matrix (✅ ❌ ⏳ 🟠) - long explanatory text belongs
+    to the blocker list underneath, never to a matrix cell. Partner code
+    '001' is just another column here, never confused with a round id."""
     import pandas as pd
     columns = {}
     for p in result['partners']:
-        columns[p['partner']] = [
-            invoice_label(p['invoice_status']),
-            payment_label(p['payment_status'], p['paid_at']),
-            credit_label(p['credit_status']),
-            overall_label(p['overall_status']),
-        ]
-    frame = pd.DataFrame(columns, index=['Rechnung', 'Zahlung', 'Gutschrift', 'Status'])
+        columns[p['partner']] = [_statement_icon(p), _invoice_icon(p), _payment_icon(p),
+                                  _credit_icon(p), _status_icon(p)]
+    frame = pd.DataFrame(columns, index=['Einzelabrechnung', 'Rechnung', 'Zahlung', 'Gutschrift', 'Status'])
     st.dataframe(frame, use_container_width=True)
 
 
-def render_historical_rounds():
+def render_historical_rounds(business=None):
+    """Historische GB-2026-001/002: existing group_b_rounds.overview()
+    per-partner figures and existing linked partner invoices only - nothing
+    recomputed, no new archive logic, ids never renamed."""
+    import partner_invoices
+
     with core.ledger() as db:
         group_b_rounds.initialize(db)
         rows = db.execute("SELECT id, evelyn_amount, created_at FROM group_b_rounds "
                            "WHERE source_kind != 'neutral_weekly' ORDER BY sequence").fetchall()
     if not rows:
         return
-    with st.expander(f'Historische Runden (altes Modell) · {len(rows)}', expanded=False):
-        st.caption('001/002 laufen weiterhin nach der alten Geschäftslogik - hier nur zur Einordnung, '
-                    'keine neue 003+-Statuslogik.')
-        for row in rows:
-            st.write(f"**{row['id']}** · Evelyn-Betrag {euros(float(row['evelyn_amount']))} · "
-                     f"angelegt {display_date(row['created_at'])}")
+    st.markdown('**Historische Runden (altes Modell)**')
+    st.caption('GB-2026-001/002 laufen weiterhin nach der alten Geschäftslogik - reine Anzeige vorhandener Daten, '
+                'keine neue 003+-Statuslogik und keine Neuberechnung.')
+    business = position_workflow.positions() if business is None else business
+    overview_by_id = {}
+    if not business.empty:
+        overview_by_id = {r['round_id']: r for r in group_b_rounds.overview(business)['rounds']}
+    for row in rows:
+        round_id = row['id']
+        header = f"{round_id} · Evelyn-Betrag {euros(float(row['evelyn_amount']))} · angelegt {display_date(row['created_at'])}"
+        with st.expander(header, expanded=False):
+            settlement = overview_by_id.get(round_id)
+            if settlement:
+                for partner in settlement['partners']:
+                    st.write(f"{partner['partner']} · Anspruch {euros(partner['current'])} · "
+                             f"bezahlt {euros(partner['paid'])} · offen {euros(max(partner['open'], 0))}")
+            else:
+                st.caption('Keine aktuell zuordenbaren offenen Partnerpositionen.')
+            with core.ledger() as db:
+                invoice_ids = {r[0] for r in db.execute(
+                    'SELECT invoice_id FROM partner_invoice_rounds WHERE round_id=?', (round_id,))}
+            documents = [record for record in partner_invoices.list_invoices() if record['id'] in invoice_ids]
+            if documents:
+                st.caption(f'Verknüpfte Partnerbelege · {len(documents)}')
+                for record in documents:
+                    freigabe = 'freigegeben' if record['approved_at'] else 'noch nicht freigegeben'
+                    st.write(f"{record['partner']} · {record['invoice_number'] or record['file_name']} · {freigabe}")
+            else:
+                st.caption('Keine verknüpften Partnerbelege gespeichert.')
 
 
-def render_round_overview(active_round_id=None):
-    """Returns the round_id the caller should show a partner-card workspace
-    for (the one the user picked, or the first non-abgeschlossen round)."""
-    st.subheader('Wochenrunden 2026-003+')
+def render_overview_section(business=None):
+    """The single 'Abrechnungsrunden' block for the Übersicht tab: current/
+    in-Abwicklung 2026-003+ rounds prominent, abgeschlossene rounds
+    collapsed, historical GB-2026-001/002 shown separately below with their
+    own existing data only. No partner-card navigation here (next UI step)."""
+    business = position_workflow.positions() if business is None else business
+    st.subheader('Abrechnungsrunden')
     round_ids = _neutral_round_ids()
     if not round_ids:
         st.caption('Noch keine neutrale Wochenrunde vorhanden.')
-        render_historical_rounds()
-        return None
-
-    results = {rid: round_status.round_status(rid) for rid in round_ids}
-    selected = active_round_id if active_round_id in results else next(
-        (rid for rid in round_ids if results[rid]['round_status'] != 'abgeschlossen'), round_ids[0])
-
-    for round_id in round_ids:
-        result = results[round_id]
-        header = f"{round_id} · {_period(result)} · {round_label(result['round_status'])}"
-        with st.expander(header, expanded=(result['round_status'] != 'abgeschlossen')):
-            render_round_matrix(result)
-            if result['blockers']:
-                st.caption('Offene Punkte: ' + ' · '.join(result['blockers']))
-            if st.button('Partnerkarten öffnen', key=f'open-round-{round_id}'):
-                selected = round_id
-                st.session_state['round_ui_active_round'] = round_id
-                st.rerun()
-
-    render_historical_rounds()
-    return selected
+    else:
+        for round_id in round_ids:
+            result = round_status.round_status(round_id, business=business)
+            header = f"{round_id} · {_period(result)} · {round_label(result['round_status'])}"
+            with st.expander(header, expanded=(result['round_status'] != 'abgeschlossen')):
+                render_round_matrix(result)
+                if result['blockers']:
+                    st.caption('Offene Punkte: ' + ' · '.join(result['blockers']))
+    render_historical_rounds(business)
 
 
 def render_statement_panel(round_id, partner, status):
@@ -350,9 +395,18 @@ def render_invoice_history():
 
 
 def render(business=None):
-    st.header('Runde 2026-003+')
-    st.caption('Zentrale Statuslogik (round_status.py) - keine eigene Berechnung in der Oberfläche.')
-    active = render_round_overview(st.session_state.get('round_ui_active_round'))
+    """Full workspace (overview + partner cards + open documents + invoice
+    history) - not currently wired into any app.py tab (the round overview
+    now lives inline in Übersicht via render_overview_section(); partner-
+    card navigation is the next UI step). Kept intact and working so that
+    step can reuse it without rebuilding it."""
+    st.header('Abrechnungsrunden')
+    render_overview_section(business)
+    round_ids = _neutral_round_ids()
+    active = st.session_state.get('round_ui_active_round')
+    if active not in round_ids:
+        active = next((rid for rid in round_ids
+                        if round_status.round_status(rid)['round_status'] != 'abgeschlossen'), None) or (round_ids[0] if round_ids else None)
     if active:
         st.divider()
         render_partner_picker(active)

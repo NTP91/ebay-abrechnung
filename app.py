@@ -612,10 +612,10 @@ with st.expander('Payout-Abgleich · Bankbetrag und einzelne Positionen'):
         except ValueError as exc:
             st.error(str(exc))
 
-home, round_tab, group_a, group_b, pending, history, dashboard, trust_risk_tab, lexoffice_import_tab = st.tabs(['Übersicht','Runde 2026-003+','Gruppe A','Gruppe B','Offene Positionen','Historie','Dashboard','Trust / Risk','Lexoffice Bestell-Import'])
-with round_tab:
-    round_ui.render(business)
+home, group_a, group_b, pending, history, dashboard, trust_risk_tab, lexoffice_import_tab = st.tabs(['Übersicht','Gruppe A','Gruppe B','Offene Positionen','Historie','Dashboard','Trust / Risk','Lexoffice Bestell-Import'])
 with home:
+    round_ui.render_overview_section(business)
+    st.divider()
     total=len(catalogue)
     assigned=int(catalogue.payout.sum())
     without=total-assigned
@@ -675,6 +675,11 @@ with group_b:
     if has_re0090:
         group_b_rounds.bootstrap(business,evelyn['new_ready'],invoices)
     round_view=group_b_rounds.overview(business)
+    # This legacy panel only ever shows historical GB-2026-001/002 rounds now -
+    # the neutral 2026-003+ rounds have their own consolidated view in
+    # Übersicht → Abrechnungsrunden (round_ui.py) and must not appear twice.
+    round_view['rounds']=[r for r in round_view['rounds'] if r['round_id'].startswith('GB-')]
+    round_view['partners']=[p for p in round_view['partners'] if p['round_id'].startswith('GB-')]
     if round_view['rounds']:
       with st.container(border=True):
         st.subheader('Gruppe-B-Abrechnungsrunden')
