@@ -89,13 +89,23 @@ def partner_rows(business):
         & (business['Erlös_Brutto'] > 0) & ~business['Prüfhinweis'].astype(bool)
         & ~business.Quellenpruefung.astype(bool) & ~api_holds.mask(business)
         & ~business.closed_at.astype(bool) & ~business.paid_at.astype(bool)
+        # A position documented as paid_without_invoice_at (e.g. MH's historical
+        # bulk case) is already settled - Group A's own partner_ready column
+        # already excludes it (position_workflow.positions()'s own definition
+        # of "ready"), but this Group-B filter is deliberately its own,
+        # narrower reimplementation (it must still include a fully neutralized
+        # sale/refund pair, which partner_ready itself excludes) and had never
+        # picked up this specific exclusion - the one still-missing condition
+        # from the manuscript's own "must never become payable again" list.
+        & ~business[position_workflow.PAID_WITHOUT_INVOICE].astype(bool)
     )
     sales_b = business[valid_b].copy()
     linked = core.refund_links(business)
     normal_refund_indices = {refund for refund, sale in linked.items() if sale in set(sales_b.index)}
     committed_b = business[
         (business.Gruppe == 'Gruppe B') & (business.Art == 'Bestellung')
-        & (business.reviewed_at.astype(bool) | business.paid_at.astype(bool) | business.closed_at.astype(bool))
+        & (business.reviewed_at.astype(bool) | business.paid_at.astype(bool) | business.closed_at.astype(bool)
+           | business[position_workflow.PAID_WITHOUT_INVOICE].astype(bool))
     ]
     historical_refund_indices = {refund for refund, sale in linked.items() if sale in set(committed_b.index)}
     refund_indices = sorted(normal_refund_indices | historical_refund_indices)
@@ -132,7 +142,8 @@ def partner_rows(business):
             or 'offene Partnerabrechnung'
             for row in origins
         ]
-        already_paid = [bool(row.reviewed_at or row.paid_at or row.closed_at) for row in origins]
+        already_paid = [bool(row.reviewed_at or row.paid_at or row.closed_at
+                              or row[position_workflow.PAID_WITHOUT_INVOICE]) for row in origins]
         refunds_b['Refund_Status'] = [
             'Später Refund · historische Partnerrechnung unverändert' if paid
             else 'Offener Refund · einmalig im nächsten Partner-Settlement'
