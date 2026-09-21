@@ -442,5 +442,184 @@ class RolloverTests(unittest.TestCase):
         self.assertEqual(gb1, [mh_key])
 
 
+class LatePayoutAssignmentTests(unittest.TestCase):
+    """assign_late_payouts() against a real local ledger - same setup as CommitRoundTests."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        paths = patch.multiple(core, PAYOUTS_DB_PATH=str(self.root / 'Master_Payouts.csv'),
+                                ORDERS_DB_PATH=str(self.root / 'Master_Orders.csv'))
+        paths.start(); self.addCleanup(paths.stop)
+
+    def seed(self, payout_id, order, sku, amount='50,00', payout_date='18.09.2026'):
+        order_frame = payout(payout_id, order, order, sku=sku, amount=amount)
+        core.import_reports([order_frame], core.ORDERS_DB_PATH, 'orders')
+        sale = payout(payout_id, order, order, sku=sku, amount=amount)
+        sale['Auszahlungsdatum'] = payout_date
+        sale['Auszahlungsstatus'] = 'Betrag überwiesen'
+        core.import_reports([sale], core.PAYOUTS_DB_PATH, 'payout')
+
+    def seed_no_payout(self, order, sku, amount='50,00'):
+        order_frame = payout('', order, order, sku=sku, amount=amount)
+        core.import_reports([order_frame], core.ORDERS_DB_PATH, 'orders')
+        open_row = payout('', order, order, sku=sku, amount=amount)
+        core.import_reports([open_row], core.PAYOUTS_DB_PATH, 'payout')
+
+    def current(self):
+        return workflow.positions(), core.read_master(core.PAYOUTS_DB_PATH)
+
+    def key_for(self, business, order):
+        return business.loc[business.Bestellnummer == order].iloc[0].position_key
+
+    def finalize(self, position_key, business):
+        row = business.loc[business.position_key == position_key].iloc[0]
+        with core.ledger() as db:
+            db.execute('''INSERT INTO position_workflow
+                (position_key,reviewed_at,paid_at,received_at,closed_at,source,paid_without_invoice_at)
+                VALUES(?,?,?,?,?,?,?)''',
+                (position_key, '2026-09-19', '2026-09-19', '2026-09-19', '2026-09-19',
+                 workflow.source_snapshot(row), None))
+            db.commit()
+
+    def round_of(self, position_key):
+        with core.ledger() as db:
+            import group_b_rounds
+            group_b_rounds.initialize(db)
+            row = db.execute('SELECT round_id FROM group_b_round_positions WHERE position_key=?',
+                              (position_key,)).fetchone()
+            return row[0] if row else None
+
+    def test_late_payout_assigned_to_open_older_round(self):
+        self.seed('p0', 'order-zero', 'PP / TEST', payout_date='14.09.2026')
+        planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
+        planner.rollover(now=berlin(2026, 9, 21, 0, 5))
+        self.seed('p1', 'order-late', 'PP / TEST', payout_date='15.09.2026')
+        business, payouts = self.current()
+        assigned = planner.assign_late_payouts(business=business, payouts=payouts)
+        key = self.key_for(business, 'order-late')
+        self.assertEqual([a['round_id'] for a in assigned if a['position_key'] == key], ['2026-003'])
+        self.assertEqual(self.round_of(key), '2026-003')
+
+    def test_late_payout_in_finalized_round_falls_to_next_open_round(self):
+        self.seed('p0', 'order-zero', 'PP / TEST', payout_date='14.09.2026')
+        planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
+        zero_business, _ = self.current()
+        self.finalize(self.key_for(zero_business, 'order-zero'), zero_business)
+        planner.rollover(now=berlin(2026, 9, 21, 0, 5))
+        self.seed('p1', 'order-late', 'PP / TEST', payout_date='15.09.2026')
+        business, payouts = self.current()
+        assigned = planner.assign_late_payouts(business=business, payouts=payouts)
+        key = self.key_for(business, 'order-late')
+        self.assertEqual([a['round_id'] for a in assigned if a['position_key'] == key], ['2026-004'])
+        self.assertEqual(self.round_of(key), '2026-004')
+        # the finalized round itself gained nothing
+        self.assertNotEqual(self.round_of(key), '2026-003')
+
+    def test_already_assigned_position_is_a_noop(self):
+        self.seed('p0', 'order-zero', 'PP / TEST', payout_date='14.09.2026')
+        planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
+        planner.rollover(now=berlin(2026, 9, 21, 0, 5))
+        self.seed('p1', 'order-late', 'PP / TEST', payout_date='15.09.2026')
+        business, payouts = self.current()
+        first = planner.assign_late_payouts(business=business, payouts=payouts)
+        self.assertEqual(len(first), 1)
+        business2, payouts2 = self.current()
+        second = planner.assign_late_payouts(business=business2, payouts=payouts2)
+        self.assertEqual(second, [])
+        key = self.key_for(business, 'order-late')
+        self.assertEqual(self.round_of(key), '2026-003')
+
+    def test_position_without_real_payout_not_assigned(self):
+        # core.load_master_data() already drops any row without an
+        # 'Auszahlung Nr.' before business ever reaches assign_late_payouts -
+        # so an unpaid order structurally can never be assigned, for Gruppe A
+        # or B alike (mirrors round_planner's own plan_round() guarantee).
+        self.seed('p0', 'order-zero', 'PP / TEST', payout_date='14.09.2026')
+        planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
+        planner.rollover(now=berlin(2026, 9, 21, 0, 5))
+        self.seed_no_payout('order-open', 'PP / TEST')
+        business, payouts = self.current()
+        self.assertNotIn('order-open', set(business.Bestellnummer))
+        assigned = planner.assign_late_payouts(business=business, payouts=payouts)
+        self.assertEqual(assigned, [])
+
+    def test_locked_position_not_assigned(self):
+        self.seed('p0', 'order-zero', 'PP / TEST', payout_date='14.09.2026')
+        planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
+        planner.rollover(now=berlin(2026, 9, 21, 0, 5))
+        self.seed('p1', 'order-late', 'PP / TEST', payout_date='15.09.2026')
+        business, payouts = self.current()
+        business.loc[business.Bestellnummer == 'order-late', 'Prüfhinweis'] = 'Zuordnung fehlt: Mehrdeutige Bestellzuordnung'
+        assigned = planner.assign_late_payouts(business=business, payouts=payouts)
+        key = self.key_for(business, 'order-late')
+        self.assertNotIn(key, [a['position_key'] for a in assigned])
+        self.assertIsNone(self.round_of(key))
+
+    def test_mh_paid_without_invoice_not_assigned(self):
+        self.seed('p0', 'order-zero', 'PP / TEST', payout_date='14.09.2026')
+        planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
+        planner.rollover(now=berlin(2026, 9, 21, 0, 5))
+        self.seed('p1', 'order-mh-late', 'MH / TEST', payout_date='15.09.2026')
+        business, _ = self.current()
+        mh_key = self.key_for(business, 'order-mh-late')
+        with core.ledger() as db:
+            db.execute('''INSERT INTO position_workflow
+                (position_key,reviewed_at,paid_at,received_at,closed_at,source,paid_without_invoice_at)
+                VALUES(?,?,?,?,?,?,?)''',
+                (mh_key, None, None, None, None,
+                 workflow.source_snapshot(business.loc[business.position_key == mh_key].iloc[0]), '2026-09-19'))
+            db.commit()
+        business, payouts = self.current()
+        assigned = planner.assign_late_payouts(business=business, payouts=payouts)
+        self.assertNotIn(mh_key, [a['position_key'] for a in assigned])
+        self.assertIsNone(self.round_of(mh_key))
+
+    def test_group_a_and_group_b_treated_identically(self):
+        self.seed('p0', 'order-zero', 'PP / TEST', payout_date='14.09.2026')
+        planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
+        planner.rollover(now=berlin(2026, 9, 21, 0, 5))
+        self.seed('p1', 'order-late-a', 'PP / TEST', payout_date='15.09.2026')
+        self.seed('p2', 'order-late-b', 'MH / TEST', payout_date='16.09.2026')
+        business, payouts = self.current()
+        assigned = planner.assign_late_payouts(business=business, payouts=payouts)
+        a_key = self.key_for(business, 'order-late-a')
+        b_key = self.key_for(business, 'order-late-b')
+        self.assertEqual(self.round_of(a_key), '2026-003')
+        self.assertEqual(self.round_of(b_key), '2026-003')
+        self.assertEqual(len(assigned), 2)
+
+    def test_001_002_untouched(self):
+        self.seed('p0', 'order-zero', 'PP / TEST', payout_date='14.09.2026')
+        business = workflow.positions()
+        historical_key = business.iloc[0].position_key
+        with core.ledger() as db:
+            import group_b_rounds
+            group_b_rounds.initialize(db)
+            db.execute("INSERT INTO group_b_rounds VALUES('GB-2026-001',2026,1,'test',NULL,NULL,'0','h','{}','2026-01-01T00:00:00Z')")
+            db.execute("INSERT INTO group_b_round_positions VALUES(?,?,?,?)", (historical_key, 'GB-2026-001', 'evelyn_invoice', ''))
+            db.commit()
+        planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
+        planner.rollover(now=berlin(2026, 9, 21, 0, 5))
+        business, payouts = self.current()
+        planner.assign_late_payouts(business=business, payouts=payouts)
+        self.assertEqual(self.round_of(historical_key), 'GB-2026-001')
+
+    def test_dry_run_writes_nothing(self):
+        self.seed('p0', 'order-zero', 'PP / TEST', payout_date='14.09.2026')
+        planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
+        planner.rollover(now=berlin(2026, 9, 21, 0, 5))
+        self.seed('p1', 'order-late', 'PP / TEST', payout_date='15.09.2026')
+        business, payouts = self.current()
+        preview = planner.assign_late_payouts(business=business, payouts=payouts, dry_run=True)
+        key = self.key_for(business, 'order-late')
+        self.assertEqual([a['round_id'] for a in preview if a['position_key'] == key], ['2026-003'])
+        self.assertIsNone(self.round_of(key))  # nothing actually written
+        real = planner.assign_late_payouts(business=business, payouts=payouts)
+        self.assertEqual(real, preview)
+        self.assertEqual(self.round_of(key), '2026-003')
+
+
 if __name__ == '__main__':
     unittest.main()

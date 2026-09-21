@@ -91,6 +91,14 @@ def main():
     if result.get('status') != 'success':
         print(f"::error::Payout-Sync nicht erfolgreich (status={result.get('status')}): {result.get('error') or 'siehe Log'}")
         return 1
+
+    import round_planner
+    assigned = round_planner.assign_late_payouts()
+    if assigned:
+        print(f"Verspaetete Positionen nachtraeglich zugeordnet: "
+              f"{json.dumps(assigned, ensure_ascii=False)}")
+    else:
+        print('Keine verspaetete Position faellig zur Nachzuordnung - No-Op.')
     return 0
 
 

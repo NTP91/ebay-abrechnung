@@ -92,6 +92,25 @@ def _historical_round_positions(db):
             for row in db.execute('SELECT position_key, round_id FROM group_b_round_positions')}
 
 
+def _payout_dates(payouts):
+    """payout_id -> official eBay Auszahlungsdatum (Europe/Berlin), the date
+    that governs which round a position belongs to - never the import date."""
+    payout_dates = {}
+    if payouts.empty:
+        return payout_dates
+    for payout_id, block in payouts.groupby('Auszahlung Nr.'):
+        if not payout_id:
+            continue
+        text = core.clean(block.iloc[0].get('Auszahlungsdatum', ''))
+        if not text:
+            continue
+        try:
+            payout_dates[payout_id] = datetime.strptime(text, '%d.%m.%Y').replace(tzinfo=BERLIN)
+        except ValueError:
+            continue
+    return payout_dates
+
+
 def confirmed_partners(business):
     """Group A's fixed set plus Group B's persisted, durable confirmation list
     (config/partners.json via core.known_group_b_partners()) - the same
@@ -142,18 +161,7 @@ def plan_round(now=None, base_cut=None, open_round_ids=(), business=None, payout
     else:
         historical_assignment = _historical_round_positions(db)
 
-    payout_dates = {}
-    if not payouts.empty:
-        for payout_id, block in payouts.groupby('Auszahlung Nr.'):
-            if not payout_id:
-                continue
-            text = core.clean(block.iloc[0].get('Auszahlungsdatum', ''))
-            if not text:
-                continue
-            try:
-                payout_dates[payout_id] = datetime.strptime(text, '%d.%m.%Y').replace(tzinfo=BERLIN)
-            except ValueError:
-                continue
+    payout_dates = _payout_dates(payouts)
 
     confirmed = confirmed_partners(business)
     confirmed_names = {name for name, _ in confirmed}
@@ -413,3 +421,114 @@ def rollover(now=None):
         existing_ids.add(created_id)
         results.append((created_id, created))
     return results
+
+
+def _round_is_finalized(db, round_id):
+    """A neutral round counts as finalized once every position ever assigned
+    to it has closed_at set - position_workflow's own existing, single
+    source of truth for "fully done" (review + payment + - for Gruppe B -
+    Evelyn receipt), already computed identically for Gruppe A and B by
+    position_workflow.confirm(). No separate finalization flag/snapshot is
+    introduced here; a round with zero assigned positions is never
+    considered finalized (nothing has actually been confirmed done yet)."""
+    keys = [r[0] for r in db.execute(
+        'SELECT position_key FROM group_b_round_positions WHERE round_id=?', (round_id,))]
+    if not keys:
+        return False
+    placeholders = ','.join('?' * len(keys))
+    closed = [r[0] for r in db.execute(
+        f'SELECT closed_at FROM position_workflow WHERE position_key IN ({placeholders})', keys)]
+    return len(closed) == len(keys) and all(closed)
+
+
+def assign_late_payouts(business=None, payouts=None, dry_run=False):
+    """Idempotently add positions whose official eBay payout date belongs to
+    an existing, not-yet-finalized 2026-003+ round to that round's
+    group_b_round_positions - the one gap commit_round()/rollover()
+    deliberately leave open (a round, once created, is never revisited by
+    either of them; PRIMARY KEY(position_key) makes a second assignment a
+    hard error there by design).
+
+    Eligibility mirrors plan_round()'s own filters exactly - real payout
+    present, not yet assigned to ANY round, not closed/paid/paid-without-
+    invoice, no unresolved Prüfhinweis/Quellenpruefung/API-Hold, confirmed
+    partner - identical for Gruppe A and B, no group-specific branch. 001/002
+    positions are already excluded via historical_assignment and are never a
+    write target here.
+
+    If the position's home round (the existing 2026-0xx round whose own
+    recorded window contains its payout date) is finalized per
+    _round_is_finalized(), the position is routed to the next existing,
+    not-yet-finalized round instead - the finalized round's rows are never
+    read for writing and never touched. If no round's window contains the
+    date yet (older than 003 -> permanent 001/002 territory, or newer than
+    any round that currently exists -> rollover() hasn't created it yet),
+    the position is left untouched for a later run to pick up.
+
+    dry_run=True computes and returns the exact same list without writing
+    anything (the transaction is rolled back instead of committed) - for
+    previewing what a real run would do against live data first.
+
+    Returns a list of {position_key, Bestellnummer, round_id} dicts for
+    every position actually inserted (or, if dry_run, that would be
+    inserted) this call - empty on a true no-op.
+    """
+    import group_b_rounds
+
+    business = position_workflow.positions() if business is None else business
+    payouts = core.read_master(core.PAYOUTS_DB_PATH) if payouts is None else payouts
+    payout_dates = _payout_dates(payouts)
+    confirmed_names = {name for name, _ in confirmed_partners(business)}
+
+    assigned = []
+    with core.ledger() as db:
+        group_b_rounds.initialize(db)
+        db.execute('BEGIN IMMEDIATE')
+        historical_assignment = _historical_round_positions(db)
+        neutral_rounds = list(db.execute(
+            "SELECT id, sequence, snapshot FROM group_b_rounds WHERE source_kind='neutral_weekly' ORDER BY sequence"))
+        windows = []
+        for r in neutral_rounds:
+            snapshot = json.loads(r['snapshot'])
+            windows.append(dict(id=r['id'], sequence=r['sequence'],
+                                 start=datetime.fromisoformat(snapshot['window_start']),
+                                 end=datetime.fromisoformat(snapshot['window_end'])))
+        finalized = {w['id'] for w in windows if _round_is_finalized(db, w['id'])}
+
+        for _, row in business.iterrows():
+            if row['Art'] != 'Bestellung':
+                continue
+            position_key = row['position_key']
+            payout_id = row['Auszahlung Nr.']
+            if not payout_id or position_key in historical_assignment:
+                continue
+            if bool(row.get('closed_at')) or bool(row.get('paid_at')) or bool(row.get(position_workflow.PAID_WITHOUT_INVOICE)):
+                continue
+            if row['Prüfhinweis'] and 'unbekannter Partner' not in str(row['Prüfhinweis']):
+                continue
+            if row.get('Quellenpruefung') or bool(row.get('API_Hold', False)):
+                continue
+            if row['Partner'] not in confirmed_names or 'unbekannter Partner' in str(row['Prüfhinweis']):
+                continue
+            payout_date = payout_dates.get(payout_id)
+            if payout_date is None:
+                continue
+            home = next((w for w in windows if w['start'] <= payout_date < w['end']), None)
+            if home is None:
+                continue
+            target = home
+            if home['id'] in finalized:
+                candidates = sorted((w for w in windows if w['sequence'] > home['sequence'] and w['id'] not in finalized),
+                                     key=lambda w: w['sequence'])
+                if not candidates:
+                    continue
+                target = candidates[0]
+            db.execute('INSERT INTO group_b_round_positions VALUES(?,?,?,?)',
+                       (position_key, target['id'], 'evelyn_invoice', position_workflow.source_snapshot(row)))
+            historical_assignment[position_key] = target['id']
+            assigned.append(dict(position_key=position_key, Bestellnummer=row['Bestellnummer'], round_id=target['id']))
+        if dry_run:
+            db.rollback()
+        else:
+            db.commit()
+    return assigned
