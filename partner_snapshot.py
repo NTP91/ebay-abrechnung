@@ -38,7 +38,11 @@ def initialize(db):
         payouts TEXT NOT NULL, rate TEXT NOT NULL,
         snapshot_hash TEXT NOT NULL UNIQUE, finalized_at TEXT NOT NULL,
         file_bytes BLOB NOT NULL, file_hash TEXT NOT NULL,
+        line_items TEXT NOT NULL DEFAULT '[]',
         PRIMARY KEY(round_id, partner))''')
+    columns = {row[1] for row in db.execute('PRAGMA table_info(partner_round_snapshots)')}
+    if 'line_items' not in columns:
+        db.execute("ALTER TABLE partner_round_snapshots ADD COLUMN line_items TEXT NOT NULL DEFAULT '[]'")
 
 
 def _stable(value):
@@ -81,6 +85,25 @@ def _partner_round_rows(business, assigned_keys, partner):
     sale_set = set(sale_index)
     refund_index = [refund for refund, sale in links.items() if sale in sale_set]
     return business.loc[sorted(sale_set | set(refund_index))]
+
+
+def _line_items(rows, model):
+    """The frozen per-position Tab-1 (Rechnung/sale) expectations a later
+    partner-invoice check must reconcile against - order, SKU, net/gross,
+    discount, rate - independent of any live data from then on. Mirrors
+    partner_invoices.expected_statement()'s own item shape (same downstream
+    consumers can reuse the same field names), restricted to the sale-only
+    subset of `rows` since model['Rechnung'] only ever contains those, in the
+    same relative order."""
+    sale_rows = rows[rows.Art == 'Bestellung']
+    items = []
+    for (_, row), item in zip(sale_rows.iterrows(), model['Rechnung']):
+        items.append(dict(order=item['order'], sku=str(row.SKU), article=item['article'], quantity='1',
+                           net=str(item['net']), gross=str(item['gross']), discount=str(item['discount']),
+                           rate=str((model['rate'] * 100).normalize()), payout=item['payout_id']))
+    if len(items) != len(sale_rows):
+        raise ValueError('Rechnungspositionen konnten nicht eindeutig zugeordnet werden.')
+    return items
 
 
 def interim_export(round_id, partner, business=None, payouts=None, orders=None):
@@ -147,9 +170,11 @@ def finalize(round_id, partner, now=None, business=None, payouts=None, orders=No
         final_amount = regular_claim + refunds_total
         position_keys = sorted(rows.position_key)
         payout_ids = sorted(model['payouts'])
+        line_items = _line_items(rows, model)
         payload = dict(round_id=round_id, partner=partner, position_keys=position_keys,
                         regular_claim=str(regular_claim), refunds_total=str(refunds_total),
-                        final_amount=str(final_amount), payouts=payout_ids, rate=str(model['rate']))
+                        final_amount=str(final_amount), payouts=payout_ids, rate=str(model['rate']),
+                        line_items=line_items)
         digest = _hash(_stable(payload))
         file_digest = hashlib.sha256(file_bytes).hexdigest()
 
@@ -160,12 +185,13 @@ def finalize(round_id, partner, now=None, business=None, payouts=None, orders=No
             db.rollback()
             return dict(existing), False
         finalized_at = datetime.now(timezone.utc).isoformat(timespec='milliseconds')
-        db.execute('''INSERT INTO partner_round_snapshots VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''', (
+        db.execute('''INSERT INTO partner_round_snapshots VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''', (
             round_id, partner, rows.iloc[0].Gruppe, window_start, window_end,
             json.dumps(position_keys, ensure_ascii=False), len(position_keys),
             str(regular_claim), str(refunds_total), str(final_amount),
             json.dumps(payout_ids, ensure_ascii=False), str(model['rate']),
-            digest, finalized_at, file_bytes, file_digest))
+            digest, finalized_at, file_bytes, file_digest,
+            json.dumps(line_items, ensure_ascii=False)))
         db.commit()
         record = dict(db.execute('SELECT * FROM partner_round_snapshots WHERE round_id=? AND partner=?',
                                   (round_id, partner)).fetchone())
