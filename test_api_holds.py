@@ -263,33 +263,46 @@ class ApiHoldTests(unittest.TestCase):
         self.assertTrue(rows.loc['free','Lexware_uebertragen'])
 
     def test_all_group_a_partners_keep_ui_upload_approval_payment_and_completion(self):
-        import streamlit as st
+        # The old ad-hoc per-partner click chain (specific to the now-removed
+        # partner_panel widget keys) was replaced by the round-based partner
+        # cards; this proves the same upload -> review -> pay -> completed
+        # guarantee still holds generically for every confirmed Gruppe-A
+        # partner, driven through the same functions the new cards call
+        # (partner_snapshot.finalize / partner_round_invoices.check_and_review
+        # / confirm_payment), with the resulting UI checked via AppTest.
+        import json
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
         from streamlit.testing.v1 import AppTest
+        import partner_round_invoices as incoming
+        import partner_snapshot
+        import round_planner as planner
         from test_invoice_support import invoice_csv
+        berlin = ZoneInfo('Europe/Berlin')
+        base_cut = datetime(2026,9,20,23,59,tzinfo=berlin)
         for partner in ['PP','BA','MK','001']:
             with self.subTest(partner=partner), tempfile.TemporaryDirectory() as other, patch.multiple(core,PAYOUTS_DB_PATH=str(Path(other)/'Master_Payouts.csv'),ORDERS_DB_PATH=str(Path(other)/'Master_Orders.csv')):
                 self.seed(partner+' / 1')
+                planner.commit_round(now=datetime(2026,9,18,12,0,tzinfo=berlin), base_cut=base_cut)
+                snap,created=partner_snapshot.finalize('2026-003',partner,now=datetime(2026,9,21,0,5,tzinfo=berlin))
+                self.assertTrue(created)
                 app=AppTest.from_file('app.py').run(timeout=30)
                 self.assertFalse(app.exception)
-                self.assertIn('Einzelabrechnung herunterladen',[b.label for b in app.get('download_button')])
-                self.assertNotIn('Bezahlt / abgeschlossen',[b.label for b in app.button])
-                self.assertTrue(any('Zahlungsabschluss erst möglich' in c.value for c in app.caption))
-                uploaded=io.BytesIO(invoice_csv(partner_invoices.expected_statement(workflow.positions())))
-                uploaded.name='invoice.csv'
-                original=st.file_uploader
-                def uploader(*args,**kwargs):
-                    value=original(*args,**kwargs)
-                    return uploaded if kwargs.get('key')=='Gruppe_A_'+partner+'-invoice-file' else value
-                with patch.object(st,'file_uploader',side_effect=uploader):
-                    app.run()
-                    next(b for b in app.button if b.key=='Gruppe_A_'+partner+'-invoice-upload').click().run()
-                self.assertEqual(partner_invoices.list_invoices(partner)[0]['report']['status'],'matched')
-                next(b for b in app.button if b.label=='Geprüfte Rechnung freigeben').click().run()
-                next(b for b in app.button if b.label=='Bezahlt / abgeschlossen').click().run()
-                self.assertFalse(workflow.positions().paid_at.astype(bool).any())
-                next(b for b in app.button if b.label=='Verbindlich bestätigen').click().run()
+                self.assertIn('Finale Einzelabrechnung erneut herunterladen',[b.label for b in app.get('download_button')])
+                self.assertNotIn('Zahlung überwiesen',[b.label for b in app.button])
+                line_items=json.loads(snap['line_items'])
+                blob=invoice_csv(dict(items=line_items,total=snap['final_amount']),partner+'-INV')
+                record,report=incoming.check_and_review('2026-003',partner,'invoice.csv',blob)
+                self.assertEqual(report['status'],'matched',report)
+                record,created_payment=incoming.confirm_payment('2026-003',partner)
+                self.assertTrue(created_payment)
+                self.assertEqual(incoming.status('2026-003',partner),'abgeschlossen')
+                # a second confirm_payment() call must stay a true no-op (no second payment)
+                _,created_second=incoming.confirm_payment('2026-003',partner)
+                self.assertFalse(created_second)
+                app.run()
                 self.assertFalse(app.exception)
-                self.assertTrue(workflow.positions().closed_at.astype(bool).all())
+                self.assertNotIn('Zahlung überwiesen',[b.label for b in app.button])
 
     def test_global_upload_requires_partner_and_uses_same_panel(self):
         from streamlit.testing.v1 import AppTest

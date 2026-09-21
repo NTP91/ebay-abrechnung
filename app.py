@@ -659,10 +659,10 @@ with home:
 
 with group_a:
     st.subheader('Gruppe A · Direktabrechnungen')
-    st.caption('Rechnung hochladen → automatisch prüfen → freigeben. Danach erscheint „Bezahlt / abgeschlossen“.')
-    st.caption('PP · BA · MK · 001 — 0,5 % Rabatt. Unabhängig von Patrick → Evelyn. Abschluss erst nach Prüfung und bestätigter Partnerzahlung.')
-    with st.container(border=True):
-        partner_panel(partner_ready[partner_ready.Gruppe=='Gruppe A'] if not partner_ready.empty else partner_ready,'0,5 %','Gruppe_A',business[business.Gruppe=='Gruppe A'] if not business.empty else business)
+    st.caption('PP · BA · MK · 001 — 0,5 % Rabatt. Abschluss erst nach Prüfung und bestätigter Partnerzahlung.')
+    round_ui.render_partner_cards(business, raw, orders_master, group='Gruppe A')
+    round_ui.render_open_documents(business, group='Gruppe A')
+    round_ui.render_invoice_history(business, group='Gruppe A')
 
 with group_b:
     b_ready=ready[ready.Gruppe=='Gruppe B'] if not ready.empty else ready
@@ -722,7 +722,9 @@ with group_b:
     with st.container(border=True):
         st.subheader('Partner → Patrick')
         st.caption('Einzelabrechnungen für MH, NB und weitere zugeordnete Partner · 3,5 % Rabatt')
-        partner_panel(partner_ready[partner_ready.Gruppe=='Gruppe B'] if not partner_ready.empty else partner_ready,'3,5 %','Partner_Patrick',business[business.Gruppe=='Gruppe B'] if not business.empty else business)
+        round_ui.render_partner_cards(business, raw, orders_master, group='Gruppe B')
+        round_ui.render_open_documents(business, group='Gruppe B')
+        round_ui.render_invoice_history(business, group='Gruppe B')
     with st.container(border=True):
         st.subheader('Gesamtabrechnung Gruppe B an Evelyn')
         active_invoices=[item for item in invoices.values() if not item['discarded']]

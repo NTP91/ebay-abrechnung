@@ -14,10 +14,12 @@ import streamlit as st
 
 import core
 import group_b_rounds
+import partner_export
 import partner_round_invoices
 import partner_snapshot
 import position_workflow
 import recovery_cases
+import round_planner
 import round_status
 import studio_view
 
@@ -136,18 +138,25 @@ def render_round_matrix(result):
     st.dataframe(frame, use_container_width=True)
 
 
-def _historical_active_position_keys(round_id):
+def _historical_active_position_keys(round_id, db=None):
     """position_keys assigned to this historical round with an actual active
     claim - excludes role='hold_reserve' (group_b_rounds.py's own existing
     schema: positions reserved for a not-yet-invoiced API hold, never an
     active claim to begin with). A currently live API-Hold (api_holds.mask())
-    is filtered separately in _historical_matrix() since it needs the live
-    business rows, not just this stored role column."""
-    with core.ledger() as db:
-        group_b_rounds.initialize(db)
-        return {r[0] for r in db.execute(
+    is filtered separately by the caller since it needs the live business
+    rows, not just this stored role column.
+
+    db: an already-open core.ledger() connection to reuse (core.ledger()'s
+    local-file FileLock is not reentrant) - opens its own otherwise."""
+    def _query(connection):
+        group_b_rounds.initialize(connection)
+        return {r[0] for r in connection.execute(
             "SELECT position_key FROM group_b_round_positions WHERE round_id=? AND role != 'hold_reserve'",
             (round_id,))}
+    if db is not None:
+        return _query(db)
+    with core.ledger() as own_db:
+        return _query(own_db)
 
 
 def _historical_matrix(business, round_id):
@@ -276,10 +285,33 @@ def render_overview_section(business=None):
     render_historical_rounds(business)
 
 
-def render_statement_panel(round_id, partner, status):
+def _live_claim(round_id, partner, business, payouts, orders):
+    """Live, not-yet-frozen claim estimate for a still-open round - reuses
+    the exact same row selection partner_snapshot.interim_export() already
+    uses and the unchanged partner_export calculation. Finalization freezes
+    this number into partner_snapshot's own final_amount; it never makes the
+    claim computable in the first place - it was already computable here."""
+    with core.ledger() as db:
+        assigned_keys = {r[0] for r in db.execute(
+            'SELECT position_key FROM group_b_round_positions WHERE round_id=?', (round_id,))}
+    rows = partner_snapshot._partner_round_rows(business, assigned_keys, partner)
+    if rows.empty:
+        return None, 0
+    try:
+        model = partner_export.prepare_partner_export(rows, payouts, orders, statement_type='partner')
+    except ValueError:
+        return None, int((rows.Art == 'Bestellung').sum())
+    return model['totals']['Rechnung']['gross'] + model['totals']['Gutschriften']['gross'], int((rows.Art == 'Bestellung').sum())
+
+
+def render_statement_panel(round_id, partner, status, business=None, payouts=None, orders=None):
     st.markdown('**Einzelabrechnung**')
-    st.write(f"Positionen: {status['positions']}")
-    st.write('Partneranspruch: ' + (euros(float(status['claim'])) if status['claim'] is not None else 'noch nicht final'))
+    claim, live_positions = status['claim'], None
+    if claim is None and status['positions'] and business is not None and payouts is not None and orders is not None:
+        claim, live_positions = _live_claim(round_id, partner, business, payouts, orders)
+    positions = live_positions if live_positions is not None else status['positions']
+    st.write(f"Positionen: {positions}")
+    st.write('Partneranspruch: ' + (euros(float(claim)) if claim is not None else 'noch nicht berechenbar'))
     if status['positions'] == 0:
         st.caption('0 Positionen · nichts erforderlich')
         return
@@ -394,61 +426,202 @@ def render_recovery_panel(round_id, partner):
                     st.error(str(exc))
 
 
-def render_partner_card(round_id, partner):
-    status = round_status.partner_status(round_id, partner)
-    st.markdown(f"## {partner} · {round_id}")
-    cols = st.columns(4)
-    cols[0].metric('Positionen', status['positions'])
-    cols[1].metric('Partneranspruch', euros(float(status['claim'])) if status['claim'] is not None else '–')
-    cols[2].metric('Status', overall_label(status['overall_status']))
-    cols[3].metric('Gruppe', status['group'] or '–')
+def _historical_partner_case(business, round_id, partner, invoices=None, db=None):
+    """One historical open/documented case for `partner` in a historical
+    GB-2026-xxx round - built only from the same existing facts as
+    _historical_matrix(), reused per-partner. None if this partner has no
+    active (non-held, non-hold_reserve) position there, or if everything is
+    already fully settled (invoiced and paid) and therefore not worth a
+    separate callout. Does not compute a displayed amount itself (that needs
+    studio_view.partner_summary(), which internally opens its own
+    core.ledger() and would deadlock while `db` is still open here) - the
+    caller fills 'amount' via _historical_case_amount() once this ledger
+    block has closed."""
+    import api_holds
+    import partner_invoices
 
-    left, right = st.columns(2)
-    with left:
-        render_invoice_and_payment_panel(round_id, partner, status)
-    with right:
-        render_statement_panel(round_id, partner, status)
-    render_recovery_panel(round_id, partner)
+    keys = _historical_active_position_keys(round_id, db=db)
+    if not keys or business.empty:
+        return None
+    rows = business[business.position_key.isin(keys) & (business.Art == 'Bestellung') & (business.Partner == partner)]
+    if not rows.empty:
+        rows = rows[~api_holds.mask(rows)]
+    if rows.empty:
+        return None
+    partner_keys = set(rows.position_key)
+    paid_ok = bool((rows.paid_at.astype(bool) | rows.closed_at.astype(bool)
+                    | rows[position_workflow.PAID_WITHOUT_INVOICE].astype(bool)).all())
+    invoices = invoices if invoices is not None else partner_invoices.list_invoices()
+    invoiced = any(
+        record['partner'] == partner and record['approved_at']
+        and partner_keys.intersection(item['key'] for item in record['expected']['items'])
+        for record in invoices)
+    if paid_ok and invoiced:
+        return None  # fully settled historically - belongs in Rechnungshistorie, not a callout here
+    links = core.refund_links(business)
+    refund_idx = [r for r, s in links.items() if s in set(rows.index)]
+    combined_keys = list(rows.position_key) + [business.loc[i].position_key for i in refund_idx]
+    return dict(round_id=round_id, positions=len(rows), amount=None, paid_ok=paid_ok, invoiced=invoiced,
+                combined_keys=combined_keys)
 
 
-def render_partner_picker(round_id):
-    result = round_status.round_status(round_id)
-    names = [p['partner'] for p in result['partners']]
-    if not names:
-        return
-    default = st.session_state.get('round_ui_active_partner')
-    index = names.index(default) if default in names else 0
-    partner = st.selectbox('Partner', names, index=index, key=f'partner-picker-{round_id}')
-    st.session_state['round_ui_active_partner'] = partner
-    render_partner_card(round_id, partner)
+def _historical_case_amount(business, case):
+    """Fills in 'amount' for a case _historical_partner_case() returned -
+    reuses studio_view.partner_summary() (unchanged) on exactly the same row
+    set, called outside any open core.ledger() to avoid the nested-lock
+    deadlock that function's own invoice lookups would otherwise hit."""
+    rows = business[business.position_key.isin(case['combined_keys'])]
+    try:
+        summary = studio_view.partner_summary(rows)
+        if not summary.empty:
+            case['amount'] = summary.iloc[0]['Verbleibender Anspruch']
+    except ValueError:
+        pass
+    return case
 
 
-def render_open_documents():
+def _older_open_round_case(business, round_id, partner, db):
+    """An older (not-current) 2026-003+ round where this partner still has
+    an unresolved overall_status - round_status.py's own existing
+    computation, just queried for a round other than the current one."""
+    result = round_status.partner_status(round_id, partner, business=business, db_context=db)
+    if result['overall_status'] in ('abgeschlossen', 'nichts_erforderlich'):
+        return None
+    return result
+
+
+def _sort_rank(partner, current_status, historical_cases):
+    """Partners with an open task (current or historical) first; clean
+    0-position/nothing-required partners last and collapsed by default."""
+    blocked = bool(historical_cases) or (current_status and current_status['overall_status']
+                                          not in ('abgeschlossen', 'nichts_erforderlich'))
+    zero = bool(current_status) and current_status['positions'] == 0 and not historical_cases
+    rank = 0 if blocked else (2 if zero else 1)
+    return rank, partner
+
+
+def render_partner_cards(business=None, payouts=None, orders=None, group=None):
+    """Every confirmed partner (of `group`, or all if None) as a compact
+    expander - no dropdown, one shared data load. Partners with an open
+    current or historical task sort first; 0-position/nothing-required
+    partners sort last and stay collapsed by default."""
+    import partner_invoices
+
+    business = position_workflow.positions() if business is None else business
+    payouts = core.read_master(core.PAYOUTS_DB_PATH) if payouts is None else payouts
+    orders = core.read_master(core.ORDERS_DB_PATH) if orders is None else orders
+    invoices = partner_invoices.list_invoices()  # its own ledger() read - must happen before ours opens
+
+    round_ids = _neutral_round_ids()
+    current_round = round_ids[0] if round_ids else None
+    older_rounds = round_ids[1:]
+    with core.ledger() as db:
+        group_b_rounds.initialize(db)
+        historical_round_ids = [r[0] for r in db.execute(
+            "SELECT id FROM group_b_rounds WHERE source_kind != 'neutral_weekly' ORDER BY sequence")]
+        partner_snapshot.initialize(db)
+        partner_round_invoices.initialize(db)
+        recovery_cases.initialize(db)
+
+        confirmed = [name for name, g in round_planner.confirmed_partners(business) if group is None or g == group]
+        current_status = {}
+        if current_round:
+            for name in confirmed:
+                current_status[name] = round_status.partner_status(current_round, name, business=business, db_context=db)
+
+        historical_cases = {name: [] for name in confirmed}
+        for round_id in historical_round_ids:
+            for name in confirmed:
+                case = _historical_partner_case(business, round_id, name, invoices=invoices, db=db)
+                if case:
+                    historical_cases[name].append(case)
+        for round_id in older_rounds:
+            for name in confirmed:
+                case = _older_open_round_case(business, round_id, name, db)
+                if case:
+                    historical_cases[name].append(dict(round_id=round_id, older_neutral=case))
+
+    for cases in historical_cases.values():
+        for case in cases:
+            if 'combined_keys' in case:
+                _historical_case_amount(business, case)
+
+    for partner in sorted(confirmed, key=lambda name: _sort_rank(name, current_status.get(name), historical_cases.get(name))):
+        status = current_status.get(partner)
+        cases = historical_cases.get(partner) or []
+        if status:
+            claim = status['claim']
+            if claim is None and status['positions']:
+                claim, _ = _live_claim(current_round, partner, business, payouts, orders)
+            if status['positions'] == 0:
+                icon_text = '➖ nichts erforderlich' if not cases else '❌ historischer Fall offen'
+            elif status['blockers']:
+                icon_text = f"❌ {status['blockers'][0]}"
+            else:
+                icon_text = '✅ abgeschlossen'
+            claim_text = euros(float(claim)) if claim is not None else '–'
+            header = f"{partner} · {current_round} · {status['positions']} Positionen · {claim_text} · {icon_text}"
+        else:
+            header = f"{partner} · {'kein aktuelle Runde' if not current_round else current_round} · ➖ nichts erforderlich"
+        expanded = bool(cases) or (status and status['overall_status'] not in ('abgeschlossen', 'nichts_erforderlich'))
+        with st.expander(header, expanded=bool(expanded)):
+            for case in cases:
+                if 'older_neutral' in case:
+                    older = case['older_neutral']
+                    older_claim = euros(float(older['claim'])) if older['claim'] is not None else '–'
+                    st.warning(f"**Offene ältere Runde {case['round_id']}** · {older['positions']} Positionen · "
+                               f"{older_claim} · {' · '.join(older['blockers']) or overall_label(older['overall_status'])}")
+                else:
+                    amount = euros(float(case['amount'])) if case['amount'] is not None else '–'
+                    zahlung_text = '✅ bezahlt' if case['paid_ok'] else '❌ Zahlung offen'
+                    rechnung_text = '✅ geprüft' if case['invoiced'] else '❌ Rechnung fehlt'
+                    st.warning(f"**Historischer offener Beleg** · {case['round_id']} · {case['positions']} Positionen · "
+                               f"{amount} · {zahlung_text} · {rechnung_text}")
+            if status and current_round:
+                st.markdown(f'**Aktuelle Runde {current_round}**')
+                left, right = st.columns(2)
+                with left:
+                    render_invoice_and_payment_panel(current_round, partner, status)
+                with right:
+                    render_statement_panel(current_round, partner, status, business=business,
+                                            payouts=payouts, orders=orders)
+                render_recovery_panel(current_round, partner)
+            elif not cases:
+                st.caption('Keine aktuelle Runde vorhanden.')
+
+
+def render_open_documents(business=None, group=None):
     """'Offene Belege': every partner/round still missing a reviewed
     invoice or an open recovery credit, across all neutral rounds - MH's
     paid-without-invoice historical case belongs to the old 001/002 model
     and is deliberately out of scope here (round_status.py refuses it)."""
+    business = position_workflow.positions() if business is None else business
+    allowed = None if group is None else {name for name, g in round_planner.confirmed_partners(business) if g == group}
     round_ids = _neutral_round_ids()
     missing_invoice, missing_credit = [], []
     for round_id in round_ids:
-        result = round_status.round_status(round_id)
+        result = round_status.round_status(round_id, business=business)
         for p in result['partners']:
+            if allowed is not None and p['partner'] not in allowed:
+                continue
             if p['invoice_status'] == 'fehlt':
                 missing_invoice.append((round_id, p['partner']))
             if p['credit_status'] == 'fehlt':
                 missing_credit.append((round_id, p['partner']))
     total_open = len(missing_invoice) + len(missing_credit)
-    with st.expander(f'Offene Belege · {"⚠ " + str(total_open) + " offen" if total_open else "✅ keine offen"}',
+    with st.expander(f'Offene Belege · {"❌ " + str(total_open) + " offen" if total_open else "✅ keine offen"}',
                       expanded=bool(total_open)):
         if not total_open:
             st.caption('Keine offenen Belege.')
         for round_id, partner in missing_invoice:
-            st.write(f'⚠ {partner} · {round_id} · Rechnung fehlt')
+            st.write(f'❌ {partner} · {round_id} · Rechnung fehlt')
         for round_id, partner in missing_credit:
-            st.write(f'⚠ {partner} · {round_id} · Gutschrift fehlt')
+            st.write(f'❌ {partner} · {round_id} · Gutschrift fehlt')
 
 
-def render_invoice_history():
+def render_invoice_history(business=None, group=None):
+    business = position_workflow.positions() if business is None else business
+    allowed = None if group is None else {name for name, g in round_planner.confirmed_partners(business) if g == group}
     round_ids = _neutral_round_ids()
     rows = []
     with core.ledger() as db:
@@ -456,6 +629,8 @@ def render_invoice_history():
         for round_id in round_ids:
             rows.extend(dict(r) for r in db.execute(
                 'SELECT * FROM partner_round_invoices WHERE round_id=? ORDER BY uploaded_at DESC', (round_id,)))
+    if allowed is not None:
+        rows = [row for row in rows if row['partner'] in allowed]
     if not rows:
         return
     with st.expander(f'Rechnungshistorie · {len(rows)}', expanded=False):
@@ -478,22 +653,16 @@ def render_invoice_history():
                                         icon=':material/download:')
 
 
-def render(business=None):
+def render(business=None, payouts=None, orders=None):
     """Full workspace (overview + partner cards + open documents + invoice
     history) - not currently wired into any app.py tab (the round overview
-    now lives inline in Übersicht via render_overview_section(); partner-
-    card navigation is the next UI step). Kept intact and working so that
-    step can reuse it without rebuilding it."""
+    lives inline in Übersicht via render_overview_section(); partner cards
+    are wired into the Gruppe A/B tabs via render_partner_cards()). Kept
+    intact and working for reuse."""
     st.header('Abrechnungsrunden')
     render_overview_section(business)
-    round_ids = _neutral_round_ids()
-    active = st.session_state.get('round_ui_active_round')
-    if active not in round_ids:
-        active = next((rid for rid in round_ids
-                        if round_status.round_status(rid)['round_status'] != 'abgeschlossen'), None) or (round_ids[0] if round_ids else None)
-    if active:
-        st.divider()
-        render_partner_picker(active)
     st.divider()
-    render_open_documents()
-    render_invoice_history()
+    render_partner_cards(business, payouts, orders)
+    st.divider()
+    render_open_documents(business)
+    render_invoice_history(business)
