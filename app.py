@@ -873,7 +873,9 @@ with pending:
             st.dataframe(raw[raw.Typ.str.strip().str.casefold()=='auszahlung'][['Auszahlung Nr.','Betrag abzügl. Kosten']],hide_index=True,use_container_width=True)
 
 with history:
-    ph,oh,lh,ih=st.tabs(['Payouts','Bestellberichte','Lexware','Eingangsrechnungen'])
+    archive_tab,ph,oh,lh,ih=st.tabs(['Abrechnungsarchiv','Payouts','Bestellberichte','Lexware','Eingangsrechnungen'])
+    with archive_tab:
+        round_ui.render_archive(business,raw,orders_master)
     with ih:
         incoming=partner_invoices.list_invoices()
         if not incoming: st.info('Noch keine Partnerrechnungen hochgeladen.')
