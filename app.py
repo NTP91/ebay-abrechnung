@@ -16,6 +16,7 @@ import group_b_rounds
 import lexoffice_import
 import payout_reconciliation
 import trust_risk_ui
+import round_ui
 import supabase_store
 from datetime import date
 from partner_export import export_partner_excel, prepare_partner_export
@@ -611,7 +612,9 @@ with st.expander('Payout-Abgleich · Bankbetrag und einzelne Positionen'):
         except ValueError as exc:
             st.error(str(exc))
 
-home, group_a, group_b, pending, history, dashboard, trust_risk_tab, lexoffice_import_tab = st.tabs(['Übersicht','Gruppe A','Gruppe B','Offene Positionen','Historie','Dashboard','Trust / Risk','Lexoffice Bestell-Import'])
+home, round_tab, group_a, group_b, pending, history, dashboard, trust_risk_tab, lexoffice_import_tab = st.tabs(['Übersicht','Runde 2026-003+','Gruppe A','Gruppe B','Offene Positionen','Historie','Dashboard','Trust / Risk','Lexoffice Bestell-Import'])
+with round_tab:
+    round_ui.render(business)
 with home:
     total=len(catalogue)
     assigned=int(catalogue.payout.sum())
