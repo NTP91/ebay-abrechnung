@@ -151,26 +151,34 @@ def detect(business=None, dry_run=False):
     return created
 
 
-def list_cases(round_id=None, partner=None):
-    with core.ledger() as db:
-        initialize(db)
-        clauses, params = [], []
-        if round_id is not None:
-            clauses.append('current_round_id=?'); params.append(round_id)
-        if partner is not None:
-            clauses.append('partner=?'); params.append(partner)
-        where = (' WHERE ' + ' AND '.join(clauses)) if clauses else ''
-        rows = db.execute(f'SELECT * FROM recovery_cases{where} ORDER BY detected_at', params).fetchall()
+def _list_cases(db, round_id=None, partner=None):
+    initialize(db)
+    clauses, params = [], []
+    if round_id is not None:
+        clauses.append('current_round_id=?'); params.append(round_id)
+    if partner is not None:
+        clauses.append('partner=?'); params.append(partner)
+    where = (' WHERE ' + ' AND '.join(clauses)) if clauses else ''
+    rows = db.execute(f'SELECT * FROM recovery_cases{where} ORDER BY detected_at', params).fetchall()
     return [dict(row) for row in rows]
 
 
-def status(round_id, partner):
+def list_cases(round_id=None, partner=None, db=None):
+    """db: an already-open core.ledger() connection to reuse (core.ledger()'s
+    local-file FileLock is not reentrant) - opens its own otherwise."""
+    if db is not None:
+        return _list_cases(db, round_id=round_id, partner=partner)
+    with core.ledger() as own_db:
+        return _list_cases(own_db, round_id=round_id, partner=partner)
+
+
+def status(round_id, partner, db=None):
     """'nicht_erforderlich' | 'fehlt' | 'erledigt' for the partner card in
     this round. Once any case has ever existed here, the result is
     permanently 'fehlt' or 'erledigt' - never 'nicht_erforderlich' again,
     even after resolution (the historical record of "was required, now
     done" must stay visible, per the manuscript's own rule)."""
-    cases = list_cases(round_id=round_id, partner=partner)
+    cases = list_cases(round_id=round_id, partner=partner, db=db)
     if not cases:
         return 'nicht_erforderlich'
     if any(case['status'] == 'offen' for case in cases):
