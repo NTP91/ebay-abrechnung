@@ -165,12 +165,18 @@ class PartnerInvoiceTests(unittest.TestCase):
         self.assertEqual(record['report']['status'],'matched',record['report'])
 
     def test_existing_partner_workbook_with_empty_credit_sheet_requires_invoice_number(self):
+        """Bestellnachweis/Payoutnachweis are visible by design (Mini-Fix
+        "Sichtbarkeit ändern"), so invoice_parser.extract() - unchanged,
+        scans every visible sheet - now also sees each position restated on
+        those two evidence tabs. Re-uploading our own full export as if it
+        were a partner invoice therefore correctly reports every position as
+        a duplicate ('deviation'), never silently accepting an ambiguous
+        re-upload as 'matched'/'manual_required'."""
         from partner_export import export_partner_excel
         record=self.upload(export_partner_excel(self.rows),'partner.xlsx')
-        self.assertEqual(record['report']['status'],'manual_required',record['report'])
-        self.assertEqual(len(record['report']['matched']),2)
+        self.assertEqual(record['report']['status'],'deviation',record['report'])
+        self.assertTrue(all('doppelt enthalten' in error for error in record['report']['errors']))
         self.assertEqual(record['extracted']['payouts'],['7700000001','7700000002'])
-        self.assertTrue(any('Rechnungsnummer' in warning for warning in record['report']['warnings']))
 
     def test_pdf_table_matches_and_textless_pdf_stays_manual(self):
         from reportlab.platypus import SimpleDocTemplate,Table,TableStyle

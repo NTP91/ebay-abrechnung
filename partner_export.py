@@ -621,20 +621,17 @@ def export_partner_excel(rows, payouts=None, orders=None, statement_type='partne
         third_sheet_content = _fill_sheet(master_template, model, 'HistorischeGutschriften')
         fourth_sheet_content = _bestellnachweis_sheet(model)
         fifth_sheet_content = _payoutnachweis_sheet(model)
-        # Bestellnachweis/Payoutnachweis restate the same Bestellnummer/SKU
-        # columns already itemized in Rechnung/Gutschriften/HistorischeGutschriften
-        # - a second, generic-looking "Bestellnummer" table in the same
-        # workbook. invoice_parser.extract() (used unchanged when a partner's
-        # own invoice is later uploaded and reconciled - never touched here)
-        # scans every *visible* sheet for such tables, so leaving these two
-        # visible would make it see every position twice and misreport
-        # "Rechnungsposition doppelt enthalten". Marking them hidden (not
-        # deleted, not inaccessible - Excel: right-click a tab -> Unhide...)
-        # keeps the evidentiary data fully in the file without touching that
-        # unrelated, protected reconciliation logic at all.
+        # Bestellnachweis/Payoutnachweis are visible by design (evidence the
+        # partner should actually see without an extra Unhide step). This
+        # restates the same Bestellnummer/SKU columns already itemized in
+        # Rechnung/Gutschriften/HistorischeGutschriften - if this same
+        # workbook is later re-uploaded as a "partner invoice", invoice_
+        # parser.extract() (unchanged, never touched here) will see every
+        # position twice and report it as a duplicate/deviation instead of
+        # matching. Known, accepted trade-off; see test_partner_invoices.py.
         extra_sheets = ((THIRD_SHEET_TARGET, THIRD_SHEET_RID, '3', DISPLAY_NAMES['HistorischeGutschriften'], None),
-                        (FOURTH_SHEET_TARGET, FOURTH_SHEET_RID, '4', 'Bestellnachweis', 'hidden'),
-                        (FIFTH_SHEET_TARGET, FIFTH_SHEET_RID, '5', 'Payoutnachweis', 'hidden'))
+                        (FOURTH_SHEET_TARGET, FOURTH_SHEET_RID, '4', 'Bestellnachweis', None),
+                        (FIFTH_SHEET_TARGET, FIFTH_SHEET_RID, '5', 'Payoutnachweis', None))
         for entry in source.infolist():
             content = source.read(entry.filename)
             if entry.filename in ('xl/worksheets/sheet1.xml', 'xl/worksheets/sheet2.xml'):
