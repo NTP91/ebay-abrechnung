@@ -459,6 +459,7 @@ class LatePayoutAssignmentTests(unittest.TestCase):
         sale = payout(payout_id, order, order, sku=sku, amount=amount)
         sale['Auszahlungsdatum'] = payout_date
         sale['Auszahlungsstatus'] = 'Betrag überwiesen'
+        sale['Transaktionsbetrag (inkl. Kosten)'] = amount  # needed by partner_export.prepare_partner_export
         core.import_reports([sale], core.PAYOUTS_DB_PATH, 'payout')
 
     def seed_no_payout(self, order, sku, amount='50,00'):
@@ -472,16 +473,6 @@ class LatePayoutAssignmentTests(unittest.TestCase):
 
     def key_for(self, business, order):
         return business.loc[business.Bestellnummer == order].iloc[0].position_key
-
-    def finalize(self, position_key, business):
-        row = business.loc[business.position_key == position_key].iloc[0]
-        with core.ledger() as db:
-            db.execute('''INSERT INTO position_workflow
-                (position_key,reviewed_at,paid_at,received_at,closed_at,source,paid_without_invoice_at)
-                VALUES(?,?,?,?,?,?,?)''',
-                (position_key, '2026-09-19', '2026-09-19', '2026-09-19', '2026-09-19',
-                 workflow.source_snapshot(row), None))
-            db.commit()
 
     def round_of(self, position_key):
         with core.ledger() as db:
@@ -502,11 +493,11 @@ class LatePayoutAssignmentTests(unittest.TestCase):
         self.assertEqual([a['round_id'] for a in assigned if a['position_key'] == key], ['2026-003'])
         self.assertEqual(self.round_of(key), '2026-003')
 
-    def test_late_payout_in_finalized_round_falls_to_next_open_round(self):
+    def test_late_payout_for_finalized_partner_falls_to_next_open_round(self):
+        import partner_snapshot
         self.seed('p0', 'order-zero', 'PP / TEST', payout_date='14.09.2026')
         planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
-        zero_business, _ = self.current()
-        self.finalize(self.key_for(zero_business, 'order-zero'), zero_business)
+        partner_snapshot.finalize('2026-003', 'PP', now=berlin(2026, 9, 21, 0, 5))
         planner.rollover(now=berlin(2026, 9, 21, 0, 5))
         self.seed('p1', 'order-late', 'PP / TEST', payout_date='15.09.2026')
         business, payouts = self.current()
@@ -514,7 +505,7 @@ class LatePayoutAssignmentTests(unittest.TestCase):
         key = self.key_for(business, 'order-late')
         self.assertEqual([a['round_id'] for a in assigned if a['position_key'] == key], ['2026-004'])
         self.assertEqual(self.round_of(key), '2026-004')
-        # the finalized round itself gained nothing
+        # the finalized round/partner itself gained nothing
         self.assertNotEqual(self.round_of(key), '2026-003')
 
     def test_already_assigned_position_is_a_noop(self):

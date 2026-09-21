@@ -423,31 +423,12 @@ def rollover(now=None):
     return results
 
 
-def _round_is_finalized(db, round_id):
-    """A neutral round counts as finalized once every position ever assigned
-    to it has closed_at set - position_workflow's own existing, single
-    source of truth for "fully done" (review + payment + - for Gruppe B -
-    Evelyn receipt), already computed identically for Gruppe A and B by
-    position_workflow.confirm(). No separate finalization flag/snapshot is
-    introduced here; a round with zero assigned positions is never
-    considered finalized (nothing has actually been confirmed done yet)."""
-    keys = [r[0] for r in db.execute(
-        'SELECT position_key FROM group_b_round_positions WHERE round_id=?', (round_id,))]
-    if not keys:
-        return False
-    placeholders = ','.join('?' * len(keys))
-    closed = [r[0] for r in db.execute(
-        f'SELECT closed_at FROM position_workflow WHERE position_key IN ({placeholders})', keys)]
-    return len(closed) == len(keys) and all(closed)
-
-
 def assign_late_payouts(business=None, payouts=None, dry_run=False):
     """Idempotently add positions whose official eBay payout date belongs to
-    an existing, not-yet-finalized 2026-003+ round to that round's
-    group_b_round_positions - the one gap commit_round()/rollover()
-    deliberately leave open (a round, once created, is never revisited by
-    either of them; PRIMARY KEY(position_key) makes a second assignment a
-    hard error there by design).
+    an existing 2026-003+ round to that round's group_b_round_positions - the
+    one gap commit_round()/rollover() deliberately leave open (a round, once
+    created, is never revisited by either of them; PRIMARY KEY(position_key)
+    makes a second assignment a hard error there by design).
 
     Eligibility mirrors plan_round()'s own filters exactly - real payout
     present, not yet assigned to ANY round, not closed/paid/paid-without-
@@ -456,14 +437,17 @@ def assign_late_payouts(business=None, payouts=None, dry_run=False):
     positions are already excluded via historical_assignment and are never a
     write target here.
 
-    If the position's home round (the existing 2026-0xx round whose own
-    recorded window contains its payout date) is finalized per
-    _round_is_finalized(), the position is routed to the next existing,
-    not-yet-finalized round instead - the finalized round's rows are never
-    read for writing and never touched. If no round's window contains the
-    date yet (older than 003 -> permanent 001/002 territory, or newer than
-    any round that currently exists -> rollover() hasn't created it yet),
-    the position is left untouched for a later run to pick up.
+    The lock is per (round, partner), not per round: if the position's home
+    round (the existing 2026-0xx round whose own recorded window contains
+    its payout date) already has a partner_snapshot.finalize()'d snapshot
+    for THIS partner, the position is routed to the next existing round
+    where that same partner is not yet locked instead - the locked round's
+    rows for that partner are never read for writing and never touched. A
+    finalized partner never blocks any other partner in the same round. If
+    no round's window contains the date yet (older than 003 -> permanent
+    001/002 territory, or newer than any round that currently exists ->
+    rollover() hasn't created it yet), the position is left untouched for a
+    later run to pick up.
 
     dry_run=True computes and returns the exact same list without writing
     anything (the transaction is rolled back instead of committed) - for
@@ -474,6 +458,7 @@ def assign_late_payouts(business=None, payouts=None, dry_run=False):
     inserted) this call - empty on a true no-op.
     """
     import group_b_rounds
+    import partner_snapshot
 
     business = position_workflow.positions() if business is None else business
     payouts = core.read_master(core.PAYOUTS_DB_PATH) if payouts is None else payouts
@@ -483,6 +468,7 @@ def assign_late_payouts(business=None, payouts=None, dry_run=False):
     assigned = []
     with core.ledger() as db:
         group_b_rounds.initialize(db)
+        partner_snapshot.initialize(db)
         db.execute('BEGIN IMMEDIATE')
         historical_assignment = _historical_round_positions(db)
         neutral_rounds = list(db.execute(
@@ -493,7 +479,6 @@ def assign_late_payouts(business=None, payouts=None, dry_run=False):
             windows.append(dict(id=r['id'], sequence=r['sequence'],
                                  start=datetime.fromisoformat(snapshot['window_start']),
                                  end=datetime.fromisoformat(snapshot['window_end'])))
-        finalized = {w['id'] for w in windows if _round_is_finalized(db, w['id'])}
 
         for _, row in business.iterrows():
             if row['Art'] != 'Bestellung':
@@ -516,9 +501,11 @@ def assign_late_payouts(business=None, payouts=None, dry_run=False):
             home = next((w for w in windows if w['start'] <= payout_date < w['end']), None)
             if home is None:
                 continue
+            partner = row['Partner']
             target = home
-            if home['id'] in finalized:
-                candidates = sorted((w for w in windows if w['sequence'] > home['sequence'] and w['id'] not in finalized),
+            if partner_snapshot.is_locked(db, home['id'], partner):
+                candidates = sorted((w for w in windows if w['sequence'] > home['sequence']
+                                      and not partner_snapshot.is_locked(db, w['id'], partner)),
                                      key=lambda w: w['sequence'])
                 if not candidates:
                     continue
