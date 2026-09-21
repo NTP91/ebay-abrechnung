@@ -157,7 +157,7 @@ class PartnerCardTests(unittest.TestCase):
         self.assertEqual(result['positions'], 0)
         self.assertEqual(result['payment_status'], 'nicht_erforderlich')
 
-        case = round_ui._historical_partner_case(business, 'GB-2026-001', 'MH')
+        case = round_ui._historical_partner_case(business, ['GB-2026-001'], 'MH')
         self.assertIsNotNone(case)
         self.assertEqual(case['positions'], 7)
         self.assertTrue(case['paid_ok'])
@@ -179,7 +179,7 @@ class PartnerCardTests(unittest.TestCase):
         self.assertNotEqual(result['claim'], None) if result['snapshot_status'] == 'vorhanden' else None
         # the historical 3 must never be added on top
         self.assertLess(result['positions'], 3 + 1)
-        case = round_ui._historical_partner_case(business, 'GB-2026-001', 'MH')
+        case = round_ui._historical_partner_case(business, ['GB-2026-001'], 'MH')
         self.assertEqual(case['positions'], 3)
 
     # 10. no second payment button for an already-paid historical case
@@ -210,7 +210,7 @@ class PartnerCardTests(unittest.TestCase):
         app = self.run_app()
         body = self.all_text(app)
         # the historical case is surfaced, but never merged into a "current" count
-        self.assertIn('Historischer offener Beleg', body)
+        self.assertIn('Offene ältere Fälle', body)
 
 
 if __name__ == '__main__':

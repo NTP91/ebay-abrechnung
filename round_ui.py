@@ -306,15 +306,20 @@ def _live_claim(round_id, partner, business, payouts, orders):
 
 def render_statement_panel(round_id, partner, status, business=None, payouts=None, orders=None):
     st.markdown('**Einzelabrechnung**')
+    if status['positions'] == 0:
+        # 0 abrechenbare Positionen -> Anspruch ist tatsächlich 0,00 €, not
+        # an unknown/uncomputable amount - and no download button, there is
+        # nothing to export.
+        st.write('Positionen: 0')
+        st.write('Partneranspruch: ' + euros(0))
+        st.caption('0 Positionen · nichts erforderlich')
+        return
     claim, live_positions = status['claim'], None
-    if claim is None and status['positions'] and business is not None and payouts is not None and orders is not None:
+    if claim is None and business is not None and payouts is not None and orders is not None:
         claim, live_positions = _live_claim(round_id, partner, business, payouts, orders)
     positions = live_positions if live_positions is not None else status['positions']
     st.write(f"Positionen: {positions}")
     st.write('Partneranspruch: ' + (euros(float(claim)) if claim is not None else 'noch nicht berechenbar'))
-    if status['positions'] == 0:
-        st.caption('0 Positionen · nichts erforderlich')
-        return
     if status['snapshot_status'] == 'vorhanden':
         content = partner_snapshot.final_file(round_id, partner)
         st.success('Finale Einzelabrechnung liegt vor.')
@@ -426,43 +431,58 @@ def render_recovery_panel(round_id, partner):
                     st.error(str(exc))
 
 
-def _historical_partner_case(business, round_id, partner, invoices=None, db=None):
-    """One historical open/documented case for `partner` in a historical
-    GB-2026-xxx round - built only from the same existing facts as
-    _historical_matrix(), reused per-partner. None if this partner has no
-    active (non-held, non-hold_reserve) position there, or if everything is
-    already fully settled (invoiced and paid) and therefore not worth a
-    separate callout. Does not compute a displayed amount itself (that needs
-    studio_view.partner_summary(), which internally opens its own
-    core.ledger() and would deadlock while `db` is still open here) - the
-    caller fills 'amount' via _historical_case_amount() once this ledger
-    block has closed."""
+def _historical_partner_case(business, historical_round_ids, partner, invoices=None, db=None):
+    """ONE combined historical case for `partner`, spanning every historical
+    GB-2026-xxx round where they still have an active, not-fully-settled
+    position - built only from the same existing facts as _historical_
+    matrix() (group_b_round_positions role/hold filtering, position_
+    workflow's own paid_at/closed_at/paid_without_invoice_at, existing
+    approved partner_invoices records). Deliberately never computed as
+    separate per-round slices that are then added together: that would
+    rerun studio_view.partner_summary()'s own cent-rounding on two disjoint
+    slices and can land a cent away from the one true combined figure - the
+    historical payout itself was one combined transaction, so the case is
+    too. None if nothing is open anywhere for this partner. Does not
+    compute a displayed amount itself (needs studio_view.partner_summary(),
+    which opens its own core.ledger() and would deadlock while `db` is
+    still open here) - the caller fills 'amount' via _historical_case_
+    amount() once this ledger block has closed."""
     import api_holds
     import partner_invoices
 
-    keys = _historical_active_position_keys(round_id, db=db)
-    if not keys or business.empty:
-        return None
-    rows = business[business.position_key.isin(keys) & (business.Art == 'Bestellung') & (business.Partner == partner)]
-    if not rows.empty:
-        rows = rows[~api_holds.mask(rows)]
-    if rows.empty:
-        return None
-    partner_keys = set(rows.position_key)
-    paid_ok = bool((rows.paid_at.astype(bool) | rows.closed_at.astype(bool)
-                    | rows[position_workflow.PAID_WITHOUT_INVOICE].astype(bool)).all())
     invoices = invoices if invoices is not None else partner_invoices.list_invoices()
-    invoiced = any(
-        record['partner'] == partner and record['approved_at']
-        and partner_keys.intersection(item['key'] for item in record['expected']['items'])
-        for record in invoices)
-    if paid_ok and invoiced:
-        return None  # fully settled historically - belongs in Rechnungshistorie, not a callout here
+    round_ids_used, row_indices = [], []
+    paid_ok, invoiced = True, True
+    for round_id in historical_round_ids:
+        keys = _historical_active_position_keys(round_id, db=db)
+        if not keys or business.empty:
+            continue
+        rows = business[business.position_key.isin(keys) & (business.Art == 'Bestellung') & (business.Partner == partner)]
+        if not rows.empty:
+            rows = rows[~api_holds.mask(rows)]
+        if rows.empty:
+            continue
+        partner_keys = set(rows.position_key)
+        round_paid_ok = bool((rows.paid_at.astype(bool) | rows.closed_at.astype(bool)
+                               | rows[position_workflow.PAID_WITHOUT_INVOICE].astype(bool)).all())
+        round_invoiced = any(
+            record['partner'] == partner and record['approved_at']
+            and partner_keys.intersection(item['key'] for item in record['expected']['items'])
+            for record in invoices)
+        if round_paid_ok and round_invoiced:
+            continue  # this round's slice is fully settled - Rechnungshistorie, not a callout
+        round_ids_used.append(round_id)
+        row_indices.extend(rows.index.tolist())
+        paid_ok = paid_ok and round_paid_ok
+        invoiced = invoiced and round_invoiced
+    if not row_indices:
+        return None
     links = core.refund_links(business)
-    refund_idx = [r for r, s in links.items() if s in set(rows.index)]
-    combined_keys = list(rows.position_key) + [business.loc[i].position_key for i in refund_idx]
-    return dict(round_id=round_id, positions=len(rows), amount=None, paid_ok=paid_ok, invoiced=invoiced,
-                combined_keys=combined_keys)
+    refund_idx = [r for r, s in links.items() if s in set(row_indices)]
+    combined_keys = [business.loc[i].position_key for i in row_indices] + \
+                     [business.loc[i].position_key for i in refund_idx]
+    return dict(round_ids=round_ids_used, positions=len(row_indices), amount=None, paid_ok=paid_ok,
+                invoiced=invoiced, combined_keys=combined_keys)
 
 
 def _historical_case_amount(business, case):
@@ -478,6 +498,80 @@ def _historical_case_amount(business, case):
     except ValueError:
         pass
     return case
+
+
+def _historical_case_file(business, payouts, orders, case):
+    """The historical case's Einzelabrechnung, produced by the same
+    unchanged partner_export.export_partner_excel() on the exact same
+    (immutable) historical position set the case was built from - never a
+    new/separate file per historical round, one combined file matching how
+    the historical payout itself was made."""
+    rows = business[business.position_key.isin(case['combined_keys'])]
+    try:
+        return partner_export.export_partner_excel(rows, payouts, orders, statement_type='partner')
+    except ValueError:
+        return None
+
+
+def _historical_case_label(case):
+    if len(case['round_ids']) > 1:
+        return 'GB-2026-' + '/'.join(rid.replace('GB-2026-', '') for rid in case['round_ids'])
+    return case['round_ids'][0]
+
+
+def render_historical_case(business, payouts, orders, partner, case):
+    """Offener älterer Fall: download of the existing combined historical
+    Einzelabrechnung, invoice upload against it (reusing partner_invoices.
+    upload()/approve() unchanged), and - only once invoiced and only while
+    still unpaid - the existing position_workflow.confirm('partner_paid')
+    payment action. A paid_without_invoice_at case (MH) never gets a second
+    payment button once invoiced; an already-paid case never gets one at
+    all."""
+    import partner_invoices
+
+    label = _historical_case_label(case)
+    amount = euros(float(case['amount'])) if case['amount'] is not None else '–'
+    zahlung_icon = '✅ bezahlt' if case['paid_ok'] else '❌ Zahlung offen'
+    rechnung_icon = '✅ geprüft' if case['invoiced'] else '❌ Rechnung fehlt'
+    st.warning(f"**{label}** · {case['positions']} Positionen · {amount} · {zahlung_icon} · {rechnung_icon}")
+    content = _historical_case_file(business, payouts, orders, case)
+    if content:
+        st.download_button('Historische Einzelabrechnung herunterladen', content,
+                            f"{label.replace('/', '_')}_{partner}_historisch.xlsx",
+                            key=f'hist-case-dl-{partner}-{label}', icon=':material/download:')
+    if not case['invoiced']:
+        uploaded = st.file_uploader('Partnerrechnung (historischer Fall)', type=['pdf', 'xlsx', 'csv'],
+                                     key=f'hist-case-file-{partner}-{label}')
+        if st.button('Rechnung hochladen & prüfen', disabled=uploaded is None,
+                     key=f'hist-case-upload-{partner}-{label}'):
+            try:
+                record, duplicate = partner_invoices.upload(partner, uploaded.name, uploaded.getvalue())
+                if record['report']['status'] == 'matched':
+                    partner_invoices.approve(record['id'], 'Patrick')
+                    st.rerun()
+                else:
+                    for message in record['report']['errors']:
+                        st.error(message)
+                    for message in record['report'].get('warnings', []):
+                        st.warning(message)
+            except ValueError as exc:
+                st.error(str(exc))
+    elif not case['paid_ok']:
+        if st.button('Zahlung überwiesen', key=f'hist-case-pay-{partner}-{label}', type='primary'):
+            fresh = position_workflow.positions()
+            payable = fresh[(fresh.Partner == partner) & (fresh.Art == 'Bestellung')
+                             & fresh.reviewed_at.astype(bool) & ~fresh.paid_at.astype(bool)
+                             & ~fresh.closed_at.astype(bool)]
+            if payable.empty:
+                st.warning('Keine geprüfte, noch nicht bezahlte Position gefunden.')
+            else:
+                try:
+                    position_workflow.confirm(payable.position_key.tolist(), 'partner_paid', date.today())
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+    else:
+        st.caption('Kein zweiter Zahlungsschritt erforderlich.')
 
 
 def _older_open_round_case(business, round_id, partner, db):
@@ -529,74 +623,94 @@ def render_partner_cards(business=None, payouts=None, orders=None, group=None):
             for name in confirmed:
                 current_status[name] = round_status.partner_status(current_round, name, business=business, db_context=db)
 
-        historical_cases = {name: [] for name in confirmed}
-        for round_id in historical_round_ids:
-            for name in confirmed:
-                case = _historical_partner_case(business, round_id, name, invoices=invoices, db=db)
-                if case:
-                    historical_cases[name].append(case)
+        gb_case = {}
+        for name in confirmed:
+            case = _historical_partner_case(business, historical_round_ids, name, invoices=invoices, db=db)
+            if case:
+                gb_case[name] = case
+
+        older_neutral_cases = {name: [] for name in confirmed}
         for round_id in older_rounds:
             for name in confirmed:
                 case = _older_open_round_case(business, round_id, name, db)
                 if case:
-                    historical_cases[name].append(dict(round_id=round_id, older_neutral=case))
+                    older_neutral_cases[name].append(dict(round_id=round_id, older_neutral=case))
 
-    for cases in historical_cases.values():
-        for case in cases:
-            if 'combined_keys' in case:
-                _historical_case_amount(business, case)
+    for case in gb_case.values():
+        _historical_case_amount(business, case)
 
-    for partner in sorted(confirmed, key=lambda name: _sort_rank(name, current_status.get(name), historical_cases.get(name))):
+    older_cases = {name: ([gb_case[name]] if name in gb_case else []) + older_neutral_cases.get(name, [])
+                   for name in confirmed}
+
+    for partner in sorted(confirmed, key=lambda name: _sort_rank(name, current_status.get(name), older_cases.get(name))):
         status = current_status.get(partner)
-        cases = historical_cases.get(partner) or []
-        if status:
-            claim = status['claim']
-            if claim is None and status['positions']:
-                claim, _ = _live_claim(current_round, partner, business, payouts, orders)
+        cases = older_cases.get(partner) or []
+        if cases:
+            # An open older case always dominates the closed-card header -
+            # the current round's own state is summarised compactly next to
+            # it, never re-stated as a second "2026-003" the way the old
+            # layout duplicated it.
+            current_bit = (f"aktuell {status['positions']} Positionen / "
+                            f"{euros(float(status['claim'])) if status['claim'] is not None else euros(0)}"
+                            if status else 'keine aktuelle Runde')
+            header = f"{partner} · ❌ älterer Fall offen · {current_bit}"
+        elif status:
             if status['positions'] == 0:
-                icon_text = '➖ nichts erforderlich' if not cases else '❌ historischer Fall offen'
+                icon_text = '➖ nichts erforderlich'
             elif status['blockers']:
                 icon_text = f"❌ {status['blockers'][0]}"
             else:
                 icon_text = '✅ abgeschlossen'
-            claim_text = euros(float(claim)) if claim is not None else '–'
+            claim = status['claim']
+            if claim is None and status['positions']:
+                claim, _ = _live_claim(current_round, partner, business, payouts, orders)
+            claim_text = euros(float(claim)) if claim is not None else (euros(0) if not status['positions'] else '–')
             header = f"{partner} · {current_round} · {status['positions']} Positionen · {claim_text} · {icon_text}"
         else:
             header = f"{partner} · {'kein aktuelle Runde' if not current_round else current_round} · ➖ nichts erforderlich"
         expanded = bool(cases) or (status and status['overall_status'] not in ('abgeschlossen', 'nichts_erforderlich'))
         with st.expander(header, expanded=bool(expanded)):
-            for case in cases:
-                if 'older_neutral' in case:
-                    older = case['older_neutral']
-                    older_claim = euros(float(older['claim'])) if older['claim'] is not None else '–'
-                    st.warning(f"**Offene ältere Runde {case['round_id']}** · {older['positions']} Positionen · "
-                               f"{older_claim} · {' · '.join(older['blockers']) or overall_label(older['overall_status'])}")
-                else:
-                    amount = euros(float(case['amount'])) if case['amount'] is not None else '–'
-                    zahlung_text = '✅ bezahlt' if case['paid_ok'] else '❌ Zahlung offen'
-                    rechnung_text = '✅ geprüft' if case['invoiced'] else '❌ Rechnung fehlt'
-                    st.warning(f"**Historischer offener Beleg** · {case['round_id']} · {case['positions']} Positionen · "
-                               f"{amount} · {zahlung_text} · {rechnung_text}")
+            if cases:
+                st.markdown('**Offene ältere Fälle**')
+                for case in cases:
+                    if 'older_neutral' in case:
+                        older = case['older_neutral']
+                        older_claim = euros(float(older['claim'])) if older['claim'] is not None else '–'
+                        st.warning(f"**{case['round_id']}** · {older['positions']} Positionen · {older_claim} · "
+                                   f"{' · '.join(older['blockers']) or overall_label(older['overall_status'])}")
+                    else:
+                        render_historical_case(business, payouts, orders, partner, case)
+                st.divider()
             if status and current_round:
                 st.markdown(f'**Aktuelle Runde {current_round}**')
-                left, right = st.columns(2)
-                with left:
-                    render_invoice_and_payment_panel(current_round, partner, status)
-                with right:
-                    render_statement_panel(current_round, partner, status, business=business,
-                                            payouts=payouts, orders=orders)
-                render_recovery_panel(current_round, partner)
+                if status['positions'] == 0:
+                    # No empty two-column workspace for a partner with
+                    # nothing to do in the current round - one compact line.
+                    st.caption('0 Positionen · 0,00 € · ➖ nichts erforderlich')
+                else:
+                    left, right = st.columns(2)
+                    with left:
+                        render_invoice_and_payment_panel(current_round, partner, status)
+                    with right:
+                        render_statement_panel(current_round, partner, status, business=business,
+                                                payouts=payouts, orders=orders)
+                    render_recovery_panel(current_round, partner)
             elif not cases:
                 st.caption('Keine aktuelle Runde vorhanden.')
 
 
 def render_open_documents(business=None, group=None):
     """'Offene Belege': every partner/round still missing a reviewed
-    invoice or an open recovery credit, across all neutral rounds - MH's
-    paid-without-invoice historical case belongs to the old 001/002 model
-    and is deliberately out of scope here (round_status.py refuses it)."""
+    invoice or an open recovery credit - across all neutral rounds AND every
+    historical GB-2026-xxx open case (MH's/NB's missing historical invoice
+    included), so this list matches exactly what the partner cards already
+    show as open. Resolved as soon as the underlying invoice/credit is
+    actually reviewed - never re-opened for an already-paid position."""
+    import partner_invoices
+
     business = position_workflow.positions() if business is None else business
     allowed = None if group is None else {name for name, g in round_planner.confirmed_partners(business) if g == group}
+    confirmed_names = [name for name, g in round_planner.confirmed_partners(business) if allowed is None or name in allowed]
     round_ids = _neutral_round_ids()
     missing_invoice, missing_credit = [], []
     for round_id in round_ids:
@@ -608,6 +722,17 @@ def render_open_documents(business=None, group=None):
                 missing_invoice.append((round_id, p['partner']))
             if p['credit_status'] == 'fehlt':
                 missing_credit.append((round_id, p['partner']))
+
+    invoices = partner_invoices.list_invoices()
+    with core.ledger() as db:
+        group_b_rounds.initialize(db)
+        historical_round_ids = [r[0] for r in db.execute(
+            "SELECT id FROM group_b_rounds WHERE source_kind != 'neutral_weekly' ORDER BY sequence")]
+        for name in confirmed_names:
+            case = _historical_partner_case(business, historical_round_ids, name, invoices=invoices, db=db)
+            if case and not case['invoiced']:
+                missing_invoice.append((_historical_case_label(case), name))
+
     total_open = len(missing_invoice) + len(missing_credit)
     with st.expander(f'Offene Belege · {"❌ " + str(total_open) + " offen" if total_open else "✅ keine offen"}',
                       expanded=bool(total_open)):
@@ -620,6 +745,11 @@ def render_open_documents(business=None, group=None):
 
 
 def render_invoice_history(business=None, group=None):
+    """Only cases with an actually-present, valid partner invoice - a
+    'bezahlt · Rechnung fehlt' case belongs in Offene Belege, not here, and
+    only moves here once that invoice is really uploaded and reviewed."""
+    import partner_invoices
+
     business = position_workflow.positions() if business is None else business
     allowed = None if group is None else {name for name, g in round_planner.confirmed_partners(business) if g == group}
     round_ids = _neutral_round_ids()
@@ -631,9 +761,14 @@ def render_invoice_history(business=None, group=None):
                 'SELECT * FROM partner_round_invoices WHERE round_id=? ORDER BY uploaded_at DESC', (round_id,)))
     if allowed is not None:
         rows = [row for row in rows if row['partner'] in allowed]
-    if not rows:
+
+    historical = [record for record in partner_invoices.list_invoices()
+                  if record['approved_at'] and record['expected']['scope'] == 'Rechnung'
+                  and (allowed is None or record['partner'] in allowed)]
+
+    if not rows and not historical:
         return
-    with st.expander(f'Rechnungshistorie · {len(rows)}', expanded=False):
+    with st.expander(f'Rechnungshistorie · {len(rows) + len(historical)}', expanded=False):
         for row in rows:
             paid = f"✅ bezahlt am {display_date(row['paid_at'])}" if row['paid_at'] else '⏳ Zahlung offen'
             st.markdown(f"**{row['partner']} · {row['round_id']} · Rechnungsnr. {row['invoice_number'] or '–'} "
@@ -651,6 +786,22 @@ def render_invoice_history(business=None, group=None):
                     st.download_button('Original-Partnerrechnung', row['file_bytes'], row['file_name'],
                                         key=f"hist-invoice-{row['round_id']}-{row['partner']}",
                                         icon=':material/download:')
+        for record in historical:
+            item_keys = {item['key'] for item in record['expected']['items']}
+            paid_rows = business[business.position_key.isin(item_keys)]
+            paid = ('✅ bezahlt' if not paid_rows.empty and paid_rows.paid_at.astype(bool).all()
+                    else '❌ Zahlung offen')
+            st.markdown(f"**{record['partner']} · historisch (Altmodell) · "
+                        f"Rechnungsnr. {record['invoice_number'] or record['file_name']} "
+                        f"· {euros(float(record['expected']['total']))} · {paid}**")
+            with st.expander('Details', expanded=False):
+                st.caption(f"Hochgeladen: {display_date(record['uploaded_at'][:10])} · freigegeben: "
+                           f"{display_date(record['approved_at'][:10]) if record['approved_at'] else '–'}")
+                stored = partner_invoices.stored_original(record)
+                if stored is not None:
+                    content = stored if isinstance(stored, bytes) else stored.read_bytes()
+                    st.download_button('Original-Partnerrechnung', content, record['file_name'],
+                                        key=f"hist-old-invoice-{record['id']}", icon=':material/download:')
 
 
 def render(business=None, payouts=None, orders=None):
