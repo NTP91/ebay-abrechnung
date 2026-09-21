@@ -326,5 +326,121 @@ class CommitRoundTests(unittest.TestCase):
         self.assertEqual(row['source_kind'], 'neutral_weekly')
 
 
+class RolloverTests(unittest.TestCase):
+    """rollover() against a real local ledger - same setup as CommitRoundTests."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        paths = patch.multiple(core, PAYOUTS_DB_PATH=str(self.root / 'Master_Payouts.csv'),
+                                ORDERS_DB_PATH=str(self.root / 'Master_Orders.csv'))
+        paths.start(); self.addCleanup(paths.stop)
+
+    def seed(self, payout_id, order, sku, amount='50,00', payout_date='18.09.2026'):
+        order_frame = payout(payout_id, order, order, sku=sku, amount=amount)
+        core.import_reports([order_frame], core.ORDERS_DB_PATH, 'orders')
+        sale = payout(payout_id, order, order, sku=sku, amount=amount)
+        sale['Auszahlungsdatum'] = payout_date
+        sale['Auszahlungsstatus'] = 'Betrag überwiesen'
+        core.import_reports([sale], core.PAYOUTS_DB_PATH, 'payout')
+
+    def all_round_ids(self):
+        with core.ledger() as db:
+            import group_b_rounds
+            group_b_rounds.initialize(db)
+            return [r[0] for r in db.execute(
+                "SELECT id FROM group_b_rounds WHERE source_kind='neutral_weekly' ORDER BY sequence")]
+
+    def test_before_cut_creates_nothing_new(self):
+        # 003 already exists (created Friday, before its own cut); rolling
+        # over again on the same Friday must not create 004.
+        self.seed('p1', 'order-a', 'PP / TEST')
+        planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
+        results = planner.rollover(now=berlin(2026, 9, 19, 9, 0))
+        self.assertEqual([rid for rid, created in results if created], [])
+        self.assertEqual(self.all_round_ids(), ['2026-003'])
+
+    def test_right_after_cut_creates_exactly_one_new_round(self):
+        self.seed('p1', 'order-a', 'PP / TEST')
+        planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
+        results = planner.rollover(now=berlin(2026, 9, 21, 0, 5))
+        created = [rid for rid, was_created in results if was_created]
+        self.assertEqual(created, ['2026-004'])
+        self.assertEqual(self.all_round_ids(), ['2026-003', '2026-004'])
+
+    def test_repeat_run_is_a_true_noop(self):
+        self.seed('p1', 'order-a', 'PP / TEST')
+        planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
+        planner.rollover(now=berlin(2026, 9, 21, 0, 5))
+        results = planner.rollover(now=berlin(2026, 9, 22, 10, 0))
+        self.assertEqual([created for _, created in results], [False, False])
+        self.assertEqual(self.all_round_ids(), ['2026-003', '2026-004'])
+
+    def test_missed_scheduler_catches_up_multiple_rounds(self):
+        self.seed('p1', 'order-a', 'PP / TEST')
+        planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
+        # Scheduler didn't run for three weeks straight; next run is well
+        # into what should be 2026-006.
+        results = planner.rollover(now=berlin(2026, 10, 9, 10, 0))
+        created = [rid for rid, was_created in results if was_created]
+        self.assertEqual(created, ['2026-004', '2026-005', '2026-006'])
+        self.assertEqual(self.all_round_ids(), ['2026-003', '2026-004', '2026-005', '2026-006'])
+
+    def test_new_round_may_have_zero_positions(self):
+        self.seed('p1', 'order-a', 'PP / TEST')
+        planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
+        planner.rollover(now=berlin(2026, 9, 21, 0, 5))
+        with core.ledger() as db:
+            import group_b_rounds
+            group_b_rounds.initialize(db)
+            positions = list(db.execute(
+                "SELECT position_key FROM group_b_round_positions WHERE round_id='2026-004'"))
+        self.assertEqual(positions, [])
+
+    def test_late_payout_protected_from_open_older_round_when_rolling_forward(self):
+        # order-zero is part of 003 at creation time; order-a's payout dates
+        # into 003's own week too but only shows up afterwards (a late
+        # arrival). rollover() creating 004 must pass 003 as still-open, so
+        # plan_round() excludes order-a from 004 instead of misassigning it -
+        # matching the manuscript rule that a late payout may only ever
+        # (re-)land in its own not-yet-final round, never get swept forward.
+        self.seed('p0', 'order-zero', 'PP / TEST', payout_date='14.09.2026')
+        planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
+        self.seed('p1', 'order-a', 'PP / TEST', payout_date='18.09.2026')
+        planner.rollover(now=berlin(2026, 9, 21, 0, 5))
+        with core.ledger() as db:
+            import group_b_rounds
+            group_b_rounds.initialize(db)
+            round_004 = [r[0] for r in db.execute(
+                "SELECT position_key FROM group_b_round_positions WHERE round_id='2026-004'")]
+            round_003 = [r[0] for r in db.execute(
+                "SELECT position_key FROM group_b_round_positions WHERE round_id='2026-003'")]
+        business = workflow.positions()
+        late_key = business.loc[business.Bestellnummer == 'order-a'].iloc[0].position_key
+        self.assertNotIn(late_key, round_004)
+        self.assertNotIn(late_key, round_003)  # not auto-inserted either - out of scope here
+
+    def test_001_002_and_mh_untouched(self):
+        self.seed('p1', 'order-a', 'PP / TEST')
+        self.seed('p2', 'order-mh', 'MH / TEST', payout_date='19.09.2026')
+        business = workflow.positions()
+        mh_key = business.loc[business.Bestellnummer == 'order-mh'].iloc[0].position_key
+        with core.ledger() as db:
+            import group_b_rounds
+            group_b_rounds.initialize(db)
+            db.execute("INSERT INTO group_b_rounds VALUES('GB-2026-001',2026,1,'test',NULL,NULL,'0','h','{}','2026-01-01T00:00:00Z')")
+            db.execute("INSERT INTO group_b_round_positions VALUES(?,?,?,?)", (mh_key, 'GB-2026-001', 'evelyn_invoice', ''))
+            db.commit()
+        planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
+        planner.rollover(now=berlin(2026, 10, 2, 10, 0))
+        with core.ledger() as db:
+            import group_b_rounds
+            group_b_rounds.initialize(db)
+            gb1 = [r[0] for r in db.execute(
+                "SELECT position_key FROM group_b_round_positions WHERE round_id='GB-2026-001'")]
+        self.assertEqual(gb1, [mh_key])
+
+
 if __name__ == '__main__':
     unittest.main()

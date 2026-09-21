@@ -1,0 +1,63 @@
+name: Weekly Round Rollover
+
+on:
+  schedule:
+    # A few minutes after Sunday 23:59 Europe/Berlin, both DST offsets
+    # covered so no seasonal edits are needed. The actual cut math (which
+    # 2026-0xx sequence is now current) happens inside round_planner in
+    # Europe/Berlin, not here - this cron only has to fire soon after the
+    # real cut, and a late/missed GitHub start is tolerated by rollover()'s
+    # own catch-up logic.
+    - cron: '5 22 * * 0'  # 00:05 CEST Monday (UTC+2, summer)
+    - cron: '5 23 * * 0'  # 00:05 CET  Monday (UTC+1, winter)
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: weekly-round-rollover
+  cancel-in-progress: false
+
+jobs:
+  rollover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Preflight - verify required secrets are configured
+        env:
+          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          missing=""
+          for name in SUPABASE_PROJECT_REF SUPABASE_ACCESS_TOKEN; do
+            value="${!name}"
+            if [ -z "$value" ]; then
+              missing="$missing $name"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Fehlende Repository Secrets:$missing"
+            exit 1
+          fi
+          echo "Alle benoetigten Secrets sind konfiguriert."
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install "pandas>=2.2,<3" "filelock>=3.16,<4"
+
+      - name: Run weekly round rollover
+        env:
+          PAYMENT_BACKEND: supabase
+          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: python scripts/weekly_round_rollover.py

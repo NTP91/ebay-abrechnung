@@ -20,6 +20,7 @@ no RE0090 lookup, no has_re0090 gate, no Patrick-collects-then-invoices-Evelyn
 export mode, no evelyn_invoice_id/evelyn_document_number. Rounds 001/002 keep
 that model unchanged; this module only ever reasons about 003+.
 """
+import json
 from datetime import datetime, time, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -352,3 +353,63 @@ def commit_round(now=None, base_cut=None, open_round_ids=()):
             plan['total_claim'], snapshot, positions, {})
         db.commit()
     return plan['round_id'], created, plan
+
+
+def _anchor_base_cut(rows):
+    """Back-derive the FIRST_NEUTRAL_SEQUENCE-ending cut instant from the
+    latest already-created neutral round's own recorded window, instead of
+    re-guessing it from `now` - the same anchor every rollover() call (and
+    every missed-then-caught-up call) must agree on. None if no neutral round
+    exists yet (first-ever run: default_base_cut(now) applies instead)."""
+    if not rows:
+        return None
+    latest = rows[-1]
+    window_end = datetime.fromisoformat(json.loads(latest['snapshot'])['window_end'])
+    return window_end - timedelta(days=7 * (latest['sequence'] - FIRST_NEUTRAL_SEQUENCE))
+
+
+def rollover(now=None):
+    """Idempotently create every neutral weekly round shell (2026-003+) up to
+    and including the one current as of `now`, in sequence order, without
+    ever re-touching an already-created round (commit_round()'s own
+    existence check makes each individual creation a true no-op on repeat).
+
+    A single call after being offline for several cuts catches up on every
+    missing round in between, not just the latest one - each is created with
+    `open_round_ids` set to every neutral round older than it that already
+    exists, so a late payout dated into one of those older weeks still finds
+    its correct home per plan_round()'s own rule 4 (no separate finalization
+    concept exists yet, so nothing already created is ever excluded here).
+
+    Returns a list of (round_id, created) tuples for every sequence from
+    FIRST_NEUTRAL_SEQUENCE through the current one.
+    """
+    import group_b_rounds
+
+    now_berlin = (now or datetime.now(BERLIN)).astimezone(BERLIN)
+    with core.ledger() as db:
+        group_b_rounds.initialize(db)
+        rows = list(db.execute(
+            "SELECT id, sequence, snapshot FROM group_b_rounds WHERE source_kind='neutral_weekly' ORDER BY sequence"))
+    existing_ids = {r['id'] for r in rows}
+    base_cut = _anchor_base_cut(rows) or default_base_cut(now_berlin)
+    target_sequence = current_sequence(now_berlin, base_cut)
+
+    results = []
+    for sequence in range(FIRST_NEUTRAL_SEQUENCE, target_sequence + 1):
+        rid = round_id(FIRST_NEUTRAL_YEAR, sequence)
+        if rid in existing_ids:
+            results.append((rid, False))
+            continue
+        # One minute past the window's own start (rather than the exact
+        # Sunday-23:59 cut instant) so plan_round()'s cosmetic cut_passed
+        # flag on the returned plan doesn't misreport a same-instant cut as
+        # still in progress; current_sequence()'s half-open window bucketing
+        # is unaffected either way.
+        creation_now = round_for_sequence(sequence, base_cut)['start'] + timedelta(minutes=1)
+        older_neutral = {round_id(FIRST_NEUTRAL_YEAR, s) for s in range(FIRST_NEUTRAL_SEQUENCE, sequence)}
+        created_id, created, _ = commit_round(
+            now=creation_now, base_cut=base_cut, open_round_ids=existing_ids & older_neutral)
+        existing_ids.add(created_id)
+        results.append((created_id, created))
+    return results
