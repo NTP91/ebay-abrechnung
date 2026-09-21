@@ -614,6 +614,9 @@ with st.expander('Payout-Abgleich · Bankbetrag und einzelne Positionen'):
 
 home, group_a, group_b, pending, history, dashboard, trust_risk_tab, lexoffice_import_tab = st.tabs(['Übersicht','Gruppe A','Gruppe B','Offene Positionen','Historie','Dashboard','Trust / Risk','Lexoffice Bestell-Import'])
 with home:
+    st.subheader('Globale Suche')
+    round_ui.render_search(business, raw, orders_master)
+    st.divider()
     round_ui.render_overview_section(business)
     st.divider()
     total=len(catalogue)

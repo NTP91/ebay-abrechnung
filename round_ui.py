@@ -1107,6 +1107,58 @@ def render_archive(business=None, payouts=None, orders=None):
                                           business, payouts, orders, invoices)
 
 
+_SEARCH_KIND_LABELS = {
+    'aktuelle_runde': 'Aktuelle Runde', 'aeltere_runde': 'Ältere Runde (2026-003+)',
+    'historisch': 'Historisch (Altmodell)', 'evelyn_beleg': 'Evelyn-/Lexware-Beleg',
+    'verworfen': 'Verworfener Beleg',
+}
+
+
+def render_search(business=None, payouts=None, orders=None):
+    """Globale Suche: read-only navigation/research only - never writes
+    anything (global_search.search() itself never opens a write
+    transaction). Renders nothing beyond a single input field until a query
+    is actually typed - no empty result table."""
+    import global_search
+
+    query = st.text_input('Globale Suche', placeholder='Bestellnummer, SKU, Rechnungsnummer oder Payoutnummer suchen …',
+                          label_visibility='collapsed', key='global-search-query')
+    if not query or not query.strip():
+        return
+    results = global_search.search(query, business=business, payouts=payouts, orders=orders)
+    if not results:
+        st.caption('Kein passender Fall gefunden.')
+        return
+    st.caption(f'{len(results)} Treffer')
+    for result in results:
+        label = result['partner'] or result['round_label']
+        amount_text = euros(float(result['amount'])) if result['amount'] is not None else '–'
+        positions_text = f"{result['positions']} Pos." if result['positions'] is not None else ''
+        header = (f"{result['overall_icon']} {label} · {result['round_label']} · {positions_text} · "
+                  f"{amount_text} · {result['overall_text']}")
+        with st.expander(header, expanded=False):
+            st.caption('Trefferart: ' + _SEARCH_KIND_LABELS.get(result['kind'], result['kind']))
+            st.caption('Gefunden über: ' + ', '.join(
+                f'{match_type} „{value}"' for match_type, value in result['match_types'].items()))
+            if result['partner']:
+                st.write(f"Partner: {result['partner']}" + (f" · Gruppe: {result['gruppe']}" if result['gruppe'] else ''))
+            st.write(f"Round-ID: {result['round_id'] or '–'}")
+            st.write(f"Einzelabrechnung/Rechnung: {result['invoice_icon']} {result['invoice_text']}"
+                     + (f" · Rechnungsnr. {result['invoice_number']}" if result['invoice_number'] else ''))
+            st.write(f"Zahlung: {result['payment_icon']} {result['payment_text']}")
+            st.write(f"Gutschrift/Recovery: {result['credit_icon']} {result['credit_text']}")
+            if result['open_points']:
+                st.caption('Offene Punkte: ' + ' · '.join(result['open_points']))
+            nav = result['nav']
+            if nav and nav['target'] == 'partnerkarte':
+                st.info(f"→ Fall öffnen: Partnerkarte · {nav['gruppe']} · {nav['partner']}")
+            elif nav and nav['target'] == 'archiv':
+                partner_bit = f" · {nav['partner']}" if nav['partner'] else ''
+                st.info(f"→ In Historie öffnen: Abrechnungsarchiv · {nav['round_id']}{partner_bit}")
+            elif result['kind'] == 'verworfen':
+                st.caption('Verworfen · keine operative Wirkung · nicht auffindbar als aktiver Fall.')
+
+
 def render(business=None, payouts=None, orders=None):
     """Full workspace (overview + partner cards + open documents + invoice
     history) - not currently wired into any app.py tab (the round overview
