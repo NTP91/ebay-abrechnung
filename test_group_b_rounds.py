@@ -127,6 +127,66 @@ class GroupBRoundTests(unittest.TestCase):
             db.rollback()
         self.assertEqual(related,{rounds.ROUND_ONE,rounds.ROUND_TWO})
 
+    def test_evelyn_link_precheck_allows_exactly_one_creation_then_blocks_repeat(self):
+        rounds.bootstrap(self.business,self.current,self.invoices)
+        with core.ledger() as db:
+            self.assertTrue(rounds.evelyn_link_precheck(db,rounds.ROUND_TWO,self.business,self.invoices,self.current))
+        with core.ledger() as db:
+            self.assertTrue(rounds.record_evelyn_invoice(db,rounds.ROUND_TWO,'invoice-re0091','RE0091'))
+        with core.ledger() as db:
+            saved=db.execute('SELECT evelyn_invoice_id,evelyn_document_number FROM group_b_rounds WHERE id=?',
+                             (rounds.ROUND_TWO,)).fetchone()
+        self.assertEqual((saved['evelyn_invoice_id'],saved['evelyn_document_number']),('invoice-re0091','RE0091'))
+
+        # Same result reported twice (e.g. a retried write) is a harmless no-op...
+        with core.ledger() as db:
+            self.assertFalse(rounds.record_evelyn_invoice(db,rounds.ROUND_TWO,'invoice-re0091','RE0091'))
+        # ...but a second real submission is cleanly blocked before any network call.
+        with core.ledger() as db:
+            with self.assertRaises(ValueError):
+                rounds.evelyn_link_precheck(db,rounds.ROUND_TWO,self.business,self.invoices,self.current)
+        # ...and record_evelyn_invoice itself refuses to overwrite with a different invoice.
+        with core.ledger() as db:
+            with self.assertRaises(ValueError):
+                rounds.record_evelyn_invoice(db,rounds.ROUND_TWO,'invoice-different','RE0099')
+
+    def test_evelyn_link_precheck_blocks_on_mismatched_position_set(self):
+        rounds.bootstrap(self.business,self.current,self.invoices)
+        subset=self.current[self.current.Bestellnummer=='r2-mh']
+        with core.ledger() as db:
+            with self.assertRaises(ValueError):
+                rounds.evelyn_link_precheck(db,rounds.ROUND_TWO,self.business,self.invoices,subset)
+        # RE0090's own round is untouched by a check aimed at ROUND_TWO.
+        with core.ledger() as db:
+            unaffected=db.execute('SELECT evelyn_invoice_id FROM group_b_rounds WHERE id=?',
+                                  (rounds.ROUND_ONE,)).fetchone()
+        self.assertEqual(unaffected['evelyn_invoice_id'],self.invoice_id)
+
+    def test_evelyn_link_precheck_blocks_when_another_invoice_already_covers_the_same_payout(self):
+        rounds.bootstrap(self.business,self.current,self.invoices)
+        conflicting=dict(self.invoices)
+        conflicting['other-invoice']={'Belegnummer':'RE0099','Betrag':Decimal('1.00'),
+                                       'Payouts':['p2'],'discarded':False}
+        with core.ledger() as db:
+            with self.assertRaises(ValueError):
+                rounds.evelyn_link_precheck(db,rounds.ROUND_TWO,self.business,conflicting,self.current)
+        # A discarded/test document with the same payout never blocks (mirrors RE0089).
+        discarded=dict(self.invoices)
+        discarded['discarded-invoice']={'Belegnummer':'RE0088 · verworfen','Betrag':Decimal('1.00'),
+                                        'Payouts':['p2'],'discarded':True}
+        with core.ledger() as db:
+            self.assertTrue(rounds.evelyn_link_precheck(db,rounds.ROUND_TWO,self.business,discarded,self.current))
+
+    def test_evelyn_link_precheck_refuses_neutral_weekly_rounds(self):
+        with core.ledger() as db:
+            rounds.initialize(db)
+            db.execute("INSERT INTO group_b_rounds VALUES('2026-003',2026,3,'neutral_weekly',NULL,NULL,'0',"
+                       "'hash-2026-003','{}','2026-01-01T00:00:00Z')")
+            db.commit()
+        with core.ledger() as db:
+            with self.assertRaises(ValueError):
+                rounds.evelyn_link_precheck(db,'2026-003',self.business,self.invoices,self.current)
+
     def test_variant_b_round_totals_keep_full_pair_at_zero(self):
         rounds.bootstrap(self.business,self.current,self.invoices)
         view=rounds.overview(self.business)

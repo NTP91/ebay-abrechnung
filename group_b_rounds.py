@@ -211,6 +211,58 @@ def link_partner_invoice(db, invoice_id, chosen):
         db.execute('INSERT INTO partner_invoice_rounds VALUES(?,?)', (invoice_id, round_id))
 
 
+def evelyn_link_precheck(db, round_id, business, invoices, chosen):
+    """Guard before submitting a real Evelyn/Lexware invoice for an already
+    frozen historical round's evelyn_invoice position set. Raises ValueError
+    with a precise reason if blocked; returns True if exactly one submission
+    is currently allowed. Never touches 2026-003+ rounds, partner invoices,
+    payments or position assignments - read-only against everything except
+    the round's own evelyn_invoice_id/evelyn_document_number columns, which
+    this function itself never writes (see record_evelyn_invoice)."""
+    initialize(db)
+    round_record = db.execute('SELECT * FROM group_b_rounds WHERE id=?', (round_id,)).fetchone()
+    if not round_record:
+        raise ValueError(f'{round_id} ist nicht als Runde gespeichert.')
+    if round_record['source_kind'] == 'neutral_weekly':
+        raise ValueError('2026-003+-Runden laufen nicht über diese Altlogik.')
+    if round_record['evelyn_invoice_id'] or round_record['evelyn_document_number']:
+        raise ValueError(f'{round_id} besitzt bereits einen verknüpften Evelyn-/Lexware-Beleg; keine zweite Rechnung.')
+    stored_keys = {r[0] for r in db.execute(
+        "SELECT position_key FROM group_b_round_positions WHERE round_id=? AND role='evelyn_invoice'", (round_id,))}
+    chosen_keys = set(chosen.position_key) if not chosen.empty else set()
+    if chosen_keys != stored_keys:
+        raise ValueError(f'Positionssatz weicht vom gespeicherten {round_id}-Bestand ab; keine Übertragung.')
+    amount = (prepare_partner_export(chosen, statement_type='group_b_evelyn')['totals']['Rechnung']['gross']
+              if not chosen.empty else Decimal(0))
+    if amount != Decimal(round_record['evelyn_amount']):
+        raise ValueError(f'Betrag weicht vom gespeicherten {round_id}-Betrag ab; keine Übertragung.')
+    round_payouts = set(json.loads(round_record['snapshot']).get('payouts', []))
+    other_payouts = {payout for item in invoices.values() if not item['discarded'] for payout in item['Payouts']}
+    if round_payouts & other_payouts:
+        raise ValueError(f'Für {round_id} existiert bereits ein Lexware-/Evelyn-Beleg mit überschneidenden Payouts; keine zweite Rechnung.')
+    return True
+
+
+def record_evelyn_invoice(db, round_id, invoice_id, document_number):
+    """Permanently bind a successfully created Evelyn/Lexware invoice back to
+    its (already frozen, precheck-cleared) historical round. Idempotent no-op
+    if called again with the identical result; raises on any conflicting
+    second write - a round keeps exactly one linked invoice forever."""
+    initialize(db)
+    row = db.execute('SELECT evelyn_invoice_id, evelyn_document_number FROM group_b_rounds WHERE id=?',
+                      (round_id,)).fetchone()
+    if not row:
+        raise ValueError(f'{round_id} ist nicht als Runde gespeichert.')
+    if row['evelyn_invoice_id'] or row['evelyn_document_number']:
+        if row['evelyn_invoice_id'] == invoice_id and row['evelyn_document_number'] == document_number:
+            return False
+        raise ValueError(f'{round_id} ist bereits mit einem anderen Evelyn-Beleg verknüpft.')
+    db.execute('UPDATE group_b_rounds SET evelyn_invoice_id=?, evelyn_document_number=? WHERE id=?',
+               (invoice_id, document_number, round_id))
+    db.commit()
+    return True
+
+
 def _invoice_amounts(db):
     result = {}
     for row in db.execute('SELECT record FROM partner_invoices'):

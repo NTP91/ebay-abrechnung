@@ -815,10 +815,14 @@ with group_b:
 
             if create_clicked:
                 try:
+                    with core.ledger() as guard_db:
+                        group_b_rounds.evelyn_link_precheck(guard_db,group_b_rounds.ROUND_TWO,business,invoices,chosen)
                     expected={pid:core.payout_fingerprint(master[master['Auszahlung Nr.']==pid]) for pid in selected}
                     for pid in selected:
                         core.confirm_received(pid)
-                    core.create_invoice_draft(api_key,selected,st.session_state.get('lexware-prior',False),expected_fingerprints=expected)
+                    new_invoice_id=core.create_invoice_draft(api_key,selected,st.session_state.get('lexware-prior',False),expected_fingerprints=expected)
+                    with core.ledger() as guard_db:
+                        group_b_rounds.record_evelyn_invoice(guard_db,group_b_rounds.ROUND_TWO,new_invoice_id,None)
                     _load_dashboard_data.clear()
                     st.session_state['draft_created']=True
                     st.rerun()
