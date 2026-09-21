@@ -1,14 +1,18 @@
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 import core
+import partner_invoices
 import partner_round_invoices as incoming
 import partner_snapshot
+import position_workflow as workflow
 import round_planner as planner
+import round_ui
+from test_invoice_support import invoice_csv as legacy_invoice_csv
 from test_recovery import payout
 
 BERLIN = ZoneInfo('Europe/Berlin')
@@ -41,6 +45,16 @@ class RoundUiSmokeTests(unittest.TestCase):
         sale['Auszahlungsstatus'] = 'Betrag überwiesen'
         sale['Transaktionsbetrag (inkl. Kosten)'] = amount
         core.import_reports([sale], core.PAYOUTS_DB_PATH, 'payout')
+
+    def assign_historical_round(self, position_key, round_id, sequence=1):
+        with core.ledger() as db:
+            import group_b_rounds
+            group_b_rounds.initialize(db)
+            db.execute('INSERT OR IGNORE INTO group_b_rounds VALUES(?,?,?,?,?,?,?,?,?,?)',
+                       (round_id, 2026, sequence, 'test', None, None, '0', 'hash-' + round_id, '{}', '2026-01-01T00:00:00Z'))
+            db.execute('INSERT OR REPLACE INTO group_b_round_positions VALUES(?,?,?,?)',
+                       (position_key, round_id, 'evelyn_invoice', 'test'))
+            db.commit()
 
     def run_app(self):
         from streamlit.testing.v1 import AppTest
@@ -147,6 +161,107 @@ class RoundUiSmokeTests(unittest.TestCase):
         self.assertEqual(matrix.loc['Rechnung', 'PP'], '✅')
         self.assertEqual(matrix.loc['Zahlung', 'PP'], '✅')
         self.assertIn('abgeschlossen', self.all_text(app))
+
+    def test_historical_matrix_ignores_hold_reserve_role_position(self):
+        # A production regression: bootstrap() also parks hold_reserve
+        # positions (never an active claim) in the same historical round as
+        # the genuinely paid-without-invoice ones - they must never drag
+        # Zahlung back to ❌ for the real historical case.
+        self.seed_sale('p1', 'order-mh', 'MH / TEST')
+        self.seed_sale('p2', 'order-mh-hold', 'MH / TEST')
+        rows = workflow.positions()
+        paid_row = rows[rows.Bestellnummer == 'order-mh'].iloc[0]
+        held_row = rows[rows.Bestellnummer == 'order-mh-hold'].iloc[0]
+        self.assign_historical_round(paid_row.position_key, 'GB-2026-001')
+        workflow.mark_paid_without_invoice([paid_row.position_key], date.today(), 'MH', {'GB-2026-001'}, {'p1'},
+                                            'tester', 'historischer Sammelfall')
+        with core.ledger() as db:
+            import group_b_rounds
+            group_b_rounds.initialize(db)
+            db.execute('INSERT OR REPLACE INTO group_b_round_positions VALUES(?,?,?,?)',
+                       (held_row.position_key, 'GB-2026-001', 'hold_reserve', 'test'))
+            db.commit()
+        business = workflow.positions()
+        frame, blockers, header_icon = round_ui._historical_matrix(business, 'GB-2026-001')
+        self.assertEqual(frame.loc['Zahlung', 'MH'], '✅')
+
+    def test_historical_matrix_mh_paid_without_invoice(self):
+        self.seed_sale('p1', 'order-mh', 'MH / TEST')
+        row = workflow.positions().iloc[0]
+        self.assign_historical_round(row.position_key, 'GB-2026-001')
+        workflow.mark_paid_without_invoice([row.position_key], date.today(), 'MH', {'GB-2026-001'}, {'p1'},
+                                            'tester', 'historischer Sammelfall')
+        business = workflow.positions()
+        frame, blockers, header_icon = round_ui._historical_matrix(business, 'GB-2026-001')
+        self.assertIsNotNone(frame)
+        self.assertEqual(frame.loc['Einzelabrechnung', 'MH'], '➖')
+        self.assertEqual(frame.loc['Rechnung', 'MH'], '❌')
+        self.assertEqual(frame.loc['Zahlung', 'MH'], '✅')
+        self.assertEqual(frame.loc['Status', 'MH'], '❌')
+        self.assertEqual(header_icon, '❌')
+        self.assertIn('MH · Rechnung fehlt', blockers)
+        self.assertNotIn('MH · Zahlung offen', blockers)
+
+    def test_historical_matrix_fully_settled_partner_shows_ok(self):
+        self.seed_sale('p1', 'order-ba', 'BA / TEST', payout_date='01.09.2026')
+        row = workflow.positions().iloc[0]
+        self.assign_historical_round(row.position_key, 'GB-2026-002', sequence=2)
+        expected = partner_invoices.expected_statement(workflow.positions())
+        record, _ = partner_invoices.upload('BA', 'invoice.csv', legacy_invoice_csv(expected))
+        self.assertEqual(record['report']['status'], 'matched', record['report'])
+        partner_invoices.approve(record['id'], 'tester')
+        workflow.confirm([row.position_key], 'partner_paid', date.today())
+        business = workflow.positions()
+        frame, blockers, header_icon = round_ui._historical_matrix(business, 'GB-2026-002')
+        self.assertEqual(frame.loc['Rechnung', 'BA'], '✅')
+        self.assertEqual(frame.loc['Zahlung', 'BA'], '✅')
+        self.assertEqual(frame.loc['Status', 'BA'], '✅')
+        self.assertEqual(header_icon, '✅')
+        self.assertEqual(blockers, [])
+
+    def test_historical_matrix_no_assigned_positions_is_neutral(self):
+        with core.ledger() as db:
+            import group_b_rounds
+            group_b_rounds.initialize(db)
+            db.execute("INSERT INTO group_b_rounds VALUES('GB-2026-001',2026,1,'test',NULL,NULL,'0','h','{}','2026-01-01T00:00:00Z')")
+            db.commit()
+        frame, blockers, header_icon = round_ui._historical_matrix(workflow.positions(), 'GB-2026-001')
+        self.assertIsNone(frame)
+        self.assertEqual(blockers, [])
+        self.assertEqual(header_icon, '')
+
+    def test_historical_header_icon_and_matrix_render_in_app(self):
+        self.seed_sale('p1', 'order-mh', 'MH / TEST')
+        row = workflow.positions().iloc[0]
+        self.assign_historical_round(row.position_key, 'GB-2026-001')
+        workflow.mark_paid_without_invoice([row.position_key], date.today(), 'MH', {'GB-2026-001'}, {'p1'},
+                                            'tester', 'historischer Sammelfall')
+        app = self.run_app()
+        self.assertFalse(list(app.exception))
+        expander_labels = [exp.label for exp in app.expander]
+        self.assertTrue(any(label.startswith('❌ GB-2026-001') for label in expander_labels))
+        matrix = next(el.value for el in app.dataframe
+                      if list(el.value.index) == MATRIX_ROWS and 'MH' in el.value.columns
+                      and el.value.loc['Rechnung', 'MH'] == '❌' and el.value.loc['Zahlung', 'MH'] == '✅')
+        self.assertEqual(matrix.loc['Status', 'MH'], '❌')
+        body = self.all_text(app)
+        self.assertIn('MH · Rechnung fehlt', body)
+
+    def test_historical_document_access_still_works(self):
+        self.seed_sale('p1', 'order-ba', 'BA / TEST', payout_date='01.09.2026')
+        row = workflow.positions().iloc[0]
+        self.assign_historical_round(row.position_key, 'GB-2026-002', sequence=2)
+        expected = partner_invoices.expected_statement(workflow.positions())
+        record, _ = partner_invoices.upload('BA', 'invoice.csv', legacy_invoice_csv(expected, 'BA0001'))
+        partner_invoices.approve(record['id'], 'tester')
+        with core.ledger() as db:
+            db.execute('INSERT OR IGNORE INTO partner_invoice_rounds VALUES(?,?)', (record['id'], 'GB-2026-002'))
+            db.commit()
+        app = self.run_app()
+        self.assertFalse(list(app.exception))
+        body = self.all_text(app)
+        self.assertIn('Verknüpfte Partnerbelege', body)
+        self.assertIn('BA0001', body)
 
     def test_historical_rounds_shown_separately_and_expandable(self):
         self.seed_sale('p1', 'order-a', 'PP / TEST')

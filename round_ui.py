@@ -19,6 +19,7 @@ import partner_snapshot
 import position_workflow
 import recovery_cases
 import round_status
+import studio_view
 
 INVOICE_LABELS = {
     'noch_nicht_moeglich': '⚠ Finale Einzelabrechnung fehlt',
@@ -135,20 +136,84 @@ def render_round_matrix(result):
     st.dataframe(frame, use_container_width=True)
 
 
-def _historical_partner_icon(partner):
-    """Same ✅/❌/➖ convention, derived only from group_b_rounds.overview()'s
-    own existing figures for this partner in this historical round - never
-    recomputed, and ➖ (not a green check) whenever nothing was ever claimed
-    here, matching the "never fake a checkmark" rule from the new matrix."""
-    if not partner['current'] and not partner['paid']:
-        return '➖'
-    return '❌' if partner['open'] > 0 else '✅'
+def _historical_active_position_keys(round_id):
+    """position_keys assigned to this historical round with an actual active
+    claim - excludes role='hold_reserve' (group_b_rounds.py's own existing
+    schema: positions reserved for a not-yet-invoiced API hold, never an
+    active claim to begin with). A currently live API-Hold (api_holds.mask())
+    is filtered separately in _historical_matrix() since it needs the live
+    business rows, not just this stored role column."""
+    with core.ledger() as db:
+        group_b_rounds.initialize(db)
+        return {r[0] for r in db.execute(
+            "SELECT position_key FROM group_b_round_positions WHERE round_id=? AND role != 'hold_reserve'",
+            (round_id,))}
+
+
+def _historical_matrix(business, round_id):
+    """Same ✅/❌/➖ matrix as the 2026-003+ rounds, but for a historical
+    GB-2026-001/002 round - built exclusively from already-existing facts:
+    group_b_round_positions' own assignment, position_workflow's own
+    paid_at/closed_at/paid_without_invoice_at markers, existing approved
+    partner_invoices records, and studio_view.partner_refund_cases()
+    (unchanged). Nothing is recomputed and no new business logic is
+    introduced. Columns are only the partners actually present in this
+    round. 'Einzelabrechnung' has no equivalent artifact in the old model
+    (no frozen snapshot ever existed there) and is always ➖.
+
+    Returns (frame_or_None, blockers, header_icon_or_'').
+    """
+    import api_holds
+    import partner_invoices
+
+    keys = _historical_active_position_keys(round_id)
+    if not keys or business.empty:
+        return None, [], ''
+    rows = business[business.position_key.isin(keys) & (business.Art == 'Bestellung')]
+    if not rows.empty:
+        # A currently-held position is its own separate, still-unresolved
+        # category everywhere else in the app (never counted as an open
+        # claim needing Rechnung/Zahlung here either) - group_b_rounds.
+        # overview() draws the exact same line via this same mask.
+        rows = rows[~api_holds.mask(rows)]
+    if rows.empty:
+        return None, [], ''
+    invoices = partner_invoices.list_invoices()
+    refund_cases = studio_view.partner_refund_cases(business)
+    refund_origin_keys = set(refund_cases.position_key) if not refund_cases.empty else set()
+
+    columns, blockers = {}, []
+    for partner, block in rows.groupby('Partner'):
+        partner_keys = set(block.position_key)
+        paid_ok = bool((block.paid_at.astype(bool) | block.closed_at.astype(bool)
+                        | block[position_workflow.PAID_WITHOUT_INVOICE].astype(bool)).all())
+        invoiced = any(
+            record['partner'] == partner and record['approved_at']
+            and partner_keys.intersection(item['key'] for item in record['expected']['items'])
+            for record in invoices)
+        has_open_refund = bool(partner_keys & refund_origin_keys)
+        rechnung = '✅' if invoiced else '❌'
+        zahlung = '✅' if paid_ok else '❌'
+        gutschrift = '❌' if has_open_refund else '➖'
+        status = '✅' if (invoiced and paid_ok and not has_open_refund) else '❌'
+        columns[partner] = ['➖', rechnung, zahlung, gutschrift, status]
+        if rechnung == '❌':
+            blockers.append(f'{partner} · Rechnung fehlt')
+        if zahlung == '❌':
+            blockers.append(f'{partner} · Zahlung offen')
+        if gutschrift == '❌':
+            blockers.append(f'{partner} · Gutschrift offen')
+
+    import pandas as pd
+    frame = pd.DataFrame(columns, index=['Einzelabrechnung', 'Rechnung', 'Zahlung', 'Gutschrift', 'Status'])
+    header_icon = '✅' if not (frame.loc['Status'] == '❌').any() else '❌'
+    return frame, blockers, header_icon
 
 
 def render_historical_rounds(business=None):
-    """Historische GB-2026-001/002: existing group_b_rounds.overview()
-    per-partner figures and existing linked partner invoices only - nothing
-    recomputed, no new archive logic, ids never renamed."""
+    """Historische GB-2026-001/002: same matrix style as 2026-003+, built
+    only from already-existing historical facts - no new archive logic, no
+    recomputation, ids never renamed, old business logic untouched."""
     import partner_invoices
 
     with core.ledger() as db:
@@ -157,25 +222,22 @@ def render_historical_rounds(business=None):
                            "WHERE source_kind != 'neutral_weekly' ORDER BY sequence").fetchall()
     if not rows:
         return
-    st.markdown('**Historische Runden (altes Modell)**')
+    st.markdown('**Historische Runden (altes Modell)**', help=MATRIX_LEGEND)
     st.caption('GB-2026-001/002 laufen weiterhin nach der alten Geschäftslogik - reine Anzeige vorhandener Daten, '
                 'keine neue 003+-Statuslogik und keine Neuberechnung.')
     business = position_workflow.positions() if business is None else business
-    overview_by_id = {}
-    if not business.empty:
-        overview_by_id = {r['round_id']: r for r in group_b_rounds.overview(business)['rounds']}
     for row in rows:
         round_id = row['id']
-        header = f"{round_id} · Evelyn-Betrag {euros(float(row['evelyn_amount']))} · angelegt {display_date(row['created_at'])}"
+        frame, blockers, header_icon = _historical_matrix(business, round_id)
+        prefix = f'{header_icon} ' if header_icon else ''
+        header = f"{prefix}{round_id} · Evelyn-Betrag {euros(float(row['evelyn_amount']))} · angelegt {display_date(row['created_at'])}"
         with st.expander(header, expanded=False):
-            settlement = overview_by_id.get(round_id)
-            if settlement:
-                for partner in settlement['partners']:
-                    icon = _historical_partner_icon(partner)
-                    st.write(f"{icon} {partner['partner']} · Anspruch {euros(partner['current'])} · "
-                             f"bezahlt {euros(partner['paid'])} · offen {euros(max(partner['open'], 0))}")
+            if frame is not None:
+                st.dataframe(frame, use_container_width=True)
+                if blockers:
+                    st.caption('Offene Punkte: ' + ' · '.join(blockers))
             else:
-                st.caption('Keine aktuell zuordenbaren offenen Partnerpositionen.')
+                st.caption('Keine zuordenbaren historischen Partnerpositionen.')
             with core.ledger() as db:
                 invoice_ids = {r[0] for r in db.execute(
                     'SELECT invoice_id FROM partner_invoice_rounds WHERE round_id=?', (round_id,))}
