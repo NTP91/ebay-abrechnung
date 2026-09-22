@@ -14,6 +14,7 @@ apply this module's rules to them at all, rather than reimplementing or
 approximating the old completion rules here.
 """
 import json
+import logging
 from datetime import datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -25,6 +26,7 @@ import recovery_cases
 import round_planner
 
 BERLIN = ZoneInfo('Europe/Berlin')
+logger = logging.getLogger(__name__)
 
 
 def is_neutral_round(db, round_id):
@@ -152,6 +154,13 @@ def round_status(round_id, business=None, now=None):
     bezahlte Partnerposition darf dadurch nie wieder als "Partner noch zu
     bezahlen" erscheinen (und umgekehrt schliesst ein fertiger
     Vermittlungsbeleg keinen offenen Partner).
+
+    Fail-soft: ein technischer Fehler beim Laden des Broker-Status (z.B.
+    eine gegen die produktive DB fehlschlagende Query) darf niemals die
+    fachlich unabhaengige Rundenanzeige (Partnerstatus, Einzelabrechnung,
+    Historie) verhindern. 'broker' wird dann None und der Fehler steckt
+    ausschliesslich in 'broker_error'; die Runde gilt in diesem Fall nie
+    als 'abgeschlossen', sondern hoechstens 'in_Abwicklung'/'laufend'.
     """
     import broker_commission
     import partner_round_invoices
@@ -169,7 +178,14 @@ def round_status(round_id, business=None, now=None):
 
         partners = [partner_status(round_id, name, business=business, now=now_berlin, db_context=db)
                     for name, _ in round_planner.confirmed_partners(business)]
-        broker = broker_commission.status(round_id, business=business, db=db)
+        try:
+            broker = broker_commission.status(round_id, business=business, db=db)
+            broker_error = False
+        except Exception:
+            logger.exception('Broker-Commission-Status fuer Runde %s technisch nicht ladbar; '
+                              'Rundenanzeige wird trotzdem fortgesetzt.', round_id)
+            broker = None
+            broker_error = True
 
     blockers = [f"{p['partner']} · {reason}" for p in partners for reason in p['blockers']]
     open_partners = {p['partner'] for p in partners if p['blockers']}
@@ -179,14 +195,18 @@ def round_status(round_id, business=None, now=None):
     # bezahlte Partnerposition nicht wegen des Vermittlungsbelegs wieder als
     # "Partner noch zu bezahlen" erscheint. Umgekehrt gilt dasselbe.
     broker_blockers = []
-    if broker['status'] == 'offen':
+    if broker_error:
+        # Technischer Fehler, keine fachliche Aussage moeglich - haelt die
+        # Runde deshalb sicherheitshalber offen, statt zu raten.
+        broker_blockers.append('Vermittlungsprovision Patrick → Evelyn · Status derzeit nicht verfügbar')
+    elif broker['status'] == 'offen':
         broker_blockers.append('Vermittlungsprovision Patrick → Evelyn · Vermittlungsabrechnung offen')
     elif broker['status'] == 'erstellt' and broker['payment_status'] != 'bezahlt':
         broker_blockers.append('Vermittlungsprovision Patrick → Evelyn · Zahlung Evelyn → Patrick offen')
     # Eine dieser Runde zugeordnete, noch nicht verrechnete Provisions-
     # korrektur haelt die Runde offen - sie wird nie automatisch als erledigt
     # markiert und darf nicht verloren gehen.
-    if broker.get('late_refunds'):
+    if not broker_error and broker.get('late_refunds'):
         broker_blockers.append(
             f"Vermittlungsprovision Patrick → Evelyn · {len(broker['late_refunds'])} "
             f"Provisionskorrektur(en) noch nicht verrechnet")
@@ -201,5 +221,5 @@ def round_status(round_id, business=None, now=None):
     return dict(
         round_id=round_id, window_start=window['window_start'], window_end=window['window_end'],
         round_status=status, partners=partners, open_partner_count=len(open_partners),
-        blockers=blockers + broker_blockers, broker=broker,
+        blockers=blockers + broker_blockers, broker=broker, broker_error=broker_error,
     )

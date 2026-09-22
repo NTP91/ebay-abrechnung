@@ -267,6 +267,9 @@ def render_broker_line(result):
     Gesamtbetrag und Status, Details (Partnerbasis, Satz, Provision) nur
     aufklappbar. Keine Debugdaten, keine Positionsschluessel."""
     import broker_commission
+    if result.get('broker_error'):
+        st.caption('⚠️ Vermittlungsprovision-Status derzeit nicht verfügbar')
+        return
     broker = result.get('broker')
     if not broker:
         return

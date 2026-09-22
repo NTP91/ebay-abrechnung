@@ -297,6 +297,36 @@ class RoundUiSmokeTests(unittest.TestCase):
         self.assertFalse(list(app.exception))
         self.assertEqual(len(app.json), 0)
 
+    # Fail-soft: a technically broken broker-commission status must not take
+    # down the 'Abrechnungsrunden' block (or the rest of the page) - only
+    # its own line degrades to a visible warning.
+    def test_broker_status_failure_shows_warning_not_a_crash(self):
+        self.seed_sale('p1', 'order-a', 'PP / TEST')
+        self.seed_sale('p1m', 'order-mh', 'MH / TEST')
+        planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
+        with core.ledger() as db:
+            import group_b_rounds
+            group_b_rounds.initialize(db)
+            db.execute("INSERT INTO group_b_rounds VALUES('GB-2026-001',2026,1,'test',NULL,NULL,'0','h','{}','2026-01-01T00:00:00Z')")
+            db.commit()
+        import broker_commission
+        with patch.object(broker_commission, 'status', side_effect=RuntimeError('DB nicht erreichbar')):
+            app = self.run_app()
+        self.assertFalse(list(app.exception))
+        body = self.all_text(app)
+        # The degraded warning is shown instead of the normal broker line...
+        self.assertIn('Vermittlungsprovision-Status derzeit nicht verfügbar', body)
+        # ...the rest of the round overview keeps rendering (round id, matrix,
+        # partner cards)...
+        self.assertIn('Abrechnungsrunden', body)
+        self.assertIn('2026-003', body)
+        self.round_matrix(app)  # raises if the matrix table is missing
+        # ...and the pre-existing historical GB-2026-001 view is untouched.
+        self.assertIn('GB-2026-001', body)
+        # No internal error text/traceback fragments leak into the UI.
+        self.assertNotIn('RuntimeError', body)
+        self.assertNotIn('Traceback', body)
+
 
 if __name__ == '__main__':
     unittest.main()

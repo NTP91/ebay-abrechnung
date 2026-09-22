@@ -246,6 +246,45 @@ class RoundStatusTests(unittest.TestCase):
         self.assertEqual(result['broker']['status'], 'erstellt')
         self.assertEqual(result['round_status'], 'abgeschlossen')
 
+    # 15. fail-soft: a technical failure loading the broker-commission status
+    # must never take down the rest of the round overview, and must never
+    # let the round appear 'abgeschlossen' while its true state is unknown.
+    def test_broker_status_exception_does_not_break_round_overview(self):
+        self.seed_sale('p1', 'order-a', 'PP / TEST', payout_date='14.09.2026')
+        planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
+        snap, _ = partner_snapshot.finalize('2026-003', 'PP', now=berlin(2026, 9, 21, 0, 5))
+        self.review_and_pay('2026-003', 'PP', snap)
+        # Baseline: with a healthy broker status this exact setup completes.
+        healthy = round_status.round_status('2026-003', now=berlin(2026, 9, 21, 9, 0))
+        self.assertEqual(healthy['round_status'], 'abgeschlossen')
+
+        import broker_commission
+        with patch.object(broker_commission, 'status', side_effect=RuntimeError('DB nicht erreichbar')):
+            result = round_status.round_status('2026-003', now=berlin(2026, 9, 21, 9, 0))
+
+        # The technical broker failure must not raise out of round_status()...
+        self.assertTrue(result['broker_error'])
+        self.assertIsNone(result['broker'])
+        # ...must never claim completion while the broker state is unknown...
+        self.assertNotEqual(result['round_status'], 'abgeschlossen')
+        self.assertIn('in_Abwicklung', result['round_status'])
+        self.assertTrue(any('nicht verfügbar' in b for b in result['blockers']))
+        # ...and must leave the fachlich unabhaengige Partnerinformation intact.
+        pp = next(p for p in result['partners'] if p['partner'] == 'PP')
+        self.assertEqual(pp['overall_status'], 'abgeschlossen')
+        self.assertEqual(pp['blockers'], [])
+
+    def test_broker_status_exception_is_logged_not_silenced(self):
+        self.seed_sale('p1', 'order-a', 'PP / TEST', payout_date='14.09.2026')
+        planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
+        import broker_commission
+        with patch.object(broker_commission, 'status', side_effect=RuntimeError('DB nicht erreichbar')):
+            with self.assertLogs('round_status', level='ERROR') as logs:
+                round_status.round_status('2026-003', now=berlin(2026, 9, 19, 0, 0))
+        self.assertTrue(any('Broker-Commission-Status' in line for line in logs.output))
+        # No secrets/connection details end up in the log message itself.
+        self.assertFalse(any('SUPABASE' in line.upper() and 'TOKEN' in line.upper() for line in logs.output))
+
 
 if __name__ == '__main__':
     unittest.main()
