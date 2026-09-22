@@ -272,21 +272,43 @@ def render_broker_line(result):
         return
     amount = euros(float(broker['total_commission'])) if broker['status'] != 'nicht_erforderlich' else euros(0)
     st.caption(f"Vermittlungsprovision Patrick → Evelyn · {amount} · {broker_commission.label(broker)}")
-    if not broker['breakdown']:
+    if broker['breakdown']:
+        with st.expander('Vermittlungsprovision · Details', expanded=False):
+            import pandas as pd
+            st.dataframe(pd.DataFrame([{
+                'Partner': item['partner'],
+                'Positionen': item['positions'],
+                'Provisionsrelevante Netto-Basis': euros(float(item['net_basis'])),
+                'Satz': partner_conditions.percent(Decimal(item['rate'])),
+                'Provision': euros(float(item['commission'])),
+            } for item in broker['breakdown']]), use_container_width=True, hide_index=True)
+    # Auch dann anzeigen, wenn die Runde selbst keine Partnerbasis hat und
+    # ausschliesslich Korrekturen aus frueheren Runden verrechnet.
+    render_broker_corrections(result)
+
+
+def render_broker_corrections(result):
+    """Getrennt sichtbar: 'Vermittlungsprovision · Korrekturen / Erstattungen'.
+    Eine spätere (Teil-)Erstattung verändert nie den historischen Beleg,
+    sondern erscheint hier als eigener negativer Korrekturfall mit Status
+    ❌ offen bzw. ✅ verrechnet."""
+    import broker_commission
+    broker = result.get('broker')
+    if not broker:
         return
-    with st.expander('Vermittlungsprovision · Details', expanded=False):
-        import pandas as pd
-        st.dataframe(pd.DataFrame([{
-            'Partner': item['partner'],
-            'Positionen': item['positions'],
-            'Provisionsrelevante Netto-Basis': euros(float(item['net_basis'])),
-            'Satz': partner_conditions.percent(Decimal(item['rate'])),
-            'Provision': euros(float(item['commission'])),
-        } for item in broker['breakdown']]), use_container_width=True, hide_index=True)
-        for flag in broker.get('late_refunds', []):
-            st.warning(f"Erstattung nach finalisierter Vermittlungsabrechnung · {flag['partner']} · "
-                       f"{euros(float(flag['betrag']))} · manuelle Klärung erforderlich; der "
-                       f"finalisierte Beleg wurde bewusst nicht verändert.")
+    rows = broker_commission.correction_rows(broker)
+    if not rows:
+        return
+    import pandas as pd
+    st.caption('Vermittlungsprovision · Korrekturen / Erstattungen')
+    st.dataframe(pd.DataFrame([{
+        'Partner': row['partner'],
+        'Ursprungsrunde': row['origin_round_id'],
+        'Satz': partner_conditions.percent(row['rate']),
+        'Provisionskorrektur': euros(float(row['correction'])),
+        'Status': broker_commission.CORRECTION_LABELS[row['status']],
+        'Verrechnet in': row['settled_round_id'] or '–',
+    } for row in rows]), use_container_width=True, hide_index=True)
 
 
 def render_overview_section(business=None):

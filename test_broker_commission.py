@@ -394,65 +394,186 @@ class PmActivationTests(Seeded):
         self.assertEqual(broker_commission.pm_effective_round(), '2026-004')
 
 
-class LateRefundSafetyTests(Seeded):
-    """Fuer eine Erstattung NACH finalisiertem Vermittlungsbeleg existiert noch
-    keine entschiedene Geschaeftsregel. Erwartet wird deshalb ausdruecklich:
-    sichtbar melden, aber nichts automatisch korrigieren."""
+class CommissionCorrectionTests(Seeded):
+    """Spaetere (Teil-)Erstattung auf eine bereits abgerechnete Position:
+    anteilige Provisionskorrektur als eigener Fall, historischer Beleg bleibt
+    unveraendert, Verrechnung in der naechsten offenen Abrechnung."""
 
-    def seed_refund(self, payout_id, order, sku, amount, payout_date):
-        credit = payout(payout_id, 'refund1', order, sku=sku, amount=amount, kind='Rückerstattung')
+    def seed_refund(self, payout_id, order, sku, amount, payout_date='14.09.2026',
+                    transaction='refund1'):
+        credit = payout(payout_id, transaction, order, sku=sku, amount=amount, kind='Rückerstattung')
         credit['Artikelnummer'] = order
         credit['Auszahlungsdatum'] = payout_date
         credit['Transaktionsbetrag (inkl. Kosten)'] = amount
         core.import_reports([credit], core.PAYOUTS_DB_PATH, 'payout')
 
-    def test_late_refund_is_flagged_and_changes_nothing(self):
-        self.seed_sale('p1', 'order-mh', 'MH / TEST', amount='119,00')
+    def finalized_003(self, sku='MH / TEST', amount='119,00', order='order-mh'):
+        self.seed_sale('p1', order, sku, amount=amount)
         planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
         record, _ = broker_commission.finalize('2026-003', now=AFTER_003)
-        frozen = dict(record)
-        self.seed_refund('p1', 'order-mh', 'MH / TEST', '-119,00', '14.09.2026')
-        flags = broker_commission.late_refund_flags('2026-003')
-        self.assertEqual(len(flags), 1)
-        self.assertEqual(flags[0]['partner'], 'MH')
+        return record
+
+    def test_standard_group_b_full_refund_returns_three_percent(self):
+        record = self.finalized_003()
+        self.assertEqual(Decimal(record['total_commission']), Decimal('3.00'))
+        self.seed_refund('p1', 'order-mh', 'MH / TEST', '-119,00')
+        created = broker_commission.detect_corrections()
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0]['rate'], Decimal('0.030'))
+        self.assertEqual(created[0]['correction'], Decimal('-3.00'))
+        self.assertEqual(created[0]['origin_round_id'], '2026-003')
+
+    def test_pm_full_refund_returns_two_percent(self):
+        record = self.finalized_003(sku='PM / TEST', order='order-pm')
+        self.assertEqual(Decimal(record['total_commission']), Decimal('2.00'))
+        self.seed_refund('p1', 'order-pm', 'PM / TEST', '-119,00')
+        created = broker_commission.detect_corrections()
+        self.assertEqual(created[0]['rate'], Decimal('0.020'))
+        self.assertEqual(created[0]['correction'], Decimal('-2.00'))
+
+    def test_partial_refund_is_corrected_proportionally(self):
+        self.finalized_003(amount='238,00')   # 200,00 netto -> 6,00 Provision
+        self.seed_refund('p1', 'order-mh', 'MH / TEST', '-119,00')   # halb
+        created = broker_commission.detect_corrections()
+        self.assertEqual(created[0]['refund_net'], Decimal('-100.00'))
+        self.assertEqual(created[0]['correction'], Decimal('-3.00'))
+
+    def test_correction_uses_the_originally_applied_rate_not_todays(self):
+        """Aendert sich eine Kondition spaeter, wird die Altkorrektur trotzdem
+        mit dem urspruenglich abgerechneten Satz gerechnet."""
+        self.finalized_003(sku='PM / TEST', order='order-pm')
+        self.seed_refund('p1', 'order-pm', 'PM / TEST', '-119,00')
+        with patch.dict(conditions.SPECIAL_RATES,
+                        {'PM': (Decimal('0.035'), Decimal('0.030'))}):
+            created = broker_commission.detect_corrections()
+        self.assertEqual(created[0]['rate'], Decimal('0.020'))
+        self.assertEqual(created[0]['correction'], Decimal('-2.00'))
+
+    def test_reimported_refund_creates_only_one_correction_case(self):
+        self.finalized_003()
+        self.seed_refund('p1', 'order-mh', 'MH / TEST', '-119,00')
+        first = broker_commission.detect_corrections()
+        self.assertEqual(len(first), 1)
+        # Re-Import desselben Erstattungsereignisses + mehrfache Re-Runs
+        self.seed_refund('p1', 'order-mh', 'MH / TEST', '-119,00')
+        self.assertEqual(broker_commission.detect_corrections(), [])
+        self.assertEqual(broker_commission.detect_corrections(), [])
+        broker_commission.status('2026-003')
+        self.assertEqual(len(broker_commission.corrections()), 1)
+
+    def test_duplicate_correction_is_impossible_at_db_level(self):
+        self.finalized_003()
+        self.seed_refund('p1', 'order-mh', 'MH / TEST', '-119,00')
+        case = broker_commission.detect_corrections()[0]
+        with core.ledger() as db:
+            broker_commission.initialize(db)
+            with self.assertRaises(sqlite3.IntegrityError):
+                db.execute('INSERT INTO broker_commission_corrections VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                           (case['refund_key'], case['origin_position_key'], '2026-004',
+                            'x', 'MH', '0.030', '-100', '-3.00', 'now', '', None))
+
+    def test_historical_document_stays_byte_and_status_identical(self):
+        record = self.finalized_003()
+        before = dict(record)
+        self.seed_refund('p1', 'order-mh', 'MH / TEST', '-119,00')
+        broker_commission.detect_corrections()
+        broker_commission.status('2026-003')
         with core.ledger() as db:
             after = dict(db.execute('SELECT * FROM broker_commissions WHERE round_id=?',
                                     ('2026-003',)).fetchone())
-        self.assertEqual(frozen, after)          # Beleg unveraendert
+        self.assertEqual(before, after)
+        # Die Runde wird auch nicht wieder geoeffnet.
+        again, created = broker_commission.finalize('2026-003', now=AFTER_003)
+        self.assertFalse(created)
+        self.assertEqual(again['snapshot_hash'], before['snapshot_hash'])
+
+    def test_open_correction_keeps_its_round_from_being_closed(self):
+        self.finalized_003()
+        broker_commission.confirm_payment('2026-003')
+        self.seed_refund('p1', 'order-mh', 'MH / TEST', '-119,00')
         result = broker_commission.status('2026-003')
-        self.assertEqual(result['status'], 'erstellt')
         self.assertTrue(result['late_refunds'])
-        self.assertIn('manuelle Klärung', broker_commission.label(result))
+        rows = broker_commission.correction_rows(result)
+        self.assertEqual([row['status'] for row in rows], ['offen'])
+        self.assertIn('Korrekturen ❌ offen', broker_commission.label(result))
 
-    def test_documents_the_open_divergence_that_needs_a_business_decision(self):
-        """OFFENER FACHLICHER PUNKT - bewusst NICHT automatisch geloest.
+    def test_correction_is_settled_exactly_once_in_the_next_settlement(self):
+        self.finalized_003()
+        self.seed_refund('p1', 'order-mh', 'MH / TEST', '-119,00')
+        broker_commission.detect_corrections()
+        # Naechste Runde mit eigener Basis
+        self.seed_sale('p2', 'order-nb', 'NB / TEST', amount='238,00', payout_date='23.09.2026')
+        planner.commit_round(now=berlin(2026, 9, 25, 12, 0), base_cut=BASE_CUT)
+        model = broker_commission.basis('2026-004')
+        self.assertEqual(len(model['corrections']), 1)
+        self.assertEqual(model['total_corrections'], Decimal('-3.00'))
+        self.assertEqual(model['total_commission'],
+                         model['commission_before_corrections'] + Decimal('-3.00'))
+        record, created = broker_commission.finalize('2026-004', now=AFTER_004)
+        self.assertTrue(created)
+        self.assertEqual(Decimal(record['total_commission']),
+                         Decimal('6.00') + Decimal('-3.00'))
+        # Genau einmal verrechnet, danach nicht mehr offen.
+        settled = broker_commission.corrections()
+        self.assertEqual([row['settled_round_id'] for row in settled], ['2026-004'])
+        self.assertEqual(broker_commission.corrections(open_only=True), [])
+        self.assertEqual(broker_commission.late_refund_flags('2026-003'), [])
 
-        Nach einer spaeten Erstattung stehen zwei Zahlen nebeneinander:
-        der eingefrorene Betrag von Patricks bereits gestellter
-        Vermittlungsrechnung und sein wirtschaftlich korrekter Lifetime-Wert,
-        der die Erstattung bereits beruecksichtigt. Dieser Test friert genau
-        diese Differenz als BEKANNT und SICHTBAR ein. Es gibt bis zur
-        Geschaeftsentscheidung keine Regel, wie sie auszugleichen ist -
-        deshalb wird hier weder gutgeschrieben noch neu gerechnet, sondern
-        nur gemeldet. Er schlaegt fehl, sobald jemand still eine
-        Korrekturautomatik einbaut.
-        """
+    def test_a_settled_correction_never_enters_a_later_settlement_again(self):
+        self.finalized_003()
+        self.seed_refund('p1', 'order-mh', 'MH / TEST', '-119,00')
+        self.seed_sale('p2', 'order-nb', 'NB / TEST', amount='238,00', payout_date='23.09.2026')
+        planner.commit_round(now=berlin(2026, 9, 25, 12, 0), base_cut=BASE_CUT)
+        broker_commission.finalize('2026-004', now=AFTER_004)
+        # Dritte Runde: die Korrektur darf dort NICHT nochmal auftauchen.
+        self.seed_sale('p3', 'order-fs', 'FS / TEST', amount='119,00', payout_date='30.09.2026')
+        planner.commit_round(now=berlin(2026, 10, 2, 12, 0), base_cut=BASE_CUT)
+        model = broker_commission.basis('2026-005')
+        self.assertEqual(model['corrections'], [])
+        self.assertEqual(model['total_corrections'], Decimal(0))
+
+    def test_correction_without_a_next_round_stays_open_and_is_not_lost(self):
+        self.finalized_003()
+        self.seed_refund('p1', 'order-mh', 'MH / TEST', '-119,00')
+        broker_commission.detect_corrections()
+        open_cases = broker_commission.corrections(open_only=True)
+        self.assertEqual(len(open_cases), 1)
+        self.assertIsNone(open_cases[0]['settled_round_id'])
+        # Wiederholte Aufrufe markieren nichts automatisch als erledigt.
+        broker_commission.status('2026-003')
+        broker_commission.detect_corrections()
+        self.assertEqual(len(broker_commission.corrections(open_only=True)), 1)
+
+    def test_lifetime_patrick_commission_is_zero_after_a_full_refund(self):
+        self.finalized_003()
+        self.assertEqual(studio_view.project_totals(core.load_master_data())['patrick'],
+                         Decimal('3.00'))
+        self.seed_refund('p1', 'order-mh', 'MH / TEST', '-119,00')
+        self.assertEqual(studio_view.project_totals(core.load_master_data())['patrick'],
+                         Decimal('0.00'))
+
+    def test_partner_invoice_and_payment_are_never_touched_by_a_correction(self):
         self.seed_sale('p1', 'order-mh', 'MH / TEST', amount='119,00')
         planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
-        record, _ = broker_commission.finalize('2026-003', now=AFTER_003)
-        invoiced = Decimal(record['total_commission'])
-        self.assertEqual(invoiced, studio_view.project_totals(core.load_master_data())['patrick'])
+        snap, _ = partner_snapshot.finalize('2026-003', 'MH', now=AFTER_003)
+        before = (snap['file_hash'], snap['snapshot_hash'], snap['final_amount'])
+        broker_commission.finalize('2026-003', now=AFTER_003)
+        self.seed_refund('p1', 'order-mh', 'MH / TEST', '-119,00')
+        broker_commission.detect_corrections()
+        again, created = partner_snapshot.finalize('2026-003', 'MH', now=AFTER_003)
+        self.assertFalse(created)
+        self.assertEqual(before, (again['file_hash'], again['snapshot_hash'], again['final_amount']))
 
-        self.seed_refund('p1', 'order-mh', 'MH / TEST', '-119,00', '14.09.2026')
-        lifetime_after = studio_view.project_totals(core.load_master_data())['patrick']
-
-        # Der Beleg bleibt exakt wie gestellt ...
-        self.assertEqual(Decimal(broker_commission.status('2026-003')['total_commission']), invoiced)
-        # ... der wirtschaftliche Lifetime-Wert folgt der Erstattung ...
-        self.assertLess(lifetime_after, invoiced)
-        # ... und die offene Differenz ist ausschliesslich als Flag sichtbar,
-        # nicht als stille Gutschrift.
-        self.assertTrue(broker_commission.late_refund_flags('2026-003'))
+    def test_refund_on_a_never_commissioned_position_creates_no_case(self):
+        """Eine Erstattung auf eine Position, die nie Basis einer
+        Vermittlungsabrechnung war (Gruppe A, oder Runde nie finalisiert),
+        erzeugt keinen Korrekturfall."""
+        self.seed_sale('p1', 'order-pp', 'PP / TEST', amount='119,00')
+        planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
+        broker_commission.finalize('2026-003', now=AFTER_003)
+        self.seed_refund('p1', 'order-pp', 'PP / TEST', '-119,00')
+        self.assertEqual(broker_commission.detect_corrections(), [])
+        self.assertEqual(broker_commission.corrections(), [])
 
 
 class DashboardTests(Seeded):
@@ -557,6 +678,20 @@ class StreamlitSmokeTests(Seeded):
         self.assertNotIn('PM', labels)
         self.assertIn('Sonderkondition · 2,5 % Abzug', body)
         self.assertIn('Patrick-Provision 2,0 %', body)
+
+    def test_app_renders_the_corrections_section(self):
+        self.seed_sale('p1', 'order-mh', 'MH / TEST', amount='119,00')
+        planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
+        broker_commission.finalize('2026-003', now=AFTER_003)
+        credit = payout('p1', 'refund1', 'order-mh', sku='MH / TEST',
+                        amount='-119,00', kind='Rückerstattung')
+        credit['Artikelnummer'] = 'order-mh'
+        credit['Auszahlungsdatum'] = '14.09.2026'
+        credit['Transaktionsbetrag (inkl. Kosten)'] = '-119,00'
+        core.import_reports([credit], core.PAYOUTS_DB_PATH, 'payout')
+        app = self.run_app()
+        self.assertFalse(list(app.exception))
+        self.assertIn('Vermittlungsprovision · Korrekturen / Erstattungen', self.all_text(app))
 
     def test_app_renders_after_a_finalized_broker_settlement(self):
         self.seed_sale('p1', 'order-mh', 'MH / TEST', amount='119,00')

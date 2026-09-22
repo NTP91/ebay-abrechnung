@@ -29,6 +29,18 @@ Dublettenschutz (hoechste Prioritaet), dreifach:
      hash-gesicherte Insert-Once-Muster wie group_b_rounds._insert_round).
      Ein finalisierter Beleg wird nie neu gerechnet - status()/record()
      liefern immer den gespeicherten Stand, nie eine Live-Neuberechnung.
+  4. broker_commission_corrections.refund_key ist PRIMARY KEY -> ein
+     Erstattungsereignis erzeugt genau EINEN Provisionskorrekturfall, und das
+     UPDATE beim Verrechnen greift nur bei settled_round_id IS NULL.
+
+Spaetere (Teil-)Erstattung auf eine bereits abgerechnete Position:
+detect_corrections() legt einen eigenen negativen Korrekturfall an (verknuepft
+mit Ursprungsposition, -runde, -beleg, Erstattungsereignis und dem
+urspruenglich angewendeten Satz). Der historische Beleg wird dabei NIE
+veraendert oder wiedereroeffnet; die Korrektur wird in der naechsten offenen
+Vermittlungsabrechnung als eigene negative Position verrechnet. Existiert noch
+keine naechste offene Abrechnung, bleibt der Fall offen stehen - er wird nie
+automatisch als erledigt markiert.
 """
 import hashlib
 import json
@@ -57,6 +69,18 @@ def initialize(db):
     # Write-once-Journal fuer die Aktivierung einer Sonderkondition (PM).
     db.execute('''CREATE TABLE IF NOT EXISTS partner_condition_activation (
         partner TEXT PRIMARY KEY, round_id TEXT NOT NULL, determined_at TEXT NOT NULL)''')
+    # Provisionskorrekturfaelle: eine spaetere (Teil-)Erstattung auf eine
+    # bereits abgerechnete Position. refund_key ist PRIMARY KEY - ein
+    # Erstattungsereignis erzeugt damit genau EINEN Korrekturfall, auch bei
+    # wiederholtem Import oder Re-Run.
+    db.execute('''CREATE TABLE IF NOT EXISTS broker_commission_corrections (
+        refund_key TEXT PRIMARY KEY, origin_position_key TEXT NOT NULL,
+        origin_round_id TEXT NOT NULL, origin_snapshot_hash TEXT NOT NULL,
+        partner TEXT NOT NULL, rate TEXT NOT NULL,
+        refund_net TEXT NOT NULL, correction TEXT NOT NULL,
+        detected_at TEXT NOT NULL, source TEXT NOT NULL,
+        settled_round_id TEXT,
+        FOREIGN KEY(origin_round_id) REFERENCES broker_commissions(round_id))''')
 
 
 def _stable(value):
@@ -115,6 +139,13 @@ def basis(round_id, business=None, payouts=None, orders=None, db=None):
     provisionsrelevante Netto-Basis, den verwendeten Satz und den
     Provisionsbetrag - damit ist die Summe immer partnerweise nachvollziehbar
     und PM kann nicht versehentlich mit 3 % laufen.
+
+    Zusaetzlich werden alle derzeit OFFENEN Provisionskorrekturen aus
+    frueheren Runden als eigene negative Positionen mitgefuehrt ('corrections')
+    und fliessen in total_commission ein: sie werden in der naechsten offenen
+    Vermittlungsabrechnung verrechnet, ohne den historischen Beleg anzufassen.
+    Eine Runde, die ausschliesslich Korrekturen enthaelt, ist deshalb
+    ebenfalls 'required'.
     """
     business = position_workflow.positions() if business is None else business
     payouts = core.read_master(core.PAYOUTS_DB_PATH) if payouts is None else payouts
@@ -123,10 +154,19 @@ def basis(round_id, business=None, payouts=None, orders=None, db=None):
     def _read(connection):
         initialize(connection)
         _require_neutral(connection, round_id)
-        return {r[0] for r in connection.execute(
+        keys = {r[0] for r in connection.execute(
             'SELECT position_key FROM group_b_round_positions WHERE round_id=?', (round_id,))}
+        detect_corrections(business=business, db=connection)
+        # Eine bereits finalisierte Runde hat ihre Korrekturen schon
+        # gebunden; nur eine noch offene Runde nimmt neue auf.
+        finalized = connection.execute('SELECT 1 FROM broker_commissions WHERE round_id=?',
+                                       (round_id,)).fetchone()
+        pending = [] if finalized else [
+            row for row in corrections(open_only=True, db=connection)
+            if row['origin_round_id'] != round_id]
+        return keys, pending
 
-    assigned_keys = _read(db) if db is not None else _read_with_own_ledger(_read)
+    assigned_keys, pending = _read(db) if db is not None else _read_with_own_ledger(_read)
 
     rows = _commission_rows(business, assigned_keys)
     partners, total_net, total_commission, keys = [], Decimal(0), Decimal(0), []
@@ -144,9 +184,17 @@ def basis(round_id, business=None, payouts=None, orders=None, db=None):
         total_net += net
         total_commission += commission
         keys.extend(sale_keys)
+    correction_rows = [dict(refund_key=row['refund_key'], origin_round_id=row['origin_round_id'],
+                            origin_position_key=row['origin_position_key'], partner=row['partner'],
+                            rate=Decimal(row['rate']), refund_net=Decimal(row['refund_net']),
+                            correction=Decimal(row['correction'])) for row in pending]
+    total_corrections = sum((row['correction'] for row in correction_rows), Decimal(0))
     return dict(round_id=round_id, partners=partners, total_net=total_net,
-                total_commission=total_commission, position_keys=sorted(keys),
-                required=bool(partners))
+                corrections=correction_rows, total_corrections=total_corrections,
+                total_commission=total_commission + total_corrections,
+                commission_before_corrections=total_commission,
+                position_keys=sorted(keys),
+                required=bool(partners) or bool(correction_rows))
 
 
 def _read_with_own_ledger(fn):
@@ -232,8 +280,11 @@ def finalize(round_id, now=None, business=None, payouts=None, orders=None):
         breakdown = [dict(partner=p['partner'], positions=p['positions'],
                           net_basis=str(p['net_basis']), rate=str(p['rate']),
                           commission=str(p['commission'])) for p in model['partners']]
+        settled_corrections = [row['refund_key'] for row in model['corrections']]
         payload = dict(round_id=round_id, breakdown=breakdown,
                        position_keys=model['position_keys'],
+                       corrections=sorted(settled_corrections),
+                       total_corrections=str(model['total_corrections']),
                        total_net=str(model['total_net']),
                        total_commission=str(model['total_commission']))
         digest = _hash(_stable(payload))
@@ -257,6 +308,18 @@ def finalize(round_id, now=None, business=None, payouts=None, orders=None):
             # zugrunde liegt - lieber Abbruch als eine zweite Provision.
             db.execute('INSERT INTO broker_commission_positions VALUES(?,?,?)',
                        (key, round_id, sources.get(key, '')))
+        for refund_key in settled_corrections:
+            # Nur einen noch OFFENEN Fall binden. Das WHERE settled_round_id
+            # IS NULL macht ein zweites Verrechnen desselben Korrekturfalls
+            # strukturell unmoeglich, auch bei gleichzeitigen Laeufen.
+            updated = db.execute(
+                'UPDATE broker_commission_corrections SET settled_round_id=? '
+                'WHERE refund_key=? AND settled_round_id IS NULL',
+                (round_id, refund_key)).rowcount
+            if updated != 1:
+                db.rollback()
+                raise ValueError(f'Provisionskorrektur {refund_key} wurde zwischenzeitlich '
+                                 f'bereits verrechnet; Vermittlungsabrechnung abgebrochen.')
         db.commit()
         record = dict(db.execute('SELECT * FROM broker_commissions WHERE round_id=?', (round_id,)).fetchone())
     return record, True
@@ -288,45 +351,115 @@ def confirm_payment(round_id, paid_date=None, note=''):
     return record, True
 
 
-def late_refund_flags(round_id, business=None, db=None):
-    """SICHERHEITSNETZ, kein Korrekturautomatismus.
+def _origin_rate(record, partner):
+    """Der URSPRUENGLICH angewendete Satz aus dem eingefrorenen Beleg - nie
+    der heutige Satz aus partner_conditions. Aendert sich eine Kondition
+    spaeter, wird eine Altkorrektur trotzdem mit dem Satz gerechnet, mit dem
+    die Position tatsaechlich abgerechnet wurde."""
+    for item in json.loads(record['breakdown']):
+        if item['partner'] == partner:
+            return Decimal(item['rate'])
+    raise ValueError(f'{partner} kommt im eingefrorenen Beleg {record["round_id"]} nicht vor.')
 
-    Eine Erstattung, die erst NACH dem Finalisieren des Vermittlungsbelegs zu
-    einer seiner eingefrorenen Positionen auftaucht, wuerde die bereits
-    abgerechnete Provision fachlich mindern. Fuer diesen Fall gibt es
-    (Stand jetzt) KEINE entschiedene Geschaeftsregel - deshalb wird hier
-    bewusst nichts automatisch gutgeschrieben, nichts neu gerechnet und der
-    eingefrorene Beleg nicht angefasst. Er wird ausschliesslich sichtbar zur
-    manuellen Klaerung gemeldet.
 
-    Rueckgabe: Liste von {refund_key, origin_position_key, partner, betrag}.
-    Leer, solange es keinen finalisierten Beleg oder keine spaete Erstattung
-    gibt.
+def detect_corrections(business=None, db=None):
+    """Provisionskorrekturfaelle fuer spaetere (Teil-)Erstattungen anlegen.
+
+    Fachregel: wird eine Position nach Finalisierung der Vermittlungs-
+    abrechnung ganz oder teilweise erstattet, wird die bereits berechnete
+    Provision anteilig korrigiert - aber NIE durch Aendern oder Wiederoeffnen
+    des historischen Belegs. Stattdessen entsteht ein eigener, negativer
+    Korrekturfall, eindeutig verknuepft mit Ursprungsposition, Ursprungsrunde,
+    Ursprungsbeleg (snapshot_hash), Erstattungsereignis und dem urspruenglich
+    angewendeten Provisionssatz.
+
+    Betrag = erstatteter Nettoanteil * urspruenglicher Satz. Eine
+    Vollerstattung ergibt damit automatisch die vollstaendige Korrektur, eine
+    Teilerstattung den exakten Anteil - ohne zweite Rechenregel.
+
+    Dublettenschutz: refund_key ist PRIMARY KEY. Ein erneuter Import oder
+    Re-Run desselben Erstattungsereignisses erzeugt keinen zweiten Fall.
+
+    Rueckgabe: Liste der in DIESEM Aufruf neu angelegten Faelle.
     """
-    business = position_workflow.positions() if business is None else business
+    live = position_workflow.positions() if business is None else business
 
     def _run(connection):
         initialize(connection)
-        record = connection.execute('SELECT position_keys, finalized_at FROM broker_commissions WHERE round_id=?',
-                                    (round_id,)).fetchone()
-        if not record or business.empty:
+        if live.empty:
             return []
-        frozen = set(json.loads(record['position_keys']))
-        by_index = {index: row for index, row in business.iterrows()}
-        frozen_index = {index for index, row in by_index.items() if row.position_key in frozen}
-        flags = []
-        for refund_index, sale_index in core.refund_links(business).items():
-            if sale_index not in frozen_index:
-                continue
+        finalized = [dict(row) for row in connection.execute('SELECT * FROM broker_commissions')]
+        if not finalized:
+            return []
+        origin_of = {}
+        for record in finalized:
+            for key in json.loads(record['position_keys']):
+                origin_of[key] = record
+        by_index = {index: row for index, row in live.iterrows()}
+        created = []
+        for refund_index, sale_index in core.refund_links(live).items():
             refund, sale = by_index[refund_index], by_index[sale_index]
-            already = connection.execute(
-                'SELECT 1 FROM broker_commission_positions WHERE position_key=?',
-                (refund.position_key,)).fetchone()
-            if already:
+            record = origin_of.get(sale.position_key)
+            if record is None:
+                continue  # Position war nie Basis einer Vermittlungsabrechnung
+            if connection.execute('SELECT 1 FROM broker_commission_corrections WHERE refund_key=?',
+                                  (refund.position_key,)).fetchone():
                 continue
-            flags.append(dict(refund_key=refund.position_key, origin_position_key=sale.position_key,
-                              partner=str(sale.Partner), betrag=Decimal(str(refund['Erlös_Brutto']))))
-        return flags
+            rate = _origin_rate(record, str(sale.Partner))
+            refund_net = Decimal(str(refund['eBay_Netto']))
+            correction = partner_export.cents(refund_net * rate)
+            now = datetime.now(timezone.utc).isoformat(timespec='milliseconds')
+            connection.execute(
+                'INSERT OR IGNORE INTO broker_commission_corrections VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                (refund.position_key, sale.position_key, record['round_id'],
+                 record['snapshot_hash'], str(sale.Partner), str(rate),
+                 str(refund_net), str(correction), now,
+                 position_workflow.source_snapshot(refund), None))
+            created.append(dict(refund_key=refund.position_key, origin_position_key=sale.position_key,
+                                origin_round_id=record['round_id'], partner=str(sale.Partner),
+                                rate=rate, refund_net=refund_net, correction=correction))
+        if created:
+            connection.commit()
+        return created
+
+    return _run(db) if db is not None else _read_with_own_ledger(_run)
+
+
+def corrections(round_id=None, open_only=False, db=None):
+    """Korrekturfaelle lesen. round_id filtert auf die URSPRUNGSrunde,
+    open_only auf noch nicht verrechnete Faelle."""
+    def _run(connection):
+        initialize(connection)
+        sql = 'SELECT * FROM broker_commission_corrections'
+        clauses, params = [], []
+        if round_id is not None:
+            clauses.append('origin_round_id=?')
+            params.append(round_id)
+        if open_only:
+            clauses.append('settled_round_id IS NULL')
+        if clauses:
+            sql += ' WHERE ' + ' AND '.join(clauses)
+        return [dict(row) for row in connection.execute(sql + ' ORDER BY detected_at, refund_key', params)]
+
+    return _run(db) if db is not None else _read_with_own_ledger(_run)
+
+
+def late_refund_flags(round_id, business=None, db=None):
+    """Die noch OFFENEN (nicht verrechneten) Provisionskorrekturen, deren
+    Ursprung diese Runde ist. Solange davon etwas offen ist, gilt die Runde
+    nicht als vollstaendig abgeschlossen - der Fall darf nicht verloren gehen
+    und wird nie automatisch als erledigt markiert."""
+    # Vor dem Oeffnen der Ledger-Verbindung aufloesen: position_workflow.
+    # positions() oeffnet intern eine eigene core.ledger(), und deren
+    # FileLock ist nicht reentrant.
+    live = position_workflow.positions() if business is None else business
+
+    def _run(connection):
+        detect_corrections(business=live, db=connection)
+        return [dict(refund_key=row['refund_key'], origin_position_key=row['origin_position_key'],
+                     partner=row['partner'], rate=Decimal(row['rate']),
+                     betrag=Decimal(row['refund_net']), correction=Decimal(row['correction']))
+                for row in corrections(round_id=round_id, open_only=True, db=connection)]
 
     return _run(db) if db is not None else _read_with_own_ledger(_run)
 
@@ -348,6 +481,10 @@ def status(round_id, business=None, payouts=None, orders=None, db=None):
         row = connection.execute('SELECT * FROM broker_commissions WHERE round_id=?', (round_id,)).fetchone()
         if row:
             record = dict(row)
+            # Erst erkennen, dann lesen - sonst liefe die Liste der eigenen
+            # Korrekturfaelle dem gerade erkannten Fall eine Runde hinterher.
+            flags = late_refund_flags(round_id, business=live, db=connection)
+            own = corrections(round_id=round_id, db=connection)
             return dict(round_id=round_id, status='erstellt',
                         total_commission=Decimal(record['total_commission']),
                         total_net=Decimal(record['total_net']),
@@ -355,7 +492,8 @@ def status(round_id, business=None, payouts=None, orders=None, db=None):
                         finalized_at=record['finalized_at'],
                         payment_status='bezahlt' if record['paid_at'] else 'offen',
                         paid_at=record['paid_at'],
-                        late_refunds=late_refund_flags(round_id, business=live, db=connection))
+                        corrections=[], total_corrections=Decimal(0),
+                        origin_corrections=own, late_refunds=flags)
         model = basis(round_id, business=live, payouts=payouts, orders=orders, db=connection)
         return dict(round_id=round_id,
                     status='offen' if model['required'] else 'nicht_erforderlich',
@@ -365,7 +503,10 @@ def status(round_id, business=None, payouts=None, orders=None, db=None):
                                     commission=str(p['commission'])) for p in model['partners']],
                     finalized_at=None,
                     payment_status='nicht_erforderlich' if not model['required'] else 'offen',
-                    paid_at=None, late_refunds=[])
+                    paid_at=None,
+                    corrections=model['corrections'], total_corrections=model['total_corrections'],
+                    origin_corrections=corrections(round_id=round_id, db=connection),
+                    late_refunds=late_refund_flags(round_id, business=live, db=connection))
 
     return _run(db) if db is not None else _read_with_own_ledger(_run)
 
@@ -377,11 +518,36 @@ LABELS = {
 }
 
 
+CORRECTION_LABELS = {'offen': '❌ offen', 'verrechnet': '✅ verrechnet'}
+
+
 def label(result):
     """Einzeiler fuer die Rundenuebersicht, inkl. getrennter Zahlungsspur."""
     text = LABELS[result['status']]
     if result['status'] == 'erstellt':
         text += ' · Zahlung Evelyn → Patrick ' + ('✅ erfolgt' if result['payment_status'] == 'bezahlt' else '❌ offen')
     if result.get('late_refunds'):
-        text += f" · ⚠️ {len(result['late_refunds'])} spätere Erstattung(en) – manuelle Klärung"
+        text += (f" · Korrekturen {CORRECTION_LABELS['offen']}"
+                 f" ({len(result['late_refunds'])})")
+    if result.get('corrections'):
+        text += f" · inkl. {len(result['corrections'])} Provisionskorrektur(en)"
     return text
+
+
+def correction_rows(result):
+    """Die UI-Zeilen fuer 'Vermittlungsprovision · Korrekturen / Erstattungen'
+    einer Runde: die aus dieser Runde stammenden Faelle mit ihrem Status, plus
+    die in dieser Runde verrechneten Faelle aus frueheren Runden."""
+    rows = []
+    for row in result.get('origin_corrections', []):
+        rows.append(dict(refund_key=row['refund_key'], partner=row['partner'],
+                         rate=Decimal(row['rate']), correction=Decimal(row['correction']),
+                         origin_round_id=row['origin_round_id'],
+                         settled_round_id=row['settled_round_id'],
+                         status='verrechnet' if row['settled_round_id'] else 'offen'))
+    for row in result.get('corrections', []):
+        rows.append(dict(refund_key=row['refund_key'], partner=row['partner'],
+                         rate=row['rate'], correction=row['correction'],
+                         origin_round_id=row['origin_round_id'],
+                         settled_round_id=result['round_id'], status='verrechnet'))
+    return rows

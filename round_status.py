@@ -183,8 +183,13 @@ def round_status(round_id, business=None, now=None):
         broker_blockers.append('Vermittlungsprovision Patrick → Evelyn · Vermittlungsabrechnung offen')
     elif broker['status'] == 'erstellt' and broker['payment_status'] != 'bezahlt':
         broker_blockers.append('Vermittlungsprovision Patrick → Evelyn · Zahlung Evelyn → Patrick offen')
+    # Eine dieser Runde zugeordnete, noch nicht verrechnete Provisions-
+    # korrektur haelt die Runde offen - sie wird nie automatisch als erledigt
+    # markiert und darf nicht verloren gehen.
     if broker.get('late_refunds'):
-        broker_blockers.append('Vermittlungsprovision Patrick → Evelyn · spätere Erstattung, manuelle Klärung')
+        broker_blockers.append(
+            f"Vermittlungsprovision Patrick → Evelyn · {len(broker['late_refunds'])} "
+            f"Provisionskorrektur(en) noch nicht verrechnet")
 
     if not cut_passed:
         status = 'laufend'
