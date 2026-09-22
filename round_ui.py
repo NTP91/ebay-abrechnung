@@ -9,11 +9,13 @@ rules to them (round_status.py itself refuses that).
 """
 import json
 from datetime import date, datetime
+from decimal import Decimal
 
 import streamlit as st
 
 import core
 import group_b_rounds
+import partner_conditions
 import partner_export
 import partner_round_invoices
 import partner_snapshot
@@ -260,6 +262,33 @@ def render_historical_rounds(business=None):
                 st.caption('Keine verknüpften Partnerbelege gespeichert.')
 
 
+def render_broker_line(result):
+    """Eine kompakte Zeile 'Vermittlungsprovision Patrick → Evelyn' mit
+    Gesamtbetrag und Status, Details (Partnerbasis, Satz, Provision) nur
+    aufklappbar. Keine Debugdaten, keine Positionsschluessel."""
+    import broker_commission
+    broker = result.get('broker')
+    if not broker:
+        return
+    amount = euros(float(broker['total_commission'])) if broker['status'] != 'nicht_erforderlich' else euros(0)
+    st.caption(f"Vermittlungsprovision Patrick → Evelyn · {amount} · {broker_commission.label(broker)}")
+    if not broker['breakdown']:
+        return
+    with st.expander('Vermittlungsprovision · Details', expanded=False):
+        import pandas as pd
+        st.dataframe(pd.DataFrame([{
+            'Partner': item['partner'],
+            'Positionen': item['positions'],
+            'Provisionsrelevante Netto-Basis': euros(float(item['net_basis'])),
+            'Satz': partner_conditions.percent(Decimal(item['rate'])),
+            'Provision': euros(float(item['commission'])),
+        } for item in broker['breakdown']]), use_container_width=True, hide_index=True)
+        for flag in broker.get('late_refunds', []):
+            st.warning(f"Erstattung nach finalisierter Vermittlungsabrechnung · {flag['partner']} · "
+                       f"{euros(float(flag['betrag']))} · manuelle Klärung erforderlich; der "
+                       f"finalisierte Beleg wurde bewusst nicht verändert.")
+
+
 def render_overview_section(business=None):
     """The single 'Abrechnungsrunden' block for the Übersicht tab: current/
     in-Abwicklung 2026-003+ rounds prominent, abgeschlossene rounds
@@ -280,6 +309,7 @@ def render_overview_section(business=None):
             header = f"{round_id}{marker} · {_period(result)} · {round_label(result['round_status'])}"
             with st.expander(header, expanded=(result['round_status'] != 'abgeschlossen')):
                 render_round_matrix(result)
+                render_broker_line(result)
                 if result['blockers']:
                     st.caption('Offene Punkte: ' + ' · '.join(result['blockers']))
                 st.caption('Partnerpakete & Dokumente: Historie → Abrechnungsarchiv.')
@@ -671,6 +701,10 @@ def render_partner_cards(business=None, payouts=None, orders=None, group=None):
             header = f"{partner} · {'kein aktuelle Runde' if not current_round else current_round} · ➖ nichts erforderlich"
         expanded = bool(cases) or (status and status['overall_status'] not in ('abgeschlossen', 'nichts_erforderlich'))
         with st.expander(header, expanded=bool(expanded)):
+            # PM bleibt ein ganz normaler Gruppe-B-Partner (kein eigener Tab,
+            # kein eigener Workflow) - nur die Kondition wird sichtbar
+            # ausgewiesen, aus der zentralen Konditionsquelle.
+            st.caption(partner_conditions.label(partner, broker=True))
             st.caption('Dokumente & vollständige Fallhistorie: Historie → Abrechnungsarchiv.')
             if cases:
                 st.markdown('**Offene ältere Fälle**')

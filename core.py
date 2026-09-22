@@ -17,6 +17,7 @@ import requests
 import zipfile
 from contextlib import contextmanager, nullcontext
 from atomic_io import replace_file
+import partner_conditions
 import supabase_store
 from functools import lru_cache
 
@@ -526,12 +527,18 @@ def load_master_data():
         partner = normalized_partner(sku)
         if not fee and not re.fullmatch(r'[A-Z0-9]+', partner):
             issue = issue or 'Zuordnung fehlt: SKU ohne verwertbaren Partner vor dem ersten Slash'
-        if not fee and partner and not (partner.startswith(('PP', 'BA', 'MK', '001', 'MH')) or partner in known_group_b_partners()):
+        # Exakter Vergleich des Partnercodes (= SKU-Segment vor dem ersten
+        # Slash, siehe normalized_partner), NIE startswith: ein unbekanntes
+        # "PMX" darf niemals automatisch auf das bekannte "PM" abgebildet
+        # werden. 'MH' ist hier bereits exakt, weil normalized_partner jedes
+        # 'MH...' auf genau 'MH' zusammenzieht.
+        known = set(partner_conditions.GROUP_A_PARTNERS) | {'MH'} | known_group_b_partners()
+        if not fee and partner and partner not in known:
             issue = issue or 'Zuordnung fehlt: unbekannter Partner ' + partner
         if fee:
             partner, sku, title = '', '', title or 'Sonstige eBay-Gebühr'
         group = ('Gebühren' if fee else 'Ohne Zuordnung' if issue else
-                 'Gruppe A' if partner.startswith(('PP', 'BA', 'MK', '001')) else 'Gruppe B')
+                 partner_conditions.group_for(partner))
         manual_issue = manual_gates.get(payout_reconciliation.key(row), '')
         issue = '; '.join(filter(None, [issue, manual_issue]))
         processed.append({
@@ -1016,7 +1023,10 @@ def get_refunds_summary(df):
         return pd.DataFrame()
 
     df_ref['Gutschrift_Brutto'] = df_ref['Erlös_Brutto']
-    df_ref['Provision'] = df_ref.apply(lambda row: row['Gutschrift_Brutto'] * (0.005 if row['Gruppe'] == 'Gruppe A' else 0.035), axis=1)
+    # Satz aus der zentralen Konditionsquelle, damit PM hier nicht mit 3,5 %
+    # statt 2,5 % korrigiert wird.
+    df_ref['Provision'] = df_ref.apply(lambda row: row['Gutschrift_Brutto'] * float(
+        partner_conditions.partner_rate(row['Partner'], row['Gruppe'])), axis=1)
     df_ref['Evelyn_Korrektur_0_5'] = df_ref['Gutschrift_Brutto'] * 0.005
     df_ref['Gutschrift_Netto_Auszahlung'] = df_ref['Gutschrift_Brutto'] - df_ref['Provision']
 

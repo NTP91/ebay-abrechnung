@@ -1,5 +1,5 @@
 {
-  "group_b": ["NB", "FS"],
+  "group_b": ["NB", "FS", "PM"],
   "sku_prefix_overrides": {
     "MAH-": "FS"
   },

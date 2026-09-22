@@ -23,7 +23,21 @@ def local_datetime(values):
 
 
 def project_totals(master):
-    """Cumulative settled revenue and actual net commission, including credits."""
+    """Cumulative settled revenue and actual net commission, including credits.
+
+    Patricks Anteil ist ausdruecklich KEINE pauschalen 3 % auf ganz Gruppe B
+    mehr: item['discount'] ist der Partnerabzug, den prepare_partner_export
+    aus der zentralen Konditionsquelle (partner_conditions) je Partner zieht -
+    3,5 % Standard-Gruppe-B, 2,5 % fuer PM, 0,5 % fuer Gruppe A. Evelyns
+    unveraenderte 0,5 % werden davon abgezogen, sodass sich pro Partner genau
+    der richtige Satz ergibt (3,5-0,5 = 3,0 %; 2,5-0,5 = 2,0 %; Gruppe A
+    traegt strukturell gar nichts bei). Damit steht der Satz weiterhin an
+    genau einer Stelle und wird hier nicht ein zweites Mal hartkodiert.
+
+    001/002 werden dadurch nicht rueckwirkend neu gerechnet: die historischen
+    Partner behalten ihre unveraenderten Standardsaetze, und PM (der einzige
+    Partner mit abweichender Kondition) existiert erst ab 2026-003.
+    """
     totals = dict(ebay=Decimal(0), evelyn=Decimal(0), patrick=Decimal(0))
     if master.empty:
         return totals

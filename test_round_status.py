@@ -231,6 +231,19 @@ class RoundStatusTests(unittest.TestCase):
         self.assertEqual(mh['group'], 'Gruppe B')
         self.assertEqual(pp['overall_status'], 'abgeschlossen')
         self.assertEqual(mh['overall_status'], 'abgeschlossen')
+        # Beide Partner sind fertig, aber die Runde enthaelt eine
+        # provisionsrelevante Gruppe-B-Position (MH): die eigene Spur
+        # "Vermittlungsabrechnung Patrick -> Evelyn" ist noch offen und haelt
+        # die Runde korrekt in Abwicklung - ohne die Partner zurueckzusetzen.
+        self.assertEqual(result['broker']['status'], 'offen')
+        self.assertEqual(result['round_status'], 'in_Abwicklung')
+        self.assertEqual([p['blockers'] for p in (pp, mh)], [[], []])
+
+        import broker_commission
+        broker_commission.finalize('2026-003', now=berlin(2026, 9, 21, 0, 5))
+        broker_commission.confirm_payment('2026-003')
+        result = round_status.round_status('2026-003', now=berlin(2026, 9, 21, 9, 0))
+        self.assertEqual(result['broker']['status'], 'erstellt')
         self.assertEqual(result['round_status'], 'abgeschlossen')
 
 

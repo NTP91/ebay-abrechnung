@@ -2,7 +2,8 @@
 
 Nothing here is a stored field - every status is computed fresh, each call,
 from the already-existing tables (group_b_rounds/group_b_round_positions,
-partner_round_snapshots, partner_round_invoices, recovery_cases). No second
+partner_round_snapshots, partner_round_invoices, recovery_cases,
+broker_commissions). No second
 status logic may live in UI/export code going forward; they call
 partner_status()/round_status() instead of re-deriving completion rules.
 
@@ -143,7 +144,16 @@ def round_status(round_id, business=None, now=None):
     partner (including ones with 0 positions in this round - they never
     block), the round's own overall status, and a concrete blocker list
     ('Partner · Grund'), not just a count.
+
+    Zusaetzlich unter 'broker' die davon vollstaendig getrennte Spur
+    "Vermittlungsabrechnung Patrick -> Evelyn" (broker_commission.py) mit
+    eigenem Status und eigener Zahlungsspur. Sie geht in den Rundenstatus
+    ein, wird aber nie in die Blocker eines Partners gespiegelt: eine
+    bezahlte Partnerposition darf dadurch nie wieder als "Partner noch zu
+    bezahlen" erscheinen (und umgekehrt schliesst ein fertiger
+    Vermittlungsbeleg keinen offenen Partner).
     """
+    import broker_commission
     import partner_round_invoices
 
     now_berlin = (now or datetime.now(BERLIN)).astimezone(BERLIN)
@@ -159,18 +169,32 @@ def round_status(round_id, business=None, now=None):
 
         partners = [partner_status(round_id, name, business=business, now=now_berlin, db_context=db)
                     for name, _ in round_planner.confirmed_partners(business)]
+        broker = broker_commission.status(round_id, business=business, db=db)
 
     blockers = [f"{p['partner']} · {reason}" for p in partners for reason in p['blockers']]
     open_partners = {p['partner'] for p in partners if p['blockers']}
 
+    # Eigene, von Partnerrechnung/-zahlung vollstaendig getrennte Spur: sie
+    # wird NIE in p['blockers'] eines Partners gespiegelt, damit eine bereits
+    # bezahlte Partnerposition nicht wegen des Vermittlungsbelegs wieder als
+    # "Partner noch zu bezahlen" erscheint. Umgekehrt gilt dasselbe.
+    broker_blockers = []
+    if broker['status'] == 'offen':
+        broker_blockers.append('Vermittlungsprovision Patrick → Evelyn · Vermittlungsabrechnung offen')
+    elif broker['status'] == 'erstellt' and broker['payment_status'] != 'bezahlt':
+        broker_blockers.append('Vermittlungsprovision Patrick → Evelyn · Zahlung Evelyn → Patrick offen')
+    if broker.get('late_refunds'):
+        broker_blockers.append('Vermittlungsprovision Patrick → Evelyn · spätere Erstattung, manuelle Klärung')
+
     if not cut_passed:
         status = 'laufend'
-    elif blockers:
+    elif blockers or broker_blockers:
         status = 'in_Abwicklung'
     else:
         status = 'abgeschlossen'
 
     return dict(
         round_id=round_id, window_start=window['window_start'], window_end=window['window_end'],
-        round_status=status, partners=partners, open_partner_count=len(open_partners), blockers=blockers,
+        round_status=status, partners=partners, open_partner_count=len(open_partners),
+        blockers=blockers + broker_blockers, broker=broker,
     )

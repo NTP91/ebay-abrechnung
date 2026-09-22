@@ -17,6 +17,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 import core
+import partner_conditions
 
 NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
 ET.register_namespace('', NS)
@@ -169,8 +170,17 @@ def prepare_partner_export(rows, payouts=None, orders=None, statement_type='part
         raise ValueError('Partnerexport enthält ungeklärte Zuordnungen.')
     payouts = core.read_master(core.PAYOUTS_DB_PATH) if payouts is None else payouts
     orders = core.read_master(core.ORDERS_DB_PATH) if orders is None else orders
-    rate = Decimal('.005') if group == 'Gruppe A' or statement_type == 'group_b_evelyn' else Decimal('.035')
-    recipient, address = recipient_details('evelyn' if rate == Decimal('.005') else 'patrick')
+    # Einzige Konditionsquelle: partner_conditions. Gruppe A -> 0,5 %,
+    # Gruppe B Standard -> 3,5 %, PM (Sonderkondition) -> 2,5 %. Die
+    # Gesamtübersicht an Evelyn (group_b_evelyn) ist kein Partnerabzug,
+    # sondern Evelyns eigener 0,5-%-Anteil und bleibt davon unberührt.
+    rate = (Decimal('.005') if statement_type == 'group_b_evelyn'
+            else partner_conditions.partner_rate(partner, group))
+    # Empfänger hängt an der Gruppe, nicht am Prozentsatz: PM ist ein normaler
+    # Gruppe-B-Partner und darf durch seinen 2,5-%-Satz nicht in einen anderen
+    # Belegempfänger kippen (der alte `rate == .005`-Test tat genau das).
+    recipient, address = recipient_details(
+        'evelyn' if group == 'Gruppe A' or statement_type == 'group_b_evelyn' else 'patrick')
     if statement_type == 'group_b_evelyn':
         partner = 'Alle Gruppe-B-Partner: ' + ', '.join(sorted(rows['Partner'].unique()))
     result = {'partner': partner, 'group': group, 'rate': rate, 'payouts': {},
@@ -368,9 +378,13 @@ def _fill_sheet(xml, model, name):
         4: {'A': model['partner'], 'C': model['group'], 'E': model['recipient'], 'G': model['rate'], 'I': TAX},
         6: {'A': model['address'], 'E': ', '.join(payout_ids)},
         7: {'E': period},
-        # Rows 8/10/11 previously carried internal Lexoffice field-mapping notes;
-        # the header only needs to be compact now, so they stay blank.
-        8: {},
+        # Row 8 previously carried an internal Lexoffice field-mapping note and
+        # now states the applied condition in plain words ("3,5 % Abzug ·
+        # Rechnung direkt an Evelyn", PM: "Sonderkondition · 2,5 % ..."),
+        # straight from partner_conditions - no second rate literal here.
+        # Rows 10/11 stay blank.
+        8: ({'A': partner_conditions.label(model['partner'], model['group'])}
+            if model['statement_type'] == 'partner' else {}),
         10: {'A': None, 'G': None},
         11: {'A': None, 'G': None},
         12: ({'A': f'Historische Rückforderungen: {len(items)}',

@@ -26,13 +26,14 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import core
+import partner_conditions
 import position_workflow
 
 BERLIN = ZoneInfo('Europe/Berlin')
 FIRST_NEUTRAL_YEAR = 2026
 FIRST_NEUTRAL_SEQUENCE = 3
 CUT_HOUR, CUT_MINUTE = 23, 59
-GROUP_A_PARTNERS = ('PP', 'BA', 'MK', '001')
+GROUP_A_PARTNERS = partner_conditions.GROUP_A_PARTNERS  # zentrale Konditionsquelle
 # core.normalized_partner() collapses every 'MH...'-prefixed SKU to the single
 # partner code 'MH', and core.load_master_data() recognizes it the same way
 # regardless of config/partners.json - mirrored here so MH is never
