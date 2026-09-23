@@ -25,17 +25,21 @@ import round_planner
 import round_status
 import studio_view
 
+# Reine Klartexte ohne eigenes Symbol - wie OVERALL_LABELS. Jede Fundstelle
+# stellt bereits das Matrix-Icon (✅/❌/➖) aus _invoice_icon/_payment_icon/
+# _credit_icon davor; ein zweites, abweichendes Symbol im Text (⚠/⏳, oder ein
+# ✅ neben einem ➖) war reine Darstellungsdrift.
 INVOICE_LABELS = {
-    'noch_nicht_moeglich': '⚠ Finale Einzelabrechnung fehlt',
-    'fehlt': '⚠ Rechnung fehlt',
-    'geprueft': '✅ Rechnung geprüft',
-    'nicht_erforderlich': '✅ nicht erforderlich',
+    'noch_nicht_moeglich': 'Finale Einzelabrechnung fehlt',
+    'fehlt': 'Rechnung fehlt',
+    'geprueft': 'Rechnung geprüft',
+    'nicht_erforderlich': 'nicht erforderlich',
 }
-PAYMENT_LABELS = {'offen': '⏳ offen', 'nicht_erforderlich': '✅ nicht erforderlich'}
+PAYMENT_LABELS = {'offen': 'offen', 'nicht_erforderlich': 'nicht erforderlich'}
 CREDIT_LABELS = {
-    'nicht_erforderlich': '✅ nicht erforderlich',
-    'fehlt': '⚠ Gutschrift fehlt',
-    'erledigt': '✅ Gutschrift erledigt',
+    'nicht_erforderlich': 'nicht erforderlich',
+    'fehlt': 'Gutschrift fehlt',
+    'erledigt': 'Gutschrift erledigt',
 }
 ROUND_LABELS = {'laufend': '🔵 laufend', 'in_Abwicklung': '🟠 in Abwicklung', 'abgeschlossen': '🟢 abgeschlossen'}
 OVERALL_LABELS = {
@@ -66,7 +70,7 @@ def invoice_label(status):
 
 def payment_label(status, paid_at):
     if status == 'bezahlt' and paid_at:
-        return f'✅ bezahlt am {display_date(paid_at)}'
+        return f'bezahlt am {display_date(paid_at)}'
     return PAYMENT_LABELS.get(status, status)
 
 
@@ -368,7 +372,7 @@ def render_statement_panel(round_id, partner, status, business=None, payouts=Non
         # nothing to export.
         st.write('Positionen: 0')
         st.write('Partneranspruch: ' + euros(0))
-        st.caption('0 Positionen · nichts erforderlich')
+        st.caption('0 Positionen · ➖ nichts erforderlich')
         return
     claim, live_positions = status['claim'], None
     if claim is None and business is not None and payouts is not None and orders is not None:
@@ -437,12 +441,13 @@ def render_invoice_and_payment_panel(round_id, partner, status):
             invoice = db.execute('SELECT * FROM partner_round_invoices WHERE round_id=? AND partner=?',
                                   (round_id, partner)).fetchone()
         if invoice:
-            st.caption(f"Hochgeladen: {display_date(invoice['uploaded_at'])} · Betrag {euros(float(invoice['amount']))} "
-                       f"· Snapshot-Hash {invoice['snapshot_hash'][:12]}…")
+            # Snapshot-Hash bleibt intern gespeichert (partner_round_invoices),
+            # wird aber im normalen Geschäftsbetrieb nicht mehr angezeigt.
+            st.caption(f"Hochgeladen: {display_date(invoice['uploaded_at'])} · Betrag {euros(float(invoice['amount']))}")
 
     st.markdown('**Zahlung**')
     if status['payment_status'] == 'bezahlt':
-        st.success(payment_label('bezahlt', status['paid_at']))
+        st.success('✅ ' + payment_label('bezahlt', status['paid_at']))
         return
     if status['payment_status'] == 'nicht_erforderlich':
         st.caption('0 Positionen · keine Zahlung erforderlich.')
@@ -831,15 +836,14 @@ def render_invoice_history(business=None, group=None):
         return
     with st.expander(f'Rechnungshistorie · {len(rows) + len(historical)}', expanded=False):
         for row in rows:
-            paid = f"✅ bezahlt am {display_date(row['paid_at'])}" if row['paid_at'] else '⏳ Zahlung offen'
+            paid = f"✅ bezahlt am {display_date(row['paid_at'])}" if row['paid_at'] else '❌ Zahlung offen'
             st.markdown(f"**{row['partner']} · {row['round_id']} · Rechnungsnr. {row['invoice_number'] or '–'} "
                         f"· {euros(float(row['amount']))} · {paid}**")
             with st.expander('Details', expanded=False):
                 st.caption(f"Hochgeladen: {display_date(row['uploaded_at'])} · Geprüft: {display_date(row['reviewed_at'])}")
-                st.caption(f"Snapshot-Hash: {row['snapshot_hash']}")
                 content = partner_snapshot.final_file(row['round_id'], row['partner'])
                 if content:
-                    st.download_button('Finale Einzelabrechnung', content,
+                    st.download_button('Finale Einzelabrechnung herunterladen', content,
                                         f"{row['round_id']}_{row['partner']}_final.xlsx",
                                         key=f"hist-final-{row['round_id']}-{row['partner']}",
                                         icon=':material/download:')

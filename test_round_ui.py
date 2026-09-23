@@ -326,6 +326,89 @@ class RoundUiSmokeTests(unittest.TestCase):
         # No internal error text/traceback fragments leak into the UI.
         self.assertNotIn('RuntimeError', body)
         self.assertNotIn('Traceback', body)
+    # --- Reine Darstellungs-/Textpruefungen der UI-Bereinigung (keine Fachlogik) ---
+
+    def reviewed_invoice(self):
+        """2026-003 · PP: finale Einzelabrechnung + geprüfte Partnerrechnung."""
+        import json
+        from test_invoice_support import invoice_csv
+        self.seed_sale('p1', 'order-a', 'PP / TEST')
+        planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
+        snap, created = partner_snapshot.finalize('2026-003', 'PP', now=berlin(2026, 9, 21, 0, 5))
+        self.assertTrue(created)
+        blob = invoice_csv(dict(items=json.loads(snap['line_items']), total=snap['final_amount']), 'INV-1')
+        record, report = incoming.check_and_review('2026-003', 'PP', 'invoice.csv', blob)
+        self.assertEqual(report['status'], 'matched', report)
+        return snap['snapshot_hash']
+
+    def test_snapshot_hash_is_not_shown_in_normal_business_ui(self):
+        snapshot_hash = self.reviewed_invoice()
+        app = self.run_app()
+        self.assertFalse(list(app.exception))
+        body = self.all_text(app)
+        self.assertIn('Rechnung geprüft', body)        # der Bereich wird wirklich gerendert
+        self.assertNotIn('Snapshot-Hash', body)
+        self.assertNotIn(snapshot_hash, body)
+        self.assertNotIn(snapshot_hash[:12], body)
+
+    def test_invoice_history_open_payment_uses_the_matrix_vocabulary(self):
+        self.reviewed_invoice()
+        app = self.run_app()
+        self.assertFalse(list(app.exception))
+        body = self.all_text(app)
+        self.assertIn('❌ Zahlung offen', body)
+        for banned in ('⏳', '🟡'):
+            self.assertNotIn(banned, body)
+        self.assertIn('Finale Einzelabrechnung herunterladen',
+                      [button.label for button in app.get('download_button')])
+
+    def test_status_label_texts_carry_no_own_symbol(self):
+        # Jede Fundstelle stellt das Matrix-Icon selbst davor - der Text darf
+        # kein zweites (und schon gar kein abweichendes) Symbol mitbringen.
+        texts = (list(round_ui.INVOICE_LABELS.values()) + list(round_ui.PAYMENT_LABELS.values())
+                 + list(round_ui.CREDIT_LABELS.values()) + list(round_ui.OVERALL_LABELS.values())
+                 + [round_ui.payment_label('offen', None), round_ui.payment_label('bezahlt', '2026-09-21')])
+        for text in texts:
+            for symbol in ('⏳', '🟠', '🟡', '⚠', '✅', '❌', '➖'):
+                self.assertNotIn(symbol, text, text)
+        self.assertEqual(round_ui.payment_label('offen', None), 'offen')
+        self.assertEqual(round_ui.payment_label('bezahlt', '2026-09-21'), 'bezahlt am 21.09.2026')
+
+    def test_003_caption_does_not_make_patrick_an_invoice_recipient(self):
+        self.seed_sale('p1', 'order-a', 'PP / TEST')
+        planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
+        app = self.run_app()
+        self.assertFalse(list(app.exception))
+        body = self.all_text(app)
+        self.assertIn('Ab Runde 2026-003: Partner → Evelyn direkt', body)
+        self.assertIn('ist aber nicht Rechnungsempfänger', body)
+        self.assertNotIn('Partner → Patrick', body)
+        # Patrick bleibt ausschliesslich Vermittlungsprovisions-Empfaenger.
+        self.assertIn('Vermittlungsprovision Patrick → Evelyn', body)
+
+    def test_legacy_lexware_area_is_labelled_altmodell(self):
+        self.seed_sale('p1', 'order-nb', 'NB / TEST')
+        app = self.run_app()
+        self.assertFalse(list(app.exception))
+        body = self.all_text(app)
+        self.assertIn('Gesamtabrechnung Gruppe B an Evelyn · Altmodell', body)
+        self.assertIn('Neu für Evelyn (Altmodell)', [metric.label for metric in app.metric])
+        self.assertTrue(any('Historie (altes Modell)' in exp.label for exp in app.expander))
+        # Historisch korrekte Formulierungen bleiben unangetastet.
+        self.assertIn('Lexware', body)
+
+    def test_all_tabs_still_render_without_exception(self):
+        self.seed_sale('p1', 'order-a', 'PP / TEST')
+        self.seed_sale('p2', 'order-nb', 'NB / TEST')
+        planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
+        app = self.run_app()
+        self.assertFalse(list(app.exception))
+        labels = [tab.label for tab in app.tabs]
+        for label in ('Übersicht', 'Gruppe A', 'Gruppe B', 'Offene Positionen', 'Historie'):
+            self.assertIn(label, labels)
+        body = self.all_text(app)
+        self.assertIn('2026-003', body)
+        self.assertEqual(list(self.round_matrix(app).index), MATRIX_ROWS)
 
 
 if __name__ == '__main__':

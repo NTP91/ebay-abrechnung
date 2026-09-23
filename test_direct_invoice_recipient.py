@@ -210,7 +210,7 @@ class LegacyLexwareAreaSmokeTests(Seeded):
         self.assertFalse(list(app.exception))
         body = self.all_text(app)
         self.assertIn('0 neu für Lexware bereit', body)
-        self.assertIn('Neu für Evelyn 0', body)
+        self.assertIn('Neu für Evelyn (Altmodell) 0', body)
         self.assertIn('Gruppe B', [tab.label for tab in app.tabs])
 
 

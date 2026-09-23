@@ -114,7 +114,7 @@ class PaymentReadinessTests(unittest.TestCase):
         history_call.assert_called()
         self.assertFalse(app.exception)
         metrics={metric.label:metric.value for metric in app.metric}
-        self.assertEqual(metrics['Neu für Evelyn'],'1')
+        self.assertEqual(metrics['Neu für Evelyn (Altmodell)'],'1')
         self.assertEqual(metrics['Neu abrechnungsfähig'],'1 Positionen')
         self.assertEqual(metrics['Prüfung erforderlich'],'0 Positionen')
         self.assertEqual(metrics['Hold im neuen Payout'],'0 Positionen')
