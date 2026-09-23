@@ -99,6 +99,13 @@ def main():
               f"{json.dumps(assigned, ensure_ascii=False)}")
     else:
         print('Keine verspaetete Position faellig zur Nachzuordnung - No-Op.')
+
+    carried = round_planner.carry_forward_released_holds()
+    if carried:
+        print(f"Freigegebene historische Einbehalte vorgetragen: "
+              f"{json.dumps(carried, ensure_ascii=False)}")
+    else:
+        print('Kein freigegebener historischer Einbehalt faellig - No-Op.')
     return 0
 
 

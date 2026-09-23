@@ -34,11 +34,43 @@ def initialize(db):
         FOREIGN KEY(origin_position_key) REFERENCES group_b_round_positions(position_key),
         FOREIGN KEY(origin_round_id) REFERENCES group_b_rounds(id),
         FOREIGN KEY(settlement_round_id) REFERENCES group_b_rounds(id))''')
+    # Ein freigegebener historischer Einbehalt (role='hold_reserve' aus
+    # GB-2026-001/002) wird NIE verschoben oder kopiert: seine Zeile in
+    # group_b_round_positions behaelt ihre Ursprungsrunde fuer immer. Diese
+    # Tabelle ist der EINZIGE Ort, der festhaelt, in welcher neutralen
+    # 2026-003+-Runde er wirtschaftlich abgerechnet wird.
+    # position_key ist PRIMARY KEY -> genau EINE Vortragszuordnung je
+    # historischer Position, ueber alle Runden und alle Re-Importe hinweg.
+    db.execute('''CREATE TABLE IF NOT EXISTS historical_hold_carry_forward (
+        position_key TEXT PRIMARY KEY, origin_round_id TEXT NOT NULL,
+        settlement_round_id TEXT NOT NULL, released_at TEXT NOT NULL,
+        detected_at TEXT NOT NULL, source TEXT NOT NULL,
+        FOREIGN KEY(position_key) REFERENCES group_b_round_positions(position_key),
+        FOREIGN KEY(origin_round_id) REFERENCES group_b_rounds(id),
+        FOREIGN KEY(settlement_round_id) REFERENCES group_b_rounds(id))''')
     db.execute('''CREATE TABLE IF NOT EXISTS partner_invoice_rounds (
         invoice_id TEXT NOT NULL, round_id TEXT NOT NULL,
         PRIMARY KEY(invoice_id, round_id),
         FOREIGN KEY(invoice_id) REFERENCES partner_invoices(id),
         FOREIGN KEY(round_id) REFERENCES group_b_rounds(id))''')
+
+
+def round_position_keys(db, round_id):
+    """Alle Positionen, die in DIESER Runde wirtschaftlich abgerechnet werden:
+    die direkt zugeordneten (group_b_round_positions) plus die per
+    historical_hold_carry_forward hierher vorgetragenen freigegebenen
+    Alt-Einbehalte.
+
+    Fuer eine historische Runde (GB-2026-001/002) liefert der zweite Teil
+    strukturell nichts - Vortragsziel ist immer eine neutrale 2026-003+-Runde.
+    Die Ursprungsrunde sieht ihre Position also unveraendert weiter; die
+    Zielrunde sieht sie zusaetzlich. Doppelt kann sie nie erscheinen: beide
+    Tabellen haben position_key als PRIMARY KEY, und UNION dedupliziert."""
+    initialize(db)
+    return {r[0] for r in db.execute(
+        'SELECT position_key FROM group_b_round_positions WHERE round_id=? '
+        'UNION SELECT position_key FROM historical_hold_carry_forward WHERE settlement_round_id=?',
+        (round_id, round_id))}
 
 
 def next_round_id(db, year):

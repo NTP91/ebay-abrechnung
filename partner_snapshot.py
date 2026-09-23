@@ -23,6 +23,7 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import core
+import group_b_rounds
 import partner_export
 import position_workflow
 
@@ -135,8 +136,7 @@ def interim_export(round_id, partner, business=None, payouts=None, orders=None):
     payouts = core.read_master(core.PAYOUTS_DB_PATH) if payouts is None else payouts
     orders = core.read_master(core.ORDERS_DB_PATH) if orders is None else orders
     with core.ledger() as db:
-        assigned_keys = {r[0] for r in db.execute(
-            'SELECT position_key FROM group_b_round_positions WHERE round_id=?', (round_id,))}
+        assigned_keys = group_b_rounds.round_position_keys(db, round_id)
     rows = _partner_round_rows(business, assigned_keys, partner)
     if rows.empty:
         return None
@@ -178,8 +178,7 @@ def finalize(round_id, partner, now=None, business=None, payouts=None, orders=No
         if existing:
             return dict(existing), False
 
-        assigned_keys = {r[0] for r in db.execute(
-            'SELECT position_key FROM group_b_round_positions WHERE round_id=?', (round_id,))}
+        assigned_keys = group_b_rounds.round_position_keys(db, round_id)
         rows = _partner_round_rows(business, assigned_keys, partner)
         recovery_rows = _recovery_rows(db, business, round_id, partner)
         if rows.empty and recovery_rows.empty:

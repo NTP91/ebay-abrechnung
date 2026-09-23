@@ -117,7 +117,18 @@ def ingest(directory, snapshot):
         return document
 
 
-def active(document):
+def _resolve(document):
+    """One pass over the evidence: which documented holds are still active,
+    and which carry a genuine, corroborating release booking.
+
+    There is exactly ONE release rule in this module - active() and released()
+    are the two sides of that same decision, never two heuristics. A hold that
+    merely stopped being observed (deleted, re-imported, expired evidence) is
+    in NEITHER result: absence of a hold record is not a release.
+
+    Returns (held, freed): held is orderId -> [hold rows] (active()'s own
+    result), freed is orderId -> release timestamp (ISO string).
+    """
     observations = document['observations']
     holds = {}
     for observation in observations:
@@ -130,12 +141,12 @@ def active(document):
         if retro or sale:
             identity = (row['transactionId'], row['transactionType'])
             holds.setdefault(identity, []).append(observation)
-    result = {}
+    held, freed = {}, {}
     for identity, evidence in holds.items():
         latest = max(evidence, key=lambda o: stamp(o['at']))
         row = latest['transaction']
         refs = {(r.get('referenceType'), r.get('referenceId')) for r in row.get('references', []) if r.get('referenceId')}
-        released = False
+        released_at = None
         for observation in observations:
             credit = observation['transaction']
             if (credit.get('orderId') != row['orderId'] or amount(row) is None or amount(credit) != amount(row)
@@ -154,11 +165,28 @@ def active(document):
                            and sum(bool(refs & {(r.get('referenceType'), r.get('referenceId')) for r in h[-1]['transaction'].get('references', [])})
                                    for h in holds.values()) == 1)
             if same_sale or counterpart:
-                released = True
+                booked = credit.get('transactionDate')
+                released_at = booked if stamp(booked) is not None else observation['at']
                 break
-        if not released:
-            result.setdefault(row['orderId'], []).append(row)
-    return result
+        if released_at is None:
+            held.setdefault(row['orderId'], []).append(row)
+        else:
+            previous = freed.get(row['orderId'])
+            if previous is None or stamp(released_at) < stamp(previous):
+                freed[row['orderId']] = released_at
+    return held, freed
+
+
+def active(document):
+    return _resolve(document)[0]
+
+
+def released(document):
+    """orderId -> release timestamp, for every hold with a real, documented
+    release booking per _resolve()'s single rule. An order that still has ANY
+    active hold stays out: partial/ambiguous evidence is never a release."""
+    held, freed = _resolve(document)
+    return {order: at for order, at in freed.items() if order not in held}
 
 
 def mask(rows):

@@ -49,6 +49,7 @@ from decimal import Decimal
 
 import api_holds
 import core
+import group_b_rounds
 import partner_conditions
 import partner_export
 import position_workflow
@@ -154,8 +155,7 @@ def basis(round_id, business=None, payouts=None, orders=None, db=None):
     def _read(connection):
         initialize(connection)
         _require_neutral(connection, round_id)
-        keys = {r[0] for r in connection.execute(
-            'SELECT position_key FROM group_b_round_positions WHERE round_id=?', (round_id,))}
+        keys = group_b_rounds.round_position_keys(connection, round_id)
         detect_corrections(business=business, db=connection)
         # Eine bereits finalisierte Runde hat ihre Korrekturen schon
         # gebunden; nur eine noch offene Runde nimmt neue auf.
@@ -226,8 +226,7 @@ def pm_effective_round(business=None, db=None):
         rounds = [r[0] for r in connection.execute(
             "SELECT id FROM group_b_rounds WHERE source_kind='neutral_weekly' ORDER BY year,sequence")]
         for rid in rounds:
-            keys = {r[0] for r in connection.execute(
-                'SELECT position_key FROM group_b_round_positions WHERE round_id=?', (rid,))}
+            keys = group_b_rounds.round_position_keys(connection, rid)
             rows = _commission_rows(business, keys)
             if rows.empty or not (rows.Partner == PM).any():
                 continue

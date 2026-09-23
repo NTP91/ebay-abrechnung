@@ -621,11 +621,19 @@ def build_invoice_payload(master, payout_id, contact_id, money_received=False):
             # 2026-003+-Runde (source_kind='neutral_weekly'), wird sie direkt
             # Partner -> Evelyn abgerechnet und darf niemals zusaetzlich im
             # alten Lexware-Sammelbeleg landen.
+            # Ein freigegebener historischer Einbehalt behaelt dabei seine Zeile
+            # in GB-2026-001/002, wird aber wirtschaftlich in einer 003+-Runde
+            # abgerechnet (historical_hold_carry_forward) - er darf deshalb
+            # genauso wenig in den alten Sammelbeleg laufen.
             if db.execute("SELECT 1 FROM sqlite_master WHERE name='group_b_round_positions'").fetchone():
                 neutral = {row[0] for row in db.execute(
                     "SELECT gbp.position_key FROM group_b_round_positions gbp "
                     "JOIN group_b_rounds gr ON gr.id = gbp.round_id "
                     "WHERE gr.source_kind = 'neutral_weekly'")}
+                if db.execute("SELECT 1 FROM sqlite_master "
+                              "WHERE name='historical_hold_carry_forward'").fetchone():
+                    neutral |= {row[0] for row in db.execute(
+                        'SELECT position_key FROM historical_hold_carry_forward')}
                 blocked = sorted({position_workflow.position_key(sale) for _, sale in sales.iterrows()} & neutral)
                 if blocked:
                     raise ValueError(

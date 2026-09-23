@@ -365,12 +365,17 @@ def neutral_round_keys():
     'neutral_weekly'). Those positions are settled directly partner -> Evelyn
     and must never reappear in the historical Lexware/Evelyn bulk-invoice
     flow - otherwise the same revenue could be billed twice. core.ledger()
-    always runs group_b_rounds.initialize(), so both tables exist."""
+    always runs group_b_rounds.initialize(), so both tables exist.
+
+    Ein freigegebener historischer Einbehalt behaelt seine Zeile in
+    GB-2026-001/002, wird aber wirtschaftlich in einer 003+-Runde abgerechnet
+    (historical_hold_carry_forward) - er zaehlt hier deshalb genauso mit."""
     with core.ledger() as db:
         return {row[0] for row in db.execute(
             "SELECT gbp.position_key FROM group_b_round_positions gbp "
             "JOIN group_b_rounds gr ON gr.id = gbp.round_id "
-            "WHERE gr.source_kind = 'neutral_weekly'")}
+            "WHERE gr.source_kind = 'neutral_weekly' "
+            "UNION SELECT position_key FROM historical_hold_carry_forward")}
 
 
 def evelyn_overview(business, eligible, invoices):

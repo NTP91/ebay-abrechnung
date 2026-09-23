@@ -20,6 +20,7 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import core
+import group_b_rounds
 import partner_snapshot
 import position_workflow
 import recovery_cases
@@ -58,8 +59,7 @@ def partner_status(round_id, partner, business=None, now=None, db_context=None):
         round_row = _require_neutral(db, round_id)
         window = json.loads(round_row['snapshot'])
         cut_passed = now_berlin >= datetime.fromisoformat(window['window_end'])
-        assigned_keys = {r[0] for r in db.execute(
-            'SELECT position_key FROM group_b_round_positions WHERE round_id=?', (round_id,))}
+        assigned_keys = group_b_rounds.round_position_keys(db, round_id)
         snap = db.execute('SELECT * FROM partner_round_snapshots WHERE round_id=? AND partner=?',
                            (round_id, partner)).fetchone()
         invoice = db.execute('SELECT * FROM partner_round_invoices WHERE round_id=? AND partner=?',

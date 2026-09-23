@@ -296,14 +296,45 @@ def render_historical_rounds(business=None):
                 if live.any():
                     st.caption(f'{int(live.sum())} Position(en) · Einbehalt in Klärung · noch kein Anspruch, '
                                'keine Partnerrechnung, keine Partnerzahlung.')
-                if (~live).any():
-                    # Reserve ohne laufenden eBay-Einbehalt: der Einbehalt ist
-                    # offenbar aufgelöst, die Position bleibt aber per
-                    # group_b_round_positions dauerhaft dieser historischen
-                    # Runde zugeordnet - sie wandert nicht selbsttätig in eine
-                    # 2026-003+-Runde. Sichtbar machen statt verschweigen.
-                    st.caption(f'{int((~live).sum())} Position(en) · Einbehalt aufgelöst · weiterhin '
-                               f'{round_id} zugeordnet, manuelle Klärung erforderlich.')
+                freed = held[~live]
+                if not freed.empty:
+                    # Reserve ohne laufenden eBay-Einbehalt. Die Position bleibt
+                    # per group_b_round_positions dauerhaft dieser historischen
+                    # Runde zugeordnet; abgerechnet wird sie - falls eine echte
+                    # Freigabe belegt ist - einmalig in der vorgetragenen
+                    # neutralen Runde (historical_hold_carry_forward).
+                    carried = round_planner.carry_forward_map()
+                    offen, fertig, unklar, neutralisiert = {}, {}, 0, 0
+                    for _, row in freed.iterrows():
+                        entry = carried.get(row.position_key)
+                        if entry is None:
+                            # Statt einer abrechenbaren Freigabe voll erstattet:
+                            # wirtschaftlich exakt 0,00 € - dieselbe
+                            # Neutralisierungsprüfung wie beim zero_pair, also
+                            # ein erledigter Fall und kein Klärfall.
+                            if (Decimal(str(row['Erlös_Brutto']))
+                                    + Decimal(str(row.get('Erstattet_Brutto', 0) or 0)) == Decimal(0)):
+                                neutralisiert += 1
+                            else:
+                                unklar += 1
+                            continue
+                        target = entry[1]
+                        settled = bool(row.get('paid_at') or row.get('closed_at')
+                                       or row.get(position_workflow.PAID_WITHOUT_INVOICE))
+                        bucket = fertig if settled else offen
+                        bucket[target] = bucket.get(target, 0) + 1
+                    for target, count in sorted(offen.items()):
+                        st.caption(f'{count} Position(en) · Historischer Einbehalt freigegeben · '
+                                   f'Abrechnung in {target}')
+                    for target, count in sorted(fertig.items()):
+                        st.caption(f'{count} Position(en) · Ursprung {round_id} · freigegeben · '
+                                   f'abgerechnet in {target}')
+                    if neutralisiert:
+                        st.caption(f'{neutralisiert} Position(en) · Ursprung {round_id} · Einbehalt vollständig '
+                                   'erstattet · 0,00 € · nichts erforderlich.')
+                    if unklar:
+                        st.caption(f'{unklar} Position(en) · Einbehalt aufgelöst · weiterhin '
+                                   f'{round_id} zugeordnet, manuelle Klärung erforderlich.')
             with core.ledger() as db:
                 invoice_ids = {r[0] for r in db.execute(
                     'SELECT invoice_id FROM partner_invoice_rounds WHERE round_id=?', (round_id,))}
@@ -403,8 +434,7 @@ def _live_claim(round_id, partner, business, payouts, orders):
     this number into partner_snapshot's own final_amount; it never makes the
     claim computable in the first place - it was already computable here."""
     with core.ledger() as db:
-        assigned_keys = {r[0] for r in db.execute(
-            'SELECT position_key FROM group_b_round_positions WHERE round_id=?', (round_id,))}
+        assigned_keys = group_b_rounds.round_position_keys(db, round_id)
     rows = partner_snapshot._partner_round_rows(business, assigned_keys, partner)
     if rows.empty:
         return None, 0
@@ -1056,8 +1086,7 @@ def _render_archive_neutral_round(round_id, business, payouts, orders):
                 invoice_row = db.execute('SELECT * FROM partner_round_invoices WHERE round_id=? AND partner=?',
                                           (round_id, partner)).fetchone()
                 cases = recovery_cases.list_cases(round_id=round_id, partner=partner, db=db)
-                assigned_keys = {r[0] for r in db.execute(
-                    'SELECT position_key FROM group_b_round_positions WHERE round_id=?', (round_id,))}
+                assigned_keys = group_b_rounds.round_position_keys(db, round_id)
                 rows = partner_snapshot._partner_round_rows(business, assigned_keys, partner)
                 detail_keys = set(rows.position_key) if not rows.empty else set()
                 collected.append((status, dict(invoice_row) if invoice_row else None, cases, detail_keys))

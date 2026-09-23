@@ -21,10 +21,12 @@ export mode, no evelyn_invoice_id/evelyn_document_number. Rounds 001/002 keep
 that model unchanged; this module only ever reasons about 003+.
 """
 import json
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import api_holds
 import core
 import partner_conditions
 import position_workflow
@@ -520,3 +522,143 @@ def assign_late_payouts(business=None, payouts=None, dry_run=False):
         else:
             db.commit()
     return assigned
+
+
+def _neutral_windows(db):
+    """Die vorhandenen neutralen Runden mit ihrem eigenen gespeicherten
+    Fenster, aufsteigend - dieselbe Quelle, die assign_late_payouts() nutzt."""
+    windows = []
+    for r in db.execute("SELECT id, sequence, snapshot FROM group_b_rounds "
+                        "WHERE source_kind='neutral_weekly' ORDER BY sequence"):
+        snapshot = json.loads(r['snapshot'])
+        windows.append(dict(id=r['id'], sequence=r['sequence'],
+                            start=datetime.fromisoformat(snapshot['window_start']),
+                            end=datetime.fromisoformat(snapshot['window_end'])))
+    return windows
+
+
+def carry_forward_released_holds(business=None, dry_run=False):
+    """Einen ECHT freigegebenen historischen Einbehalt (role='hold_reserve' aus
+    GB-2026-001/002) genau EINMAL in der ersten noch offenen neutralen
+    2026-003+-Runde wirtschaftlich abrechenbar machen.
+
+    Die Ursprungsposition wird dabei NICHT angefasst: ihre Zeile in
+    group_b_round_positions behaelt round_id='GB-2026-001'/'002' und ihre
+    role fuer immer, es entsteht keine Kopie und keine zweite Position. Der
+    Vortrag steht ausschliesslich in historical_hold_carry_forward; von dort
+    liest group_b_rounds.round_position_keys() ihn fuer die Zielrunde mit.
+    plan_round()/assign_late_payouts() schliessen die Position weiterhin
+    unveraendert als 'historisch_zugeordnet' aus - diese Sperre wird hier
+    bewusst NICHT aufgeweicht, sie bleibt der erste Dublettenschutz.
+
+    Ausloeser ist ausschliesslich api_holds.released(): dieselbe, einzige
+    Freigabe-Logik, aus der auch api_holds.active() faellt (dokumentierte
+    PAYOUT-Gutschrift mit gleichem Betrag/Order, bei SALE zusaetzlich gleiche
+    transactionId und strikt spaeter; bei RETRO_HOLD/DISPUTE eine eindeutig
+    referenzverknuepfte spaetere Gegenbuchung). Ein bloss verschwundener,
+    geloeschter oder neu importierter Hold-Datensatz ist keine Freigabe, und
+    eine Bestellung mit noch irgendeinem aktiven Hold bleibt Klaerfall.
+
+    Wird statt der Freigabe voll erstattet, ist der wirtschaftliche Anspruch
+    0,00 EUR - dann entsteht gar kein Vortrag (und damit keine Rechnung, keine
+    Zahlung, keine Vermittlungsprovision).
+
+    Zielrundenwahl ist die von assign_late_payouts(): die frueheste vorhandene
+    neutrale Runde, deren Fenster noch nicht vor der Freigabe endete, und von
+    dort aus vorwaerts ueber jede Runde hinweg, in der dieser Partner schon
+    per partner_snapshot.finalize() gesperrt ist. Eine finalisierte Runde wird
+    also nie wieder geoeffnet. Gibt es (noch) keine passende offene Runde,
+    passiert nichts - ein spaeterer Lauf holt es nach.
+
+    Idempotent: historical_hold_carry_forward.position_key ist PRIMARY KEY,
+    der INSERT ist ein OR IGNORE. Wiederholter Import derselben Freigabe,
+    Re-Sync, Neustart oder erneute Rundenplanung erzeugen nie einen zweiten
+    Vortrag.
+
+    Rueckgabe: die in DIESEM Lauf neu angelegten Vortraege (leer beim No-op).
+    """
+    import group_b_rounds
+    import partner_snapshot
+
+    business = position_workflow.positions() if business is None else business
+    freed = api_holds.released(api_holds.load(Path(core.PAYOUTS_DB_PATH).parent))
+    if business.empty or not freed:
+        return []
+    confirmed_names = {name for name, _ in confirmed_partners(business)}
+
+    created = []
+    with core.ledger() as db:
+        group_b_rounds.initialize(db)
+        partner_snapshot.initialize(db)
+        db.execute('BEGIN IMMEDIATE')
+        reserves = {r['position_key']: r['round_id'] for r in db.execute(
+            "SELECT p.position_key, p.round_id FROM group_b_round_positions p "
+            "JOIN group_b_rounds r ON r.id=p.round_id "
+            "WHERE p.role='hold_reserve' AND r.source_kind != 'neutral_weekly'")}
+        carried = {r[0] for r in db.execute('SELECT position_key FROM historical_hold_carry_forward')}
+        windows = _neutral_windows(db)
+        if not reserves or not windows:
+            db.rollback()
+            return []
+
+        for _, row in business.iterrows():
+            key = row['position_key']
+            if row['Art'] != 'Bestellung' or key not in reserves or key in carried:
+                continue
+            release_stamp = freed.get(row['Bestellnummer'])
+            if release_stamp is None:
+                continue
+            released_at = api_holds.stamp(release_stamp)
+            if released_at is None:
+                continue
+            # Dieselben Sperren, die plan_round()/assign_late_payouts() anlegen.
+            if bool(row.get('closed_at')) or bool(row.get('paid_at')) or bool(row.get(position_workflow.PAID_WITHOUT_INVOICE)):
+                continue
+            if row['Prüfhinweis'] or row.get('Quellenpruefung') or bool(row.get('API_Hold', False)):
+                continue
+            partner = row['Partner']
+            if partner not in confirmed_names:
+                continue
+            # Erstattung statt Freigabe: wirtschaftlich nichts offen.
+            claim = Decimal(str(row['Erlös_Brutto'])) + Decimal(str(row.get('Erstattet_Brutto') or 0))
+            if claim <= 0:
+                continue
+            home = next((w for w in windows if released_at < w['end']), windows[0])
+            target = next((w for w in windows if w['sequence'] >= home['sequence']
+                           and not partner_snapshot.is_locked(db, w['id'], partner)), None)
+            if target is None:
+                continue
+            detected_at = datetime.now(timezone.utc).isoformat(timespec='milliseconds')
+            inserted = db.execute(
+                'INSERT OR IGNORE INTO historical_hold_carry_forward VALUES(?,?,?,?,?,?)',
+                (key, reserves[key], target['id'], release_stamp, detected_at,
+                 position_workflow.source_snapshot(row))).rowcount
+            if not inserted:
+                continue
+            carried.add(key)
+            created.append(dict(position_key=key, Bestellnummer=row['Bestellnummer'],
+                                origin_round_id=reserves[key], settlement_round_id=target['id'],
+                                released_at=release_stamp))
+        if dry_run:
+            db.rollback()
+        else:
+            db.commit()
+    return created
+
+
+def carry_forward_map(db=None):
+    """position_key -> (origin_round_id, settlement_round_id) fuer jeden
+    vorgetragenen Alt-Einbehalt - die Lesesicht fuer UI und Tests."""
+    import group_b_rounds
+
+    def _run(connection):
+        group_b_rounds.initialize(connection)
+        return {r['position_key']: (r['origin_round_id'], r['settlement_round_id'])
+                for r in connection.execute(
+                    'SELECT position_key, origin_round_id, settlement_round_id '
+                    'FROM historical_hold_carry_forward')}
+
+    if db is not None:
+        return _run(db)
+    with core.ledger() as own_db:
+        return _run(own_db)
