@@ -230,6 +230,16 @@ def evelyn_link_precheck(db, round_id, business, invoices, chosen):
     stored_keys = {r[0] for r in db.execute(
         "SELECT position_key FROM group_b_round_positions WHERE round_id=? AND role='evelyn_invoice'", (round_id,))}
     chosen_keys = set(chosen.position_key) if not chosen.empty else set()
+    # Defense in depth against double-booking: even if a 2026-003+ position
+    # ever leaked back into the UI's eligible list, it may never be billed a
+    # second time through the historical Lexware/Evelyn bulk invoice.
+    neutral_keys = {r[0] for r in db.execute(
+        "SELECT gbp.position_key FROM group_b_round_positions gbp "
+        "JOIN group_b_rounds gr ON gr.id = gbp.round_id WHERE gr.source_kind='neutral_weekly'")}
+    conflict = sorted(chosen_keys & neutral_keys)
+    if conflict:
+        raise ValueError(f'{len(conflict)} Position(en) gehören bereits zu einer 2026-003+-Runde und werden '
+                         f'direkt Partner → Evelyn abgerechnet; keine Übertragung an Lexware ({conflict[0]}).')
     if chosen_keys != stored_keys:
         raise ValueError(f'Positionssatz weicht vom gespeicherten {round_id}-Bestand ab; keine Übertragung.')
     amount = (prepare_partner_export(chosen, statement_type='group_b_evelyn')['totals']['Rechnung']['gross']

@@ -615,6 +615,23 @@ def build_invoice_payload(master, payout_id, contact_id, money_received=False):
                     previous = saved.get(position_workflow.position_key(sale), {})
                     allowed.append(not previous.get('closed_at') and (not previous.get('source') or previous['source'] == position_workflow.source_snapshot(sale)))
                 sales = sales.loc[allowed]
+            # Harte serverseitige Ablehnung gegen Doppelabrechnung: dieser
+            # Entwurf wird aus dem GESAMTEN Payout gebaut, nicht aus der
+            # UI-Auswahl. Gehoert auch nur eine Position bereits zu einer
+            # 2026-003+-Runde (source_kind='neutral_weekly'), wird sie direkt
+            # Partner -> Evelyn abgerechnet und darf niemals zusaetzlich im
+            # alten Lexware-Sammelbeleg landen.
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='group_b_round_positions'").fetchone():
+                neutral = {row[0] for row in db.execute(
+                    "SELECT gbp.position_key FROM group_b_round_positions gbp "
+                    "JOIN group_b_rounds gr ON gr.id = gbp.round_id "
+                    "WHERE gr.source_kind = 'neutral_weekly'")}
+                blocked = sorted({position_workflow.position_key(sale) for _, sale in sales.iterrows()} & neutral)
+                if blocked:
+                    raise ValueError(
+                        f'Payout {payout_id}: {len(blocked)} Position(en) gehören bereits zu einer '
+                        f'2026-003+-Runde und werden direkt Partner → Evelyn abgerechnet; '
+                        f'kein Lexware-Beleg ({blocked[0]}).')
     if sales.empty:
         raise ValueError('Keine Gruppe-B-Bestellungen für diesen Payout.')
     now = lexware_voucher_date()

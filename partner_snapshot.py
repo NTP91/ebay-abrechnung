@@ -140,7 +140,8 @@ def interim_export(round_id, partner, business=None, payouts=None, orders=None):
     rows = _partner_round_rows(business, assigned_keys, partner)
     if rows.empty:
         return None
-    return partner_export.export_partner_excel(rows, payouts, orders, statement_type='partner')
+    return partner_export.export_partner_excel(rows, payouts, orders, statement_type='partner',
+                                               direct_to_evelyn=True)
 
 
 def finalize(round_id, partner, now=None, business=None, payouts=None, orders=None):
@@ -187,8 +188,10 @@ def finalize(round_id, partner, now=None, business=None, payouts=None, orders=No
         if not recovery_rows.empty:
             rows = core.pd.concat([rows, recovery_rows]).drop_duplicates('position_key')
 
-        model = partner_export.prepare_partner_export(rows, payouts, orders, statement_type='partner')
-        file_bytes = partner_export.export_partner_excel(rows, payouts, orders, statement_type='partner')
+        model = partner_export.prepare_partner_export(rows, payouts, orders, statement_type='partner',
+                                                      direct_to_evelyn=True)
+        file_bytes = partner_export.export_partner_excel(rows, payouts, orders, statement_type='partner',
+                                                        direct_to_evelyn=True)
         regular_claim = model['totals']['Rechnung']['gross']
         refunds_total = model['totals']['Gutschriften']['gross']
         final_amount = regular_claim + refunds_total

@@ -151,8 +151,16 @@ def calculate_partner_variant_b(items, rate, refunds=False):
     return {key: cents(sum((part[key] for part in parts), Decimal(0))) for key in keys}
 
 
-def prepare_partner_export(rows, payouts=None, orders=None, statement_type='partner'):
-    """Enrich only the export, resolving original transaction and order fields."""
+def prepare_partner_export(rows, payouts=None, orders=None, statement_type='partner', direct_to_evelyn=False):
+    """Enrich only the export, resolving original transaction and order fields.
+
+    direct_to_evelyn: 2026-003+ (neutral_weekly) model - every partner, Gruppe
+    A or B alike (PM included), invoices Evelyn directly, so the Beleg must
+    name Evelyn as recipient. Default False keeps the historical
+    GB-2026-001/002 semantics unchanged (Patrick collected the Gruppe-B
+    partner payments himself and issued Evelyn one combined Lexware invoice),
+    so already-generated historical documents stay byte-identical.
+    """
     if statement_type not in ('partner', 'group_b_evelyn'):
         raise ValueError('Unbekannte Abrechnungsart.')
     if rows.empty or rows['Gruppe'].nunique() != 1 or (statement_type == 'partner' and rows['Partner'].nunique() != 1):
@@ -180,7 +188,7 @@ def prepare_partner_export(rows, payouts=None, orders=None, statement_type='part
     # Gruppe-B-Partner und darf durch seinen 2,5-%-Satz nicht in einen anderen
     # Belegempfänger kippen (der alte `rate == .005`-Test tat genau das).
     recipient, address = recipient_details(
-        'evelyn' if group == 'Gruppe A' or statement_type == 'group_b_evelyn' else 'patrick')
+        'evelyn' if direct_to_evelyn or group == 'Gruppe A' or statement_type == 'group_b_evelyn' else 'patrick')
     if statement_type == 'group_b_evelyn':
         partner = 'Alle Gruppe-B-Partner: ' + ', '.join(sorted(rows['Partner'].unique()))
     result = {'partner': partner, 'group': group, 'rate': rate, 'payouts': {},
@@ -623,8 +631,8 @@ def _payoutnachweis_sheet(model):
                                   rows, [16, 24, 16, 14, 22])
 
 
-def export_partner_excel(rows, payouts=None, orders=None, statement_type='partner'):
-    model = prepare_partner_export(rows, payouts, orders, statement_type)
+def export_partner_excel(rows, payouts=None, orders=None, statement_type='partner', direct_to_evelyn=False):
+    model = prepare_partner_export(rows, payouts, orders, statement_type, direct_to_evelyn)
     output = io.BytesIO()
     with zipfile.ZipFile(TEMPLATE) as source, zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as target:
         # Rechnung is the one and only layout source. All three worksheet XML

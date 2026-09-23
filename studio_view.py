@@ -71,7 +71,10 @@ def eligible_rows(master, states):
     unlocked = set(states.loc[states.Sperre.isna() & states.Entwurf.isna(), 'Auszahlung'])
     paid = {payout for payout, block in master.groupby('Auszahlung Nr.') if core.payout_receipt_confirmed(block)}
     business = position_workflow.positions(master, states)
-    return business[business['Auszahlung Nr.'].isin(unlocked & paid) & (business['Erlös_Brutto'] > 0) & (business.Art == 'Bestellung') & ~business['Prüfhinweis'].astype(bool) & ~business.get('Neutralisiert',False) & ~business['closed_at'].astype(bool) & ~business.Quellenpruefung.astype(bool) & ~api_holds.mask(business)].copy()
+    # Positionen einer 2026-003+-Runde werden direkt Partner -> Evelyn
+    # abgerechnet und sind damit nie "neu fuer Lexware bereit" (siehe
+    # neutral_round_keys) - sonst droht Doppelabrechnung.
+    return business[business['Auszahlung Nr.'].isin(unlocked & paid) & (business['Erlös_Brutto'] > 0) & (business.Art == 'Bestellung') & ~business['Prüfhinweis'].astype(bool) & ~business.get('Neutralisiert',False) & ~business['closed_at'].astype(bool) & ~business.Quellenpruefung.astype(bool) & ~api_holds.mask(business) & ~business.position_key.isin(neutral_round_keys())].copy()
 
 
 def lexware_create_ready(selected, totals, api_key, confirmations):
@@ -357,6 +360,19 @@ def invoice_history():
     return grouped
 
 
+def neutral_round_keys():
+    """Position keys already claimed by a 2026-003+ round (source_kind=
+    'neutral_weekly'). Those positions are settled directly partner -> Evelyn
+    and must never reappear in the historical Lexware/Evelyn bulk-invoice
+    flow - otherwise the same revenue could be billed twice. core.ledger()
+    always runs group_b_rounds.initialize(), so both tables exist."""
+    with core.ledger() as db:
+        return {row[0] for row in db.execute(
+            "SELECT gbp.position_key FROM group_b_round_positions gbp "
+            "JOIN group_b_rounds gr ON gr.id = gbp.round_id "
+            "WHERE gr.source_kind = 'neutral_weekly'")}
+
+
 def evelyn_overview(business, eligible, invoices):
     """Disjoint read-only buckets for the next Group-B Evelyn settlement.
 
@@ -383,7 +399,13 @@ def evelyn_overview(business, eligible, invoices):
         refund_cases = bound.iloc[0:0].copy()
     else:
         refund_cases = bound[erstattet_bound.map(lambda value: Decimal(str(value)) < Decimal('0.00'))].copy()
-    pending_all = group_b[~group_b.Lexware_uebertragen & ~group_b.closed_at.astype(bool)].copy()
+    # Anti-join against the 2026-003+ rounds: a position a neutral weekly
+    # round already claims is settled via the direct partner->Evelyn invoice
+    # and is therefore not "new/eligible" here any more - excluded at the
+    # data level, not merely by a disabled button. `bound` (already
+    # transmitted historical positions) is deliberately untouched.
+    pending_all = group_b[~group_b.Lexware_uebertragen & ~group_b.closed_at.astype(bool)
+                          & ~group_b.position_key.isin(neutral_round_keys())].copy()
     pending = core.apply_open_refunds(pending_all)
     held_mask = api_holds.mask(pending)
     held = pending[held_mask].copy()
