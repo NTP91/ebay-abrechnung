@@ -405,16 +405,25 @@ def partner_config():
 
 
 def normalized_partner(sku):
+    """Der kanonische Partner einer SKU.
+
+    Präfix-Extraktion (exakt vor dem ersten Slash) wie bisher, danach die
+    reine Identitätsschicht partner_conditions.canonical_partner(): ein
+    historischer Präfix wird auf seinen kanonischen Partner abgebildet
+    ('001' -> 'PP'), per exaktem Vergleich und niemals per startswith
+    ('001X' bleibt '001X'). Die SKU selbst wird nie verändert - der originale
+    Präfix ist jederzeit aus der unveränderten SKU-Spalte reproduzierbar.
+    """
     normalized_sku = clean(sku).upper()
     config = partner_config()
     for prefix, configured_partner in config.get('sku_prefix_overrides', {}).items():
         if normalized_sku.startswith(clean(prefix).upper()):
-            return clean(configured_partner).upper()
+            return partner_conditions.canonical_partner(configured_partner)
     partner = config.get('sku_partner_overrides', {}).get(normalized_sku)
     if partner:
-        return clean(partner).upper()
+        return partner_conditions.canonical_partner(partner)
     partner = normalized_sku.split('/')[0].strip()
-    return 'MH' if partner.startswith('MH') else partner
+    return partner_conditions.canonical_partner('MH' if partner.startswith('MH') else partner)
 
 
 def configured_multi_item_match(row, matches):

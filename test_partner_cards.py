@@ -77,8 +77,10 @@ class PartnerCardTests(unittest.TestCase):
         planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
         app = self.run_app()
         labels = [exp.label for exp in app.expander]
-        for partner in ('PP', 'BA', 'MK', '001'):
+        for partner in ('PP', 'BA', 'MK'):
             self.assertTrue(any(label.startswith(partner + ' ·') for label in labels), partner)
+        # '001' ist ein Alias auf PP, kein eigener Fall - niemals eine zweite Karte.
+        self.assertFalse([label for label in labels if label.startswith('001 ·')], labels)
 
     # 3. performance: rendering N confirmed-partner cards must never cost N
     # loads of the expensive position_workflow.positions() pipeline - every

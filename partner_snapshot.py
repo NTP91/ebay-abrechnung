@@ -210,6 +210,19 @@ def finalize(round_id, partner, now=None, business=None, payouts=None, orders=No
         if existing:
             db.rollback()
             return dict(existing), False
+        # Keine Position darf in zwei Snapshots derselben Runde landen. Greift
+        # u.a. im Migrationsfall der Partner-Alias-Auflösung ('001' -> 'PP'):
+        # existiert aus der Zeit VOR der Zusammenlegung bereits ein finaler
+        # '001'-Snapshot dieser Runde, wird hier hart abgebrochen statt
+        # dieselben Positionen ein zweites Mal als PP zu fakturieren.
+        taken = {key: row['partner'] for row in db.execute(
+            'SELECT partner, position_keys FROM partner_round_snapshots WHERE round_id=?', (round_id,))
+            for key in json.loads(row['position_keys'])}
+        clash = sorted({taken[key] for key in position_keys if key in taken})
+        if clash:
+            db.rollback()
+            raise ValueError(f'{round_id}: Positionen von {partner} sind bereits im finalen Snapshot von '
+                             f'{", ".join(clash)} enthalten - kein zweiter Snapshot, keine Doppelfakturierung.')
         finalized_at = datetime.now(timezone.utc).isoformat(timespec='milliseconds')
         db.execute('''INSERT INTO partner_round_snapshots VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''', (
             round_id, partner, rows.iloc[0].Gruppe, window_start, window_end,

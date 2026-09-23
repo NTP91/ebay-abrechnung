@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from datetime import date, datetime
@@ -123,12 +124,111 @@ class RoundUiSmokeTests(unittest.TestCase):
         expander_labels = [exp.label for exp in app.expander]
         self.assertTrue(any('2026-003' in label and 'erste gemeinsame Runde' in label for label in expander_labels))
 
-    def test_partner_001_is_a_column_not_confused_with_a_round(self):
+    def test_partner_001_is_merged_into_pp_and_never_its_own_column(self):
         self.seed_sale('p1', 'order-a', 'PP / TEST')
+        self.seed_sale('p2', 'order-b', '001 / TEST')
         planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
         app = self.run_app()
         matrix = self.round_matrix(app)
-        self.assertIn('001', matrix.columns)
+        self.assertIn('PP', matrix.columns)
+        self.assertNotIn('001', matrix.columns)
+
+    # --- PP/001-Alias: ein Partner, ein Fall, eine Abrechnung -------------
+    def seed_pp_and_001(self):
+        """Eine PP- und eine 001-Position in der offenen Runde 2026-003."""
+        self.seed_sale('p1', 'order-a', 'PP / ALPHA', amount='50,00')
+        self.seed_sale('p2', 'order-b', '001 / BETA', amount='30,00')
+        planner.commit_round(now=berlin(2026, 9, 18, 12, 0), base_cut=BASE_CUT)
+
+    def test_mixed_pp_and_001_positions_are_exactly_one_partner_case(self):
+        self.seed_pp_and_001()
+        business = workflow.positions()
+        self.assertEqual(sorted(set(business[business.Art == 'Bestellung'].Partner)), ['PP'])
+        # Original-SKUs bleiben unveraendert lesbar - nur der Partner-WERT ist kanonisch.
+        self.assertEqual(sorted(business[business.Art == 'Bestellung'].SKU), ['001 / BETA', 'PP / ALPHA'])
+        names = [name for name, _group in planner.confirmed_partners(business)]
+        self.assertIn('PP', names)
+        self.assertNotIn('001', names)
+        app = self.run_app()
+        self.assertFalse(list(app.exception))
+        labels = [exp.label for exp in app.expander]
+        pp_labels = [l for l in labels if l.startswith('PP ·')]
+        self.assertTrue(pp_labels)
+        # Jede PP-Darstellung ist EIN Fall über beide Positionen - und es gibt
+        # nirgends eine zweite, parallele '001'-Karte.
+        for label in pp_labels:
+            self.assertIn('2 Positionen', label)
+        self.assertFalse([l for l in labels if l.startswith('001 ·')], labels)
+        matrix = self.round_matrix(app)
+        self.assertIn('PP', matrix.columns)
+        self.assertNotIn('001', matrix.columns)
+        self.assertIn('inkl. historischem Präfix 001', self.all_text(app))
+
+    def test_merged_case_total_equals_sum_of_both_original_parts(self):
+        import partner_export
+        self.seed_pp_and_001()
+        business = workflow.positions()
+        with core.ledger() as db:
+            import group_b_rounds
+            keys = group_b_rounds.round_position_keys(db, '2026-003')
+        merged = partner_snapshot._partner_round_rows(business, keys, 'PP')
+        self.assertEqual(len(merged), 2)
+        total = partner_export.prepare_partner_export(merged)['totals']['Rechnung']['gross']
+        parts = sum(partner_export.prepare_partner_export(merged[merged.SKU == sku])
+                    ['totals']['Rechnung']['gross'] for sku in ('PP / ALPHA', '001 / BETA'))
+        self.assertEqual(total, parts)
+        # keine Doppelzaehlung: jede position_key genau einmal
+        self.assertEqual(len(set(merged.position_key)), len(merged))
+
+    def test_one_snapshot_one_invoice_one_payment_for_the_merged_case(self):
+        import json as _json
+        self.seed_pp_and_001()
+        snap, created = partner_snapshot.finalize('2026-003', 'PP', now=berlin(2026, 9, 21, 0, 5))
+        self.assertTrue(created)
+        self.assertEqual(snap['position_count'], 2)
+        with core.ledger() as db:
+            partner_snapshot.initialize(db)
+            rows = db.execute("SELECT partner FROM partner_round_snapshots WHERE round_id='2026-003'").fetchall()
+        self.assertEqual([r['partner'] for r in rows], ['PP'])  # genau EIN Snapshot, kein '001'
+        # Beide Original-SKUs stehen woertlich in den Excel-Positionen.
+        skus = [item['sku'] for item in _json.loads(snap['line_items'])]
+        self.assertEqual(sorted(skus), ['001 / BETA', 'PP / ALPHA'])
+        self.assertEqual(len(skus), len(set(skus)))
+        # Genau eine erwartete Partnerrechnung und genau eine Zahlung.
+        blob = legacy_invoice_csv(dict(items=_json.loads(snap['line_items']), total=snap['final_amount']), 'PP-INV')
+        _record, report = incoming.check_and_review('2026-003', 'PP', 'invoice.csv', blob)
+        self.assertEqual(report['status'], 'matched', report)
+        _record, paid = incoming.confirm_payment('2026-003', 'PP')
+        self.assertTrue(paid)
+        self.assertEqual(incoming.status('2026-003', 'PP'), 'abgeschlossen')
+        import round_status
+        status = round_status.partner_status('2026-003', 'PP')
+        self.assertEqual(status['positions'], 2)
+        self.assertEqual(status['overall_status'], 'abgeschlossen')
+        self.assertEqual(status['blockers'], [])
+
+    def test_preexisting_001_snapshot_blocks_a_second_pp_snapshot(self):
+        """Migrationsfall: ein vor der Zusammenlegung eingefrorener
+        '001'-Snapshot bleibt unveraendert und darf niemals ein zweites Mal
+        als PP fakturiert werden."""
+        self.seed_pp_and_001()
+        business = workflow.positions()
+        key = business[business.SKU == '001 / BETA'].iloc[0].position_key
+        with core.ledger() as db:
+            partner_snapshot.initialize(db)
+            db.execute('INSERT INTO partner_round_snapshots VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', (
+                '2026-003', '001', 'Gruppe A', 'x', 'y', json.dumps([key]), 1,
+                '0', '0', '0', '[]', '0.005', 'legacy-hash', '2026-09-21T00:00:00Z', b'legacy', 'fh', '[]'))
+            db.commit()
+            before = dict(db.execute("SELECT * FROM partner_round_snapshots WHERE partner='001'").fetchone())
+        with self.assertRaises(ValueError) as caught:
+            partner_snapshot.finalize('2026-003', 'PP', now=berlin(2026, 9, 21, 0, 5))
+        self.assertIn('001', str(caught.exception))
+        with core.ledger() as db:
+            after = dict(db.execute("SELECT * FROM partner_round_snapshots WHERE partner='001'").fetchone())
+            count = db.execute("SELECT COUNT(*) c FROM partner_round_snapshots WHERE round_id='2026-003'").fetchone()['c']
+        self.assertEqual(before, after)  # byte-identisch, nichts rueckwirkend geaendert
+        self.assertEqual(count, 1)  # kein zweiter Snapshot entstanden
 
     def test_zero_position_partner_shows_all_dash_never_a_fake_checkmark(self):
         self.seed_sale('p1', 'order-a', 'PP / TEST')

@@ -19,12 +19,28 @@ Partnerzuordnung ist IMMER der exakte SKU-Präfix vor dem ersten Slash
 (core.normalized_partner()), nie ein startswith()-Präfixtreffer: "PM/ABC" -> PM,
 "PM/" -> PM, "PMX/ABC" -> PMX (und damit NICHT PM).
 
+Darüber liegt eine reine Identitätsschicht: PARTNER_ALIASES bildet einen
+historischen Präfix auf seinen kanonischen Partner ab ('001' -> 'PP', derselbe
+wirtschaftliche Partner). Die Abbildung ist ein EXAKTER Dict-Treffer, nie
+startswith - '001X' bleibt '001X' und wird niemals zu PP, genau wie PMX nie zu
+PM wird. Sie ändert ausschließlich den Partner-WERT (einen String) für
+Gruppierung, Karte, Snapshot und Abrechnung; SKU, position_key und jeder
+bereits gespeicherte historische Datensatz bleiben unangetastet.
+
 GB-2026-001/002 laufen weiter über ihr historisches Modell; die
 Vermittlungsprovision als eigener Beleg existiert erst ab FIRST_BROKER_ROUND.
 """
 from decimal import Decimal
 
-GROUP_A_PARTNERS = ('PP', 'BA', 'MK', '001')
+# Historischer SKU-Präfix -> kanonischer Partner. EXAKTER Schlüsselvergleich.
+PARTNER_ALIASES = {'001': 'PP'}
+
+# Die live geführten Gruppe-A-Partner (je eine Karte, ein Fall, eine Zahlung).
+# '001' steht hier bewusst NICHT mehr: es ist kein eigener Fall, sondern ein
+# Alias auf PP - group_for() löst es trotzdem korrekt auf, damit bereits
+# gespeicherte historische Datensätze mit dem Literal '001' unverändert als
+# Gruppe A gelesen werden.
+GROUP_A_PARTNERS = ('PP', 'BA', 'MK')
 
 # (Partnerabzug, Patrick-Vermittlungsprovision)
 GROUP_A_RATES = (Decimal('0.005'), Decimal('0'))
@@ -42,9 +58,20 @@ def code(partner):
     return str(partner or '').strip().upper()
 
 
+def canonical_partner(partner):
+    """Der kanonische Partner eines exakten Partnercodes/SKU-Präfixes.
+
+    Ausschließlich exakter Dict-Treffer in PARTNER_ALIASES, NIE startswith:
+    '001' -> 'PP', '001X' -> '001X', 'PP' -> 'PP'. Reine Werteabbildung -
+    weder SKU noch position_key noch ein gespeicherter Datensatz wird berührt.
+    """
+    name = code(partner)
+    return PARTNER_ALIASES.get(name, name)
+
+
 def group_for(partner):
     """Gruppe allein aus dem exakten Partnercode - kein Präfix-Heuristik."""
-    return 'Gruppe A' if code(partner) in GROUP_A_PARTNERS else 'Gruppe B'
+    return 'Gruppe A' if canonical_partner(partner) in GROUP_A_PARTNERS else 'Gruppe B'
 
 
 def conditions(partner, group=None):

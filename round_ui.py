@@ -131,8 +131,10 @@ def _status_icon(p):
 def render_round_matrix(result):
     """Compact icon-only matrix (✅ ❌ ➖ - no ⏳, no orange dot) - long
     explanatory text belongs to the blocker list underneath, never to a
-    matrix cell. Partner code '001' is just another column here, never
-    confused with a round id. ➖ is reserved strictly for "not required in
+    matrix cell. Der historische Präfix '001' hat hier KEINE eigene Spalte
+    mehr - er ist ein Alias auf PP (partner_conditions.PARTNER_ALIASES) und
+    erscheint als genau eine gemeinsame PP-Spalte, nie als zweiter Fall und
+    nie verwechselbar mit einer Round-ID. ➖ is reserved strictly for "not required in
     this round" (e.g. a 0-position partner); it is never used to paper over
     something that is actually still open."""
     import pandas as pd
@@ -236,7 +238,7 @@ def _historical_matrix(business, round_id):
         paid_ok = bool((block.paid_at.astype(bool) | block.closed_at.astype(bool)
                         | block[position_workflow.PAID_WITHOUT_INVOICE].astype(bool)).all())
         invoiced = any(
-            record['partner'] == partner and record['approved_at']
+            partner_conditions.canonical_partner(record['partner']) == partner and record['approved_at']
             and partner_keys.intersection(item['key'] for item in record['expected']['items'])
             for record in invoices)
         has_open_refund = bool(partner_keys & refund_origin_keys)
@@ -603,7 +605,7 @@ def _historical_partner_case(business, historical_round_ids, partner, invoices=N
         round_paid_ok = bool((rows.paid_at.astype(bool) | rows.closed_at.astype(bool)
                                | rows[position_workflow.PAID_WITHOUT_INVOICE].astype(bool)).all())
         round_invoiced = any(
-            record['partner'] == partner and record['approved_at']
+            partner_conditions.canonical_partner(record['partner']) == partner and record['approved_at']
             and partner_keys.intersection(item['key'] for item in record['expected']['items'])
             for record in invoices)
         if round_paid_ok and round_invoiced:
@@ -811,6 +813,11 @@ def render_partner_cards(business=None, payouts=None, orders=None, group=None):
             # kein eigener Workflow) - nur die Kondition wird sichtbar
             # ausgewiesen, aus der zentralen Konditionsquelle.
             st.caption(partner_conditions.label(partner, broker=True))
+            aliases = [a for a, canonical in partner_conditions.PARTNER_ALIASES.items() if canonical == partner]
+            if aliases:
+                # Ein Fall, eine Karte: der historische Präfix ist nur ein
+                # Herkunftshinweis, keine zweite Partnerkarte.
+                st.caption('inkl. historischem Präfix ' + ', '.join(sorted(aliases)))
             st.caption('Dokumente & vollständige Fallhistorie: Historie → Abrechnungsarchiv.')
             if cases:
                 st.markdown('**Offene ältere Fälle**')
@@ -967,7 +974,7 @@ def _historical_round_partner_cases(business, round_id, invoices=None, db=None):
         paid_ok = bool((block.paid_at.astype(bool) | block.closed_at.astype(bool)
                         | block[position_workflow.PAID_WITHOUT_INVOICE].astype(bool)).all())
         invoiced = any(
-            record['partner'] == partner and record['approved_at']
+            partner_conditions.canonical_partner(record['partner']) == partner and record['approved_at']
             and partner_keys.intersection(item['key'] for item in record['expected']['items'])
             for record in invoices)
         row_indices = block.index.tolist()
@@ -995,7 +1002,7 @@ def _historical_paid_marker(business, case):
 
 def _historical_matching_invoice(case, invoices):
     partner_keys = set(case['combined_keys'])
-    return next((record for record in invoices if record['partner'] == case['partner'] and record['approved_at']
+    return next((record for record in invoices if partner_conditions.canonical_partner(record['partner']) == case['partner'] and record['approved_at']
                  and partner_keys.intersection(item['key'] for item in record['expected']['items'])), None)
 
 

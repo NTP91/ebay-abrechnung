@@ -280,9 +280,11 @@ class ApiHoldTests(unittest.TestCase):
         from test_invoice_support import invoice_csv
         berlin = ZoneInfo('Europe/Berlin')
         base_cut = datetime(2026,9,20,23,59,tzinfo=berlin)
-        for partner in ['PP','BA','MK','001']:
-            with self.subTest(partner=partner), tempfile.TemporaryDirectory() as other, patch.multiple(core,PAYOUTS_DB_PATH=str(Path(other)/'Master_Payouts.csv'),ORDERS_DB_PATH=str(Path(other)/'Master_Orders.csv')):
-                self.seed(partner+' / 1')
+        # ('001','PP'): der historische Präfix laeuft vollstaendig als PP durch
+        # - ein Snapshot, eine Rechnung, eine Zahlung.
+        for prefix, partner in [('PP','PP'),('BA','BA'),('MK','MK'),('001','PP')]:
+            with self.subTest(partner=prefix), tempfile.TemporaryDirectory() as other, patch.multiple(core,PAYOUTS_DB_PATH=str(Path(other)/'Master_Payouts.csv'),ORDERS_DB_PATH=str(Path(other)/'Master_Orders.csv')):
+                self.seed(prefix+' / 1')
                 planner.commit_round(now=datetime(2026,9,18,12,0,tzinfo=berlin), base_cut=base_cut)
                 snap,created=partner_snapshot.finalize('2026-003',partner,now=datetime(2026,9,21,0,5,tzinfo=berlin))
                 self.assertTrue(created)

@@ -79,6 +79,21 @@ class ConditionsTests(unittest.TestCase):
             self.assertEqual(item['partner_rate'], Decimal('0.005'))
             self.assertEqual(item['broker_rate'], Decimal('0'))
 
+    def test_001_is_an_exact_alias_of_pp_and_001x_is_not(self):
+        import core
+        self.assertEqual(conditions.canonical_partner('001'), 'PP')
+        self.assertEqual(conditions.canonical_partner('PP'), 'PP')
+        # Exakter Vergleich, nie startswith - dieselbe Disziplin wie PM/PMX.
+        self.assertEqual(conditions.canonical_partner('001X'), '001X')
+        self.assertEqual(core.normalized_partner('PP / A'), 'PP')
+        self.assertEqual(core.normalized_partner('001 / B'), 'PP')
+        self.assertEqual(core.normalized_partner('001X / B'), '001X')
+        self.assertNotEqual(core.normalized_partner('001X / B'), 'PP')
+        # '001' bleibt als bereits gespeichertes historisches Literal lesbar
+        # und weiterhin Gruppe A - nichts wird rueckwirkend umgeschrieben.
+        self.assertEqual(conditions.group_for('001'), 'Gruppe A')
+        self.assertNotIn('001', conditions.GROUP_A_PARTNERS)
+
     def test_group_b_standard_is_three_five_and_three(self):
         for name in ('MH', 'NB', 'FS'):
             item = conditions.conditions(name)
