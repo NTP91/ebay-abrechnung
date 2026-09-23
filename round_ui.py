@@ -144,25 +144,59 @@ def render_round_matrix(result):
     st.dataframe(frame, use_container_width=True)
 
 
-def _historical_active_position_keys(round_id, db=None):
-    """position_keys assigned to this historical round with an actual active
-    claim - excludes role='hold_reserve' (group_b_rounds.py's own existing
-    schema: positions reserved for a not-yet-invoiced API hold, never an
-    active claim to begin with). A currently live API-Hold (api_holds.mask())
-    is filtered separately by the caller since it needs the live business
-    rows, not just this stored role column.
+def _historical_round_rows(business, round_id, db=None):
+    """Split ONE historical round's own assigned Bestellung rows into the three
+    states the rest of the app already distinguishes - no new business rule,
+    nothing recomputed:
+
+    active  - still a real, open claim: the unchanged ❌-based Rechnung/Zahlung
+              logic applies.
+    settled - provably nothing left to settle: role='zero_pair' AND a stored
+              group_b_round_refunds link AND a live Erlös_Brutto +
+              Erstattet_Brutto of exactly 0,00 € - the very same
+              sale + linked refund == 0 check group_b_rounds.bootstrap() itself
+              applies before it ever assigns that role. All three must hold: a
+              zero_pair that does NOT net out exactly (partial refund, drifted
+              amount, missing refund row) is deliberately NOT settled and stays
+              in `active` under the unchanged ❌ logic.
+    held    - role='hold_reserve' (group_b_rounds.py's own schema: reserved for
+              a not-yet-invoiced API hold, never an active claim) or a
+              currently live API-Hold (api_holds.mask(), the exact same line
+              group_b_rounds.overview() draws). Still unresolved - never
+              invoiced, paid or commissioned from here.
 
     db: an already-open core.ledger() connection to reuse (core.ledger()'s
     local-file FileLock is not reentrant) - opens its own otherwise."""
+    import api_holds
+
     def _query(connection):
         group_b_rounds.initialize(connection)
-        return {r[0] for r in connection.execute(
-            "SELECT position_key FROM group_b_round_positions WHERE round_id=? AND role != 'hold_reserve'",
-            (round_id,))}
+        assigned = {r['position_key']: r['role'] for r in connection.execute(
+            'SELECT position_key, role FROM group_b_round_positions WHERE round_id=?', (round_id,))}
+        linked = {r[0] for r in connection.execute(
+            'SELECT origin_position_key FROM group_b_round_refunds WHERE origin_position_key IN '
+            '(SELECT position_key FROM group_b_round_positions WHERE round_id=?)', (round_id,))}
+        return assigned, linked
+
     if db is not None:
-        return _query(db)
-    with core.ledger() as own_db:
-        return _query(own_db)
+        assigned, linked = _query(db)
+    else:
+        with core.ledger() as own_db:
+            assigned, linked = _query(own_db)
+    empty = business.iloc[0:0]
+    if not assigned or business.empty:
+        return empty, empty, empty
+    rows = business[business.position_key.isin(assigned) & (business.Art == 'Bestellung')]
+    if rows.empty:
+        return empty, empty, empty
+    reserved = rows.position_key.map(lambda key: assigned[key] == 'hold_reserve').values
+    held = rows[reserved | api_holds.mask(rows).values]
+    rest = rows.drop(held.index)
+    settled = rest[[assigned[row.position_key] == 'zero_pair' and row.position_key in linked
+                    and (Decimal(str(row['Erlös_Brutto'])) + Decimal(str(row.get('Erstattet_Brutto', 0) or 0))
+                         == Decimal(0))
+                    for _, row in rest.iterrows()]]
+    return rest.drop(settled.index), settled, held
 
 
 def _historical_matrix(business, round_id):
@@ -178,27 +212,26 @@ def _historical_matrix(business, round_id):
 
     Returns (frame_or_None, blockers, header_icon_or_'').
     """
-    import api_holds
     import partner_invoices
 
-    keys = _historical_active_position_keys(round_id)
-    if not keys or business.empty:
-        return None, [], ''
-    rows = business[business.position_key.isin(keys) & (business.Art == 'Bestellung')]
-    if not rows.empty:
-        # A currently-held position is its own separate, still-unresolved
-        # category everywhere else in the app (never counted as an open
-        # claim needing Rechnung/Zahlung here either) - group_b_rounds.
-        # overview() draws the exact same line via this same mask.
-        rows = rows[~api_holds.mask(rows)]
-    if rows.empty:
+    # Held and fully-neutralized positions are their own separate categories
+    # everywhere else in the app - see _historical_round_rows().
+    rows, settled, _held = _historical_round_rows(business, round_id)
+    if rows.empty and settled.empty:
         return None, [], ''
     invoices = partner_invoices.list_invoices()
     refund_cases = studio_view.partner_refund_cases(business)
     refund_origin_keys = set(refund_cases.position_key) if not refund_cases.empty else set()
 
     columns, blockers = {}, []
-    for partner, block in rows.groupby('Partner'):
+    for partner in sorted(set(rows.Partner) | set(settled.Partner)):
+        block = rows[rows.Partner == partner]
+        if block.empty:
+            # Nur restlos neutralisierte zero_pair-Positionen (Verkauf + eigene
+            # verknüpfte Erstattung = exakt 0,00 €): wirtschaftlich ist nichts
+            # offen, also weder Rechnung noch Zahlung erforderlich.
+            columns[partner] = ['➖', '➖', '➖', '➖', '➖']
+            continue
         partner_keys = set(block.position_key)
         paid_ok = bool((block.paid_at.astype(bool) | block.closed_at.astype(bool)
                         | block[position_workflow.PAID_WITHOUT_INVOICE].astype(bool)).all())
@@ -253,6 +286,24 @@ def render_historical_rounds(business=None):
                     st.caption('Offene Punkte: ' + ' · '.join(blockers))
             else:
                 st.caption('Keine zuordenbaren historischen Partnerpositionen.')
+            # Einbehaltene Positionen sind keine offenen Ansprüche und stehen
+            # deshalb in keiner Matrixspalte - sie dürfen aber auch nicht
+            # unsichtbar sein: sie werden aktiv als ungeklärt weitergeführt.
+            held = _historical_round_rows(business, round_id)[2]
+            if not held.empty:
+                import api_holds
+                live = api_holds.mask(held)
+                if live.any():
+                    st.caption(f'{int(live.sum())} Position(en) · Einbehalt in Klärung · noch kein Anspruch, '
+                               'keine Partnerrechnung, keine Partnerzahlung.')
+                if (~live).any():
+                    # Reserve ohne laufenden eBay-Einbehalt: der Einbehalt ist
+                    # offenbar aufgelöst, die Position bleibt aber per
+                    # group_b_round_positions dauerhaft dieser historischen
+                    # Runde zugeordnet - sie wandert nicht selbsttätig in eine
+                    # 2026-003+-Runde. Sichtbar machen statt verschweigen.
+                    st.caption(f'{int((~live).sum())} Position(en) · Einbehalt aufgelöst · weiterhin '
+                               f'{round_id} zugeordnet, manuelle Klärung erforderlich.')
             with core.ledger() as db:
                 invoice_ids = {r[0] for r in db.execute(
                     'SELECT invoice_id FROM partner_invoice_rounds WHERE round_id=?', (round_id,))}
@@ -508,19 +559,14 @@ def _historical_partner_case(business, historical_round_ids, partner, invoices=N
     which opens its own core.ledger() and would deadlock while `db` is
     still open here) - the caller fills 'amount' via _historical_case_
     amount() once this ledger block has closed."""
-    import api_holds
     import partner_invoices
 
     invoices = invoices if invoices is not None else partner_invoices.list_invoices()
     round_ids_used, row_indices = [], []
     paid_ok, invoiced = True, True
     for round_id in historical_round_ids:
-        keys = _historical_active_position_keys(round_id, db=db)
-        if not keys or business.empty:
-            continue
-        rows = business[business.position_key.isin(keys) & (business.Art == 'Bestellung') & (business.Partner == partner)]
-        if not rows.empty:
-            rows = rows[~api_holds.mask(rows)]
+        active, _settled, _held = _historical_round_rows(business, round_id, db=db)
+        rows = active[active.Partner == partner] if not active.empty else active
         if rows.empty:
             continue
         partner_keys = set(rows.position_key)
@@ -878,16 +924,9 @@ def _historical_round_partner_cases(business, round_id, invoices=None, db=None):
     _historical_matrix() (group_b_round_positions role/hold filtering,
     position_workflow's own paid_at/closed_at/paid_without_invoice_at,
     existing approved partner_invoices records) - no new derivation."""
-    import api_holds
     import partner_invoices
 
-    keys = _historical_active_position_keys(round_id, db=db)
-    if not keys or business.empty:
-        return []
-    rows = business[business.position_key.isin(keys) & (business.Art == 'Bestellung')]
-    if rows.empty:
-        return []
-    rows = rows[~api_holds.mask(rows)]
+    rows, _settled, _held = _historical_round_rows(business, round_id, db=db)
     if rows.empty:
         return []
     invoices = invoices if invoices is not None else partner_invoices.list_invoices()
